@@ -1,5 +1,3 @@
-import asyncio
-import inspect
 import json
 import logging
 import os
@@ -24,16 +22,6 @@ def get_config_path() -> Path:
     if env_path:
         return Path(env_path)
     return DEFAULT_CONFIG_PATH
-
-
-def process_task_text(text: str) -> str:
-    return f"Результат обработки: {text}"
-
-
-async def run_task_processing(text: str) -> str:
-    if inspect.iscoroutinefunction(process_task_text):
-        return await process_task_text(text)
-    return await asyncio.to_thread(process_task_text, text)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -78,24 +66,19 @@ async def task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    if not message or not message.text:
-        return
-
-    task_text = message.text.strip()
     if context.user_data.get("awaiting_task"):
         context.user_data["awaiting_task"] = False
-
-    try:
-        result = await run_task_processing(task_text)
-    except Exception:
-        LOGGER.exception("Failed to process task text")
-        await message.reply_text(
-            "Произошла ошибка при обработке запроса. Попробуйте ещё раз."
+        task_text = update.message.text.strip()
+        await update.message.reply_text(
+            "Задача получена.\n"
+            f"Содержание: {task_text}\n"
+            "Статус: очередь на обработку (демо)."
         )
         return
 
-    await message.reply_text(result)
+    await update.message.reply_text(
+        "Я понимаю команды /start, /help, /config, /task."
+    )
 
 
 def main() -> None:
