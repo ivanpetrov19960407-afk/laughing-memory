@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+import json
+
+from app.core.models import TaskDefinition
+
+
+class TaskError(Exception):
+    """Base error for task execution."""
+
+
+class InvalidPayloadError(TaskError):
+    """Raised when task payload cannot be processed."""
+
+
+def task_echo(payload: str) -> str:
+    return payload
+
+
+def task_upper(payload: str) -> str:
+    return payload.upper()
+
+
+def task_json_pretty(payload: str) -> str:
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise InvalidPayloadError("Payload is not valid JSON.") from exc
+    return json.dumps(parsed, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def get_task_registry() -> dict[str, TaskDefinition]:
+    return {
+        "echo": TaskDefinition(
+            name="echo",
+            description="Return payload as-is.",
+            handler=task_echo,
+        ),
+        "upper": TaskDefinition(
+            name="upper",
+            description="Uppercase text payload.",
+            handler=task_upper,
+        ),
+        "json_pretty": TaskDefinition(
+            name="json_pretty",
+            description="Pretty-print JSON payload.",
+            handler=task_json_pretty,
+        ),
+    }
