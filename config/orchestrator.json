@@ -21,10 +21,21 @@
             "json_pretty"
         ]
     },
+    "access": {
+        "allowed_user_ids": []
+    },
+    "rate_limits": {
+        "llm": {
+            "per_minute": 10,
+            "per_day": 200
+        }
+    },
     "llm": {
         "provider": "perplexity",
         "model": "sonar",
-        "system_prompt": "Ты полезный ассистент. Отвечай кратко и по делу."
+        "system_prompt": "Ты полезный ассистент. Отвечай кратко и по делу.",
+        "history_turns": 5,
+        "search_system_prompt": "Ты поисковый ассистент. Отвечай по фактам и добавляй ссылки (citations), если они есть."
     },
     "orchestrator": {
         "agent_id": "orchestrator_001",

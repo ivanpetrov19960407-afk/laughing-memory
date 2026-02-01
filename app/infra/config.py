@@ -18,6 +18,10 @@ class Settings:
     db_path: Path
     perplexity_api_key: str | None
     perplexity_base_url: str
+    allowed_user_ids: set[int] | None
+    llm_per_minute: int | None
+    llm_per_day: int | None
+    llm_history_turns: int | None
 
 
 def load_settings() -> Settings:
@@ -32,6 +36,10 @@ def load_settings() -> Settings:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     perplexity_api_key = os.getenv("PERPLEXITY_API_KEY") or None
     perplexity_base_url = os.getenv("PERPLEXITY_BASE_URL", "https://api.perplexity.ai")
+    allowed_user_ids = _parse_int_set(os.getenv("ALLOWED_USER_IDS"))
+    llm_per_minute = _parse_optional_int(os.getenv("LLM_PER_MINUTE"))
+    llm_per_day = _parse_optional_int(os.getenv("LLM_PER_DAY"))
+    llm_history_turns = _parse_optional_int(os.getenv("LLM_HISTORY_TURNS"))
 
     return Settings(
         bot_token=token,
@@ -39,6 +47,10 @@ def load_settings() -> Settings:
         db_path=db_path,
         perplexity_api_key=perplexity_api_key,
         perplexity_base_url=perplexity_base_url,
+        allowed_user_ids=allowed_user_ids,
+        llm_per_minute=llm_per_minute,
+        llm_per_day=llm_per_day,
+        llm_history_turns=llm_history_turns,
     )
 
 
@@ -49,3 +61,21 @@ def _load_dotenv() -> None:
         LOGGER.debug("python-dotenv is not installed; skipping .env loading")
         return
     load_dotenv()
+
+
+def _parse_int_set(value: str | None) -> set[int] | None:
+    if value is None:
+        return None
+    raw = [item.strip() for item in value.split(",") if item.strip()]
+    if not raw:
+        return None
+    return {int(item) for item in raw}
+
+
+def _parse_optional_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    return int(trimmed)
