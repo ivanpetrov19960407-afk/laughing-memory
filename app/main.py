@@ -27,6 +27,7 @@ def main() -> None:
         llm_client = PerplexityClient(
             api_key=settings.perplexity_api_key,
             base_url=settings.perplexity_base_url,
+            timeout_seconds=settings.perplexity_timeout_seconds,
         )
     config_access = config.get("access", {}).get("allowed_user_ids", [])
     if settings.allowed_user_ids is not None:
@@ -53,6 +54,7 @@ def main() -> None:
         access=access,
         rate_limiter=rate_limiter,
         llm_history_turns=settings.llm_history_turns,
+        llm_model=settings.perplexity_model,
     )
 
     application = Application.builder().token(settings.bot_token).build()

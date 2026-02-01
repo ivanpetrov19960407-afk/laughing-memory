@@ -41,13 +41,19 @@ pip install -r requirements.txt
 ## Запуск
 
 1. Создайте бота через [@BotFather](https://t.me/BotFather) и получите токен.
-2. Задайте переменные окружения (пример в `.env.example`).
+2. Получите ключ Perplexity:
+   - Откройте [Perplexity API keys](https://docs.perplexity.ai/docs/admin/api-key-management).
+   - Создайте ключ и сохраните его в `PERPLEXITY_API_KEY`.
+3. Задайте переменные окружения (пример в `.env.example`, можно скопировать в `.env`).
 
 Linux/macOS:
 ```bash
 export BOT_TOKEN="<ваш_токен>"
 export ORCHESTRATOR_CONFIG_PATH="config/orchestrator.json"
 export BOT_DB_PATH="data/bot.db"
+export PERPLEXITY_API_KEY="<ваш_ключ>"
+export PERPLEXITY_MODEL="sonar"
+export PERPLEXITY_TIMEOUT_SECONDS="15"
 export ALLOWED_USER_IDS="123456789,987654321"
 export LLM_PER_MINUTE="10"
 export LLM_PER_DAY="200"
@@ -59,6 +65,9 @@ Windows (PowerShell):
 $env:BOT_TOKEN="<ваш_токен>"
 $env:ORCHESTRATOR_CONFIG_PATH="config/orchestrator.json"
 $env:BOT_DB_PATH="data/bot.db"
+$env:PERPLEXITY_API_KEY="<ваш_ключ>"
+$env:PERPLEXITY_MODEL="sonar"
+$env:PERPLEXITY_TIMEOUT_SECONDS="15"
 $env:ALLOWED_USER_IDS="123456789,987654321"
 $env:LLM_PER_MINUTE="10"
 $env:LLM_PER_DAY="200"
@@ -70,12 +79,41 @@ $env:LLM_HISTORY_TURNS="5"
 python bot.py
 ```
 
+### Запуск в VSCode
+1. Установите зависимости в виртуальном окружении (`python -m venv .venv`).
+2. Активируйте окружение и установите зависимости (`pip install -r requirements.txt`).
+3. Создайте `.env` на основе `.env.example` и заполните ключи.
+4. Запустите `bot.py` через Run/Debug.
+
+### Перезапуск на VPS (systemd)
+```bash
+sudo systemctl restart <имя_сервиса>
+```
+
+Проверка логов:
+```bash
+sudo journalctl -u <имя_сервиса> -f
+```
+
 ## Примеры команд
 - `/task upper hello`
 - `/task json_pretty {"a":1}`
 - `/ask Привет`
 - `/search Новости`
 - `search Путин биография`
+
+## Команды бота
+- `/start` — приветствие и краткая инструкция.
+- `/help` — помощь.
+- `/ping` — проверка доступности.
+- `/tasks` — список задач.
+- `/task <name> <payload>` — выполнить локальную задачу.
+- `/last` — последняя запись истории.
+- `/ask <текст>` — вопрос в Perplexity.
+- `/search <текст>` — поиск с источниками (если есть).
+- `echo <текст>` — вернуть текст.
+- `upper <текст>` — текст в верхнем регистре.
+- `json_pretty <json>` — красивое форматирование JSON.
 
 ## Хранилище
 История запуска задач сохраняется в SQLite. Таблица: `task_executions` с полями timestamp, user_id, task_name, payload, result, status.

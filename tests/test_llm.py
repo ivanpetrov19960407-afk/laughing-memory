@@ -13,7 +13,14 @@ class FakeLLMClient:
     def __init__(self) -> None:
         self.api_key = "fake-key"
 
-    async def create_chat_completion(self, *, model: str, messages: list[dict], max_tokens=None):
+    async def create_chat_completion(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        max_tokens=None,
+        web_search_options=None,
+    ):
         return {"content": "hello from llm"}
 
 
@@ -22,7 +29,14 @@ class CaptureLLMClient:
         self.api_key = "fake-key"
         self.last_messages: list[dict] = []
 
-    async def create_chat_completion(self, *, model: str, messages: list[dict], max_tokens=None):
+    async def create_chat_completion(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        max_tokens=None,
+        web_search_options=None,
+    ):
         self.last_messages = messages
         return {"content": "ok"}
 
@@ -85,7 +99,7 @@ def test_orchestrator_rate_limit_blocks_second_request(tmp_path: Path) -> None:
 
     assert first.status == "success"
     assert second.status == "error"
-    assert "Лимит запросов" in second.result
+    assert "Слишком часто" in second.result
 
 
 def test_orchestrator_context_appends_history(tmp_path: Path) -> None:
