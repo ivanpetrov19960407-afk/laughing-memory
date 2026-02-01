@@ -29,7 +29,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = (
         "Привет! Я бот-оркестратор задач.\n"
         f"Конфигурация: {title} (v{version}).\n"
-        "Команды: /help, /ping, /tasks, /task, /last"
+        "Команды: /help, /ping, /tasks, /task, /last, /ask.\n"
+        "Можно писать обычные сообщения — отвечу через LLM."
     )
     await update.message.reply_text(message)
 
@@ -42,10 +43,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/ping — pong + версия/время\n"
         "/tasks — список задач\n"
         "/task <name> <payload> — выполнить задачу\n"
-        "/last — последняя задача\n\n"
+        "/last — последняя задача\n"
+        "/ask <текст> — задать вопрос LLM\n\n"
         "Примеры:\n"
         "/task upper hello\n"
-        "/task json_pretty {\"a\": 1}"
+        "/task json_pretty {\"a\": 1}\n"
+        "/ask Привет!\n"
+        "Или просто напишите сообщение без команды."
     )
 
 
@@ -110,6 +114,36 @@ async def last(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Payload: {record['payload']}\n"
         f"Ответ: {record['result']}"
     )
+
+
+async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    orchestrator = _get_orchestrator(context)
+    prompt = " ".join(context.args).strip()
+    if not prompt:
+        await update.message.reply_text("Введите текст запроса. Пример: /ask Привет")
+        return
+
+    user_id = update.effective_user.id if update.effective_user else 0
+    execution = await orchestrator.ask_llm(user_id, prompt)
+    if execution.status == "error":
+        await update.message.reply_text(f"Ошибка: {execution.result}")
+        return
+    await update.message.reply_text(execution.result)
+
+
+async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    orchestrator = _get_orchestrator(context)
+    message = update.message.text if update.message else ""
+    prompt = message.strip()
+    if not prompt:
+        return
+
+    user_id = update.effective_user.id if update.effective_user else 0
+    execution = await orchestrator.ask_llm(user_id, prompt)
+    if execution.status == "error":
+        await update.message.reply_text(f"Ошибка: {execution.result}")
+        return
+    await update.message.reply_text(execution.result)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

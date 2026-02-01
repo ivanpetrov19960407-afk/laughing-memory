@@ -8,6 +8,7 @@ from typing import Any
 
 from app.core.models import TaskExecutionResult
 from app.core.tasks import InvalidPayloadError, TaskDefinition, TaskError, get_task_registry
+from app.infra.llm import PerplexityClient
 from app.infra.storage import TaskStorage
 
 
@@ -28,10 +29,12 @@ class Orchestrator:
         config: dict[str, Any],
         storage: TaskStorage,
         registry: dict[str, TaskDefinition] | None = None,
+        llm_client: PerplexityClient | None = None,
     ) -> None:
         self._config = config
         self._storage = storage
         self._registry = registry or get_task_registry()
+        self._llm_client = llm_client
 
     @property
     def config(self) -> dict[str, Any]:
@@ -58,6 +61,43 @@ class Orchestrator:
         execution = TaskExecutionResult(
             task_name=task_name,
             payload=payload,
+            result=result,
+            status=status,
+            executed_at=executed_at,
+            user_id=user_id,
+        )
+        self._storage.record_execution(execution)
+        return execution
+
+    async def ask_llm(self, user_id: int, prompt: str) -> TaskExecutionResult:
+        executed_at = datetime.now(timezone.utc)
+        llm_client = self._llm_client
+        if llm_client is None or not getattr(llm_client, "api_key", None):
+            result = "LLM не настроен: PERPLEXITY_API_KEY"
+            status = "error"
+        else:
+            llm_config = self._config.get("llm", {})
+            model = llm_config.get("model", "sonar")
+            system_prompt = llm_config.get("system_prompt")
+            messages: list[dict[str, Any]] = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            try:
+                response = await llm_client.create_chat_completion(
+                    model=model,
+                    messages=messages,
+                )
+                result = response.get("content", "")
+                status = "success"
+            except Exception as exc:
+                result = str(exc)
+                status = "error"
+                LOGGER.warning("LLM request failed: %s", exc, exc_info=True)
+
+        execution = TaskExecutionResult(
+            task_name="ask",
+            payload=prompt,
             result=result,
             status=status,
             executed_at=executed_at,
