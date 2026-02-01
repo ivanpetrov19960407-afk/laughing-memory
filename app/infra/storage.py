@@ -64,6 +64,32 @@ class TaskStorage:
         )
         return cursor.fetchone()
 
+    def get_recent_executions(
+        self,
+        user_id: int,
+        *,
+        task_names: list[str] | None,
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        if limit <= 0:
+            return []
+        params: list[object] = [user_id]
+        sql = """
+            SELECT timestamp, task_name, payload, result, status
+            FROM task_executions
+            WHERE user_id = ?
+        """
+        if task_names:
+            placeholders = ", ".join("?" for _ in task_names)
+            sql += f" AND task_name IN ({placeholders})"
+            params.extend(task_names)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        cursor = self._connection.execute(sql, params)
+        rows = cursor.fetchall()
+        rows.reverse()
+        return rows
+
     def close(self) -> None:
         try:
             self._connection.close()

@@ -6,8 +6,10 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from app.bot import handlers
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
+from app.infra.access import AccessController
 from app.infra.config import load_settings
 from app.infra.llm import PerplexityClient
+from app.infra.rate_limit import RateLimiter
 from app.infra.storage import TaskStorage
 
 
@@ -26,7 +28,32 @@ def main() -> None:
             api_key=settings.perplexity_api_key,
             base_url=settings.perplexity_base_url,
         )
-    orchestrator = Orchestrator(config=config, storage=storage, llm_client=llm_client)
+    config_access = config.get("access", {}).get("allowed_user_ids", [])
+    if settings.allowed_user_ids is not None:
+        allowed_user_ids = settings.allowed_user_ids
+    elif isinstance(config_access, list) and config_access:
+        allowed_user_ids = {int(user_id) for user_id in config_access}
+    else:
+        allowed_user_ids = None
+    access = AccessController(allowed_user_ids=allowed_user_ids)
+
+    rate_limits = config.get("rate_limits", {}).get("llm", {})
+    per_minute = settings.llm_per_minute
+    if per_minute is None:
+        per_minute = rate_limits.get("per_minute")
+    per_day = settings.llm_per_day
+    if per_day is None:
+        per_day = rate_limits.get("per_day")
+    rate_limiter = RateLimiter(per_minute=per_minute, per_day=per_day)
+
+    orchestrator = Orchestrator(
+        config=config,
+        storage=storage,
+        llm_client=llm_client,
+        access=access,
+        rate_limiter=rate_limiter,
+        llm_history_turns=settings.llm_history_turns,
+    )
 
     application = Application.builder().token(settings.bot_token).build()
     application.bot_data["orchestrator"] = orchestrator
@@ -39,6 +66,7 @@ def main() -> None:
     application.add_handler(CommandHandler("task", handlers.task))
     application.add_handler(CommandHandler("last", handlers.last))
     application.add_handler(CommandHandler("ask", handlers.ask))
+    application.add_handler(CommandHandler("search", handlers.search))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
     application.add_error_handler(handlers.error_handler)
 
