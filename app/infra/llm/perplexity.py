@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,7 +23,7 @@ class PerplexityClient:
         api_key: str,
         base_url: str = "https://api.perplexity.ai",
         timeout_seconds: float = 30.0,
-        max_retries: int = 2,
+        max_retries: int = 1,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -56,26 +55,14 @@ class PerplexityClient:
             for attempt in range(self.max_retries + 1):
                 try:
                     response = await client.post(url, json=payload, headers=headers)
-                except httpx.RequestError as exc:
+                except httpx.TimeoutException as exc:
                     if attempt < self.max_retries:
-                        logging.warning(
-                            "Perplexity request failed (attempt %s/%s): %s",
-                            attempt + 1,
-                            self.max_retries + 1,
-                            exc,
-                        )
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(0.5 * (attempt + 1))
                         continue
-                    raise RuntimeError(f"Perplexity request failed: {exc}") from exc
+                    raise RuntimeError("Perplexity request timed out") from exc
 
                 if response.status_code >= 500 and attempt < self.max_retries:
-                    logging.warning(
-                        "Perplexity API error %s (attempt %s/%s), retrying.",
-                        response.status_code,
-                        attempt + 1,
-                        self.max_retries + 1,
-                    )
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.5 * (attempt + 1))
                     continue
                 break
 
