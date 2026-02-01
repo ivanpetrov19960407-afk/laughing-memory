@@ -18,6 +18,8 @@ class Settings:
     db_path: Path
     perplexity_api_key: str | None
     perplexity_base_url: str
+    perplexity_model: str
+    perplexity_timeout_seconds: float
     allowed_user_ids: set[int] | None
     llm_per_minute: int | None
     llm_per_day: int | None
@@ -36,6 +38,8 @@ def load_settings() -> Settings:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     perplexity_api_key = os.getenv("PERPLEXITY_API_KEY") or None
     perplexity_base_url = os.getenv("PERPLEXITY_BASE_URL", "https://api.perplexity.ai")
+    perplexity_model = os.getenv("PERPLEXITY_MODEL", "sonar")
+    perplexity_timeout_seconds = _parse_optional_float(os.getenv("PERPLEXITY_TIMEOUT_SECONDS"), 15.0)
     allowed_user_ids = _parse_int_set(os.getenv("ALLOWED_USER_IDS"))
     llm_per_minute = _parse_optional_int(os.getenv("LLM_PER_MINUTE"))
     llm_per_day = _parse_optional_int(os.getenv("LLM_PER_DAY"))
@@ -47,6 +51,8 @@ def load_settings() -> Settings:
         db_path=db_path,
         perplexity_api_key=perplexity_api_key,
         perplexity_base_url=perplexity_base_url,
+        perplexity_model=perplexity_model,
+        perplexity_timeout_seconds=perplexity_timeout_seconds,
         allowed_user_ids=allowed_user_ids,
         llm_per_minute=llm_per_minute,
         llm_per_day=llm_per_day,
@@ -79,3 +85,12 @@ def _parse_optional_int(value: str | None) -> int | None:
     if not trimmed:
         return None
     return int(trimmed)
+
+
+def _parse_optional_float(value: str | None, default: float) -> float:
+    if value is None:
+        return default
+    trimmed = value.strip()
+    if not trimmed:
+        return default
+    return float(trimmed)

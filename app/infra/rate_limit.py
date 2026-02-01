@@ -26,7 +26,7 @@ class RateLimiter:
             cutoff = now.timestamp() - 60
             state.minute_hits = [hit for hit in state.minute_hits if hit.timestamp() > cutoff]
             if len(state.minute_hits) >= self._per_minute:
-                return False, "Лимит запросов. Попробуйте позже."
+                return False, "Слишком часто, попробуйте позже."
             state.minute_hits.append(now)
 
         if self._per_day and self._per_day > 0:
@@ -35,7 +35,7 @@ class RateLimiter:
                 state.day = today
                 state.day_count = 0
             if state.day_count >= self._per_day:
-                return False, "Лимит запросов. Попробуйте позже."
+                return False, "Слишком часто, попробуйте позже."
             state.day_count += 1
 
         return True, ""
