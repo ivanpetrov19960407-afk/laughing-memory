@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from app.core.orchestrator import Orchestrator
@@ -20,7 +21,10 @@ def _get_storage(context: ContextTypes.DEFAULT_TYPE) -> TaskStorage:
     return context.application.bot_data["storage"]
 
 
-def _split_text(text: str, max_len: int = 4000) -> list[str]:
+TELEGRAM_MESSAGE_LIMIT = 4096
+
+
+def _split_text(text: str, max_len: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
     chunks: list[str] = []
     remaining = text or ""
     while remaining:
@@ -45,7 +49,16 @@ async def _reply_long(update: Update, text: str) -> None:
     if not update.message:
         return
     for chunk in _split_text(text):
-        await update.message.reply_text(chunk)
+        try:
+            await update.message.reply_text(chunk)
+        except BadRequest as exc:
+            if "Message is too long" in str(exc):
+                LOGGER.warning("Telegram rejected message chunk as too long; splitting further.")
+                for subchunk in _split_text(chunk, max_len=2000):
+                    await update.message.reply_text(subchunk)
+                continue
+            LOGGER.exception("Failed to send message chunk: %s", exc)
+            break
 
 
 async def _guard_access(update: Update, orchestrator: Orchestrator) -> bool:
@@ -69,7 +82,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Привет! Я бот-оркестратор задач.\n"
         f"Конфигурация: {title} (v{version}).\n"
         "Команды: /help, /ping, /tasks, /task, /last, /ask, /search.\n"
-        "Можно писать обычные сообщения — отвечу через LLM."
+        "Можно писать обычные сообщения — отвечу через LLM.\n"
+        "Локальные команды: echo, upper, json_pretty."
     )
     await _reply_long(update, message + access_note)
 
@@ -95,6 +109,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/task json_pretty {\"a\": 1}\n"
         "/ask Привет!\n"
         "search Путин биография\n"
+        "echo привет\n"
+        "upper привет\n"
+        "json_pretty {\"a\":1}\n"
         "Или просто напишите сообщение без команды."
         + access_note
     )
