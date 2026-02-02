@@ -218,7 +218,8 @@ class Orchestrator:
                 "Слишком длинный запрос. Попробуйте короче.",
             )
         LOGGER.info("Incoming message: user_id=%s text_preview=%s", user_id, trimmed[:200])
-        lower = trimmed.lower()\n        # Explicit task shortcut: !<task> <payload>\n        # Example: !echo hello\n        if trimmed.startswith("!"):\n            payload = trimmed[1:].strip()\n            if not payload:\n                return self._task_parse_error(user_id, text)\n            parts = payload.split(maxsplit=1)\n            if len(parts) < 2:\n                return self._task_parse_error(user_id, text)\n            task_name, task_payload = parts[0], parts[1].strip()\n            if not task_payload:\n                return self._task_parse_error(user_id, text)\n            LOGGER.info("Routing: user_id=%s action=task name=%s (bang)", user_id, task_name)\n            return self.execute_task(user_id, task_name, task_payload)\n        if lower.startswith("task ") or lower.startswith("task:"):
+        lower = trimmed.lower()
+        if lower.startswith("task ") or lower.startswith("task:"):
             payload = trimmed[5:] if lower.startswith("task ") else trimmed[5:]
             payload = payload.strip()
             if not payload:
