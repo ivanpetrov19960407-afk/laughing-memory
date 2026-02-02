@@ -37,10 +37,14 @@ def chunk_text(text: str, max_len: int = MAX_CHUNK_SIZE) -> list[str]:
     return chunks
 
 
-async def _send_chunks(message, chunks: Iterable[str]) -> None:
+async def _send_chunks(message, chunks: Iterable[str], reply_markup=None) -> None:
+    first = True
     for chunk in chunks:
         try:
-            await message.reply_text(chunk)
+            if first and reply_markup is not None:
+                await message.reply_text(chunk, reply_markup=reply_markup)
+            else:
+                await message.reply_text(chunk)
         except BadRequest as exc:
             if "Message is too long" in str(exc):
                 LOGGER.warning("Telegram rejected message chunk as too long; splitting further.")
@@ -49,18 +53,20 @@ async def _send_chunks(message, chunks: Iterable[str]) -> None:
                 continue
             LOGGER.exception("Failed to send message chunk: %s", exc)
             break
+        first = False
 
 
 async def safe_send_text(
     update: Update | None,
     context: ContextTypes.DEFAULT_TYPE | None,
     text: str | None,
+    reply_markup=None,
 ) -> int:
     message = update.effective_message if update else None
     if not message:
         return 0
     payload = text if text and text.strip() else EMPTY_MESSAGE_PLACEHOLDER
-    await _send_chunks(message, chunk_text(payload, max_len=MAX_CHUNK_SIZE))
+    await _send_chunks(message, chunk_text(payload, max_len=MAX_CHUNK_SIZE), reply_markup=reply_markup)
     add_response_size(context, len(payload))
     return len(payload)
 

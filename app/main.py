@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import defaultdict, deque
@@ -9,6 +10,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from app.bot import handlers
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
 from app.infra.access import AccessController
+from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.config import load_settings
 from app.infra.llm import OpenAIClient, PerplexityClient
 from app.infra.rate_limit import RateLimiter as LLMRateLimiter
@@ -56,8 +58,15 @@ def main() -> None:
             base_url=settings.perplexity_base_url,
             timeout_seconds=settings.perplexity_timeout_seconds,
         )
-    allowed_user_ids = settings.allowed_user_ids
-    access = AccessController(allowed_user_ids=allowed_user_ids)
+    config_allowlist_ids = extract_allowed_user_ids(config)
+    initial_allowlist_ids = settings.allowed_user_ids or config_allowlist_ids
+    allowlist_store = AllowlistStore(
+        path=settings.allowlist_path,
+        initial_user_ids=initial_allowlist_ids,
+    )
+    asyncio.run(allowlist_store.load())
+    admin_user_ids = settings.admin_user_ids or settings.allowed_user_ids or config_allowlist_ids
+    access = AccessController(allowlist=allowlist_store, admin_user_ids=admin_user_ids)
 
     rate_limits = config.get("rate_limits", {}).get("llm", {})
     per_minute = settings.llm_per_minute
@@ -81,7 +90,8 @@ def main() -> None:
     application = Application.builder().token(settings.bot_token).build()
     application.bot_data["orchestrator"] = orchestrator
     application.bot_data["storage"] = storage
-    application.bot_data["allowed_user_ids"] = allowed_user_ids
+    application.bot_data["allowlist_store"] = allowlist_store
+    application.bot_data["admin_user_ids"] = admin_user_ids
     application.bot_data["rate_limiter"] = RateLimiter(
         per_minute=settings.rate_limit_per_minute,
         per_day=settings.rate_limit_per_day,
@@ -105,10 +115,15 @@ def main() -> None:
     application.add_handler(CommandHandler("facts_on", handlers.facts_on))
     application.add_handler(CommandHandler("facts_off", handlers.facts_off))
     application.add_handler(CommandHandler("image", handlers.image))
+    application.add_handler(CommandHandler("allow", handlers.allow))
+    application.add_handler(CommandHandler("deny", handlers.deny))
+    application.add_handler(CommandHandler("allowlist", handlers.allowlist))
+    application.add_handler(CommandHandler("menu", handlers.menu_command))
     application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
     application.add_handler(CommandHandler("health", handlers.health))
     application.add_handler(CommandHandler("status", handlers.health))
     application.add_handler(MessageHandler(filters.PHOTO, handlers.photo))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.menu_button))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
     application.add_error_handler(handlers.error_handler)
 

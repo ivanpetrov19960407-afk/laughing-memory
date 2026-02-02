@@ -9,6 +9,7 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path("config/orchestrator.json")
 DEFAULT_DB_PATH = Path("data/bot.db")
+DEFAULT_ALLOWLIST_PATH = Path("data/allowlist.json")
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,8 @@ class Settings:
     perplexity_model: str
     perplexity_timeout_seconds: float
     allowed_user_ids: set[int]
+    admin_user_ids: set[int]
+    allowlist_path: Path
     llm_per_minute: int | None
     llm_per_day: int | None
     llm_history_turns: int | None
@@ -55,8 +58,9 @@ def load_settings() -> Settings:
     perplexity_timeout_seconds = _parse_optional_float(os.getenv("PERPLEXITY_TIMEOUT_SECONDS"), 15.0)
     allowed_user_ids_raw = os.getenv("ALLOWED_USER_IDS")
     allowed_user_ids = _parse_int_set(allowed_user_ids_raw)
-    if not allowed_user_ids:
-        LOGGER.error("ALLOWED_USER_IDS is empty; denying all users.")
+    admin_user_ids_raw = os.getenv("ADMIN_USER_IDS")
+    admin_user_ids = _parse_int_set(admin_user_ids_raw)
+    allowlist_path = Path(os.getenv("ALLOWLIST_PATH", DEFAULT_ALLOWLIST_PATH))
     llm_per_minute = _parse_optional_int(os.getenv("LLM_PER_MINUTE"))
     llm_per_day = _parse_optional_int(os.getenv("LLM_PER_DAY"))
     llm_history_turns = _parse_optional_int(os.getenv("LLM_HISTORY_TURNS"))
@@ -79,6 +83,8 @@ def load_settings() -> Settings:
         perplexity_model=perplexity_model,
         perplexity_timeout_seconds=perplexity_timeout_seconds,
         allowed_user_ids=allowed_user_ids,
+        admin_user_ids=admin_user_ids,
+        allowlist_path=allowlist_path,
         llm_per_minute=llm_per_minute,
         llm_per_day=llm_per_day,
         llm_history_turns=llm_history_turns,
