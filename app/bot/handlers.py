@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import io
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -8,8 +10,11 @@ from functools import wraps
 from telegram import Message, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
+from PIL import Image
+import pytesseract
 
 from app.core.orchestrator import Orchestrator
+from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limit import RateLimiter
 from app.infra.storage import TaskStorage
 
@@ -38,6 +43,10 @@ def _get_history(context: ContextTypes.DEFAULT_TYPE) -> dict[int, list[tuple[dat
 
 def _get_message_limit(context: ContextTypes.DEFAULT_TYPE) -> int:
     return context.application.bot_data["message_limit"]
+
+
+def _get_openai_client(context: ContextTypes.DEFAULT_TYPE) -> OpenAIClient | None:
+    return context.application.bot_data.get("openai_client")
 
 
 def split_text(text: str, max_len: int) -> list[str]:
@@ -158,8 +167,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = (
         "Привет! Я бот-оркестратор задач.\n"
         f"Конфигурация: {title} (v{version}).\n"
-        "Команды: /help, /ping, /tasks, /task, /last, /ask, /search.\n"
-        "Можно писать обычные сообщения — верну контекст диалога.\n"
+        "Команды: /help, /ping, /tasks, /task, /last, /ask, /search, /image.\n"
+        "Можно писать обычные сообщения — верну ответ LLM.\n"
+        "Отправьте фото, чтобы распознать текст.\n"
         "Локальные команды: echo, upper, json_pretty.\n"
         "Служебная команда: /selfcheck."
     )
@@ -183,8 +193,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/tasks — список задач\n"
         "/task <name> <payload> — выполнить задачу\n"
         "/last — последняя задача\n"
-        "/ask <текст> — тестовый ответ с контекстом\n"
-        "/search <текст> — тестовый ответ с контекстом\n"
+        "/ask <текст> — ответ LLM\n"
+        "/search <текст> — ответ LLM с поиском\n"
+        "/image <описание> — генерация изображения\n"
         "/selfcheck — проверка конфигурации\n\n"
         "Примеры:\n"
         "/task upper hello\n"
@@ -194,7 +205,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "echo привет\n"
         "upper привет\n"
         "json_pretty {\"a\":1}\n"
-        "Или просто напишите сообщение без команды."
+        "Или просто напишите сообщение без команды.\n"
+        "Отправьте фото, чтобы распознать текст."
         + access_note,
         _get_message_limit(context),
     )
@@ -296,6 +308,7 @@ async def last(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @_with_error_handling
 async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    orchestrator = _get_orchestrator(context)
     if not await _guard_access(update, context):
         return
     prompt = " ".join(context.args).strip()
@@ -306,11 +319,14 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             _get_message_limit(context),
         )
         return
-    await _reply_with_history(update, context, prompt)
+    user_id = update.effective_user.id if update.effective_user else 0
+    result = await orchestrator.ask_llm(user_id, prompt)
+    await safe_reply(update, result.result, _get_message_limit(context))
 
 
 @_with_error_handling
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    orchestrator = _get_orchestrator(context)
     if not await _guard_access(update, context):
         return
     prompt = " ".join(context.args).strip()
@@ -321,18 +337,75 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             _get_message_limit(context),
         )
         return
-    await _reply_with_history(update, context, prompt)
+    user_id = update.effective_user.id if update.effective_user else 0
+    result = await orchestrator.search_llm(user_id, prompt)
+    await safe_reply(update, result.result, _get_message_limit(context))
+
+
+def _extract_text_from_image(image_bytes: bytes) -> str:
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        return pytesseract.image_to_string(image).strip()
+
+
+@_with_error_handling
+async def image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    prompt = " ".join(context.args).strip()
+    if not prompt:
+        await safe_reply(
+            update,
+            "Укажите описание изображения. Пример: /image Слон в космосе",
+            _get_message_limit(context),
+        )
+        return
+    openai_client = _get_openai_client(context)
+    if openai_client is None or not openai_client.api_key:
+        await safe_reply(update, "Генерация изображений не настроена.", _get_message_limit(context))
+        return
+    response = await openai_client.create_image(prompt=prompt)
+    data = response.get("data") or []
+    image_url = data[0].get("url") if data else None
+    if not image_url:
+        await safe_reply(update, "Не удалось получить изображение.", _get_message_limit(context))
+        return
+    if update.message:
+        await update.message.reply_photo(image_url)
+
+
+@_with_error_handling
+async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    if not update.message or not update.message.photo:
+        return
+    file = await update.message.photo[-1].get_file()
+    image_bytes = await file.download_to_memory()
+    loop = asyncio.get_running_loop()
+    try:
+        text = await loop.run_in_executor(None, _extract_text_from_image, bytes(image_bytes))
+    except Exception:
+        LOGGER.exception("OCR failed")
+        await safe_reply(update, "Не удалось распознать текст.", _get_message_limit(context))
+        return
+    if not text:
+        await safe_reply(update, "Текст не найден.", _get_message_limit(context))
+        return
+    await safe_reply(update, text, _get_message_limit(context))
 
 
 @_with_error_handling
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    orchestrator = _get_orchestrator(context)
     if not await _guard_access(update, context):
         return
     message = update.message.text if update.message else ""
     prompt = message.strip()
     if not prompt:
         return
-    await _reply_with_history(update, context, prompt)
+    user_id = update.effective_user.id if update.effective_user else 0
+    result = await orchestrator.handle_text(user_id, prompt)
+    await safe_reply(update, result.result, _get_message_limit(context))
 
 
 @_with_error_handling

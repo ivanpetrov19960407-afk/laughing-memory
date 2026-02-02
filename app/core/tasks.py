@@ -30,6 +30,7 @@ def task_json_pretty(payload: str) -> str:
 
 
 def get_task_registry() -> dict[str, TaskDefinition]:
+    # TODO: C extension tasks can be registered here (e.g. via ctypes or a custom Python module).
     return {
         "echo": TaskDefinition(
             name="echo",

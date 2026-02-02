@@ -10,8 +10,7 @@ from typing import Any
 from app.core.models import TaskExecutionResult
 from app.core.tasks import InvalidPayloadError, TaskDefinition, TaskError, get_task_registry
 from app.infra.access import AccessController
-from app.infra.llm import PerplexityClient
-from app.infra.llm.perplexity import PerplexityAPIError
+from app.infra.llm import LLMAPIError, LLMClient
 from app.infra.rate_limit import RateLimiter
 from app.infra.storage import TaskStorage
 
@@ -35,7 +34,7 @@ class Orchestrator:
         config: dict[str, Any],
         storage: TaskStorage,
         registry: dict[str, TaskDefinition] | None = None,
-        llm_client: PerplexityClient | None = None,
+        llm_client: LLMClient | None = None,
         access: AccessController | None = None,
         rate_limiter: RateLimiter | None = None,
         llm_history_turns: int | None = None,
@@ -121,7 +120,7 @@ class Orchestrator:
                 user_id,
                 mode,
                 trimmed,
-                "LLM не настроен: PERPLEXITY_API_KEY",
+                "LLM не настроен: OPENAI_API_KEY или PERPLEXITY_API_KEY",
                 executed_at,
             )
         else:
@@ -172,11 +171,11 @@ class Orchestrator:
                             lines.append(f"{index}) {url}")
                         result = f"{result}\n\n" + "\n".join(lines) if result else "\n".join(lines)
                 status = "success"
-            except PerplexityAPIError as exc:
+            except LLMAPIError as exc:
                 result = self._map_llm_error(exc)
                 status = "error"
                 LOGGER.warning(
-                    "Perplexity API error: status=%s user_id=%s",
+                    "LLM API error: status=%s user_id=%s",
                     exc.status_code,
                     user_id,
                 )
@@ -351,7 +350,7 @@ class Orchestrator:
         self._storage.record_execution(execution)
         return execution
 
-    def _map_llm_error(self, exc: PerplexityAPIError) -> str:
+    def _map_llm_error(self, exc: LLMAPIError) -> str:
         if exc.status_code in {401, 403}:
             return "Ключ не настроен или недействителен."
         if exc.status_code == 429:

@@ -9,7 +9,7 @@ from app.bot import handlers
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
 from app.infra.access import AccessController
 from app.infra.config import load_settings
-from app.infra.llm import PerplexityClient
+from app.infra.llm import OpenAIClient, PerplexityClient
 from app.infra.rate_limit import RateLimiter
 from app.infra.storage import TaskStorage
 
@@ -37,7 +37,16 @@ def main() -> None:
     config = load_orchestrator_config(settings.orchestrator_config_path)
     storage = TaskStorage(settings.db_path)
     llm_client = None
-    if settings.perplexity_api_key:
+    openai_client = None
+    if settings.openai_api_key:
+        openai_client = OpenAIClient(
+            api_key=settings.openai_api_key,
+            model=settings.openai_model,
+            image_model=settings.openai_image_model,
+            timeout_seconds=settings.openai_timeout_seconds,
+        )
+        llm_client = openai_client
+    elif settings.perplexity_api_key:
         llm_client = PerplexityClient(
             api_key=settings.perplexity_api_key,
             base_url=settings.perplexity_base_url,
@@ -62,7 +71,7 @@ def main() -> None:
         access=access,
         rate_limiter=rate_limiter,
         llm_history_turns=settings.llm_history_turns,
-        llm_model=settings.perplexity_model,
+        llm_model=settings.openai_model if openai_client else settings.perplexity_model,
     )
 
     application = Application.builder().token(settings.bot_token).build()
@@ -77,6 +86,7 @@ def main() -> None:
     application.bot_data["history_size"] = settings.history_size
     application.bot_data["message_limit"] = settings.telegram_message_limit
     application.bot_data["settings"] = settings
+    application.bot_data["openai_client"] = openai_client
 
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("help", handlers.help_command))
@@ -86,7 +96,9 @@ def main() -> None:
     application.add_handler(CommandHandler("last", handlers.last))
     application.add_handler(CommandHandler("ask", handlers.ask))
     application.add_handler(CommandHandler("search", handlers.search))
+    application.add_handler(CommandHandler("image", handlers.image))
     application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
+    application.add_handler(MessageHandler(filters.PHOTO, handlers.photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
     application.add_error_handler(handlers.error_handler)
 
