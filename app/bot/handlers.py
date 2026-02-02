@@ -202,6 +202,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 @_with_error_handling
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        f"user_id={update.effective_user.id} chat_id={update.effective_chat.id}"
+    )
+    return
+
+
     orchestrator = _get_orchestrator(context)
     if not await _guard_access(update, context):
         return

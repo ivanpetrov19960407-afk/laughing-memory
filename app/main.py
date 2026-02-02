@@ -18,7 +18,20 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
+
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+    logging.getLogger("httpx").disabled = True
+    logging.getLogger("httpcore").disabled = True
+    logging.getLogger("httpx").propagate = False
+    logging.getLogger("httpcore").propagate = False
+
+
+
+
 
     settings = load_settings()
     config = load_orchestrator_config(settings.orchestrator_config_path)
