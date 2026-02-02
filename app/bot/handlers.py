@@ -15,7 +15,9 @@ from telegram.ext import ContextTypes
 from PIL import Image
 import pytesseract
 
+from app.bot import menu
 from app.core.orchestrator import Orchestrator, OrchestratorResult
+from app.infra.allowlist import AllowlistStore
 from app.infra.messaging import safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limiter import RateLimiter
@@ -33,8 +35,12 @@ def _get_storage(context: ContextTypes.DEFAULT_TYPE) -> TaskStorage:
     return context.application.bot_data["storage"]
 
 
-def _get_allowed_user_ids(context: ContextTypes.DEFAULT_TYPE) -> set[int]:
-    return context.application.bot_data["allowed_user_ids"]
+def _get_allowlist_store(context: ContextTypes.DEFAULT_TYPE) -> AllowlistStore:
+    return context.application.bot_data["allowlist_store"]
+
+
+def _get_admin_user_ids(context: ContextTypes.DEFAULT_TYPE) -> set[int]:
+    return context.application.bot_data["admin_user_ids"]
 
 
 def _get_rate_limiter(context: ContextTypes.DEFAULT_TYPE) -> RateLimiter:
@@ -104,15 +110,15 @@ def _format_uptime(start_time: float) -> str:
 async def _guard_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user = update.effective_user
     user_id = user.id if user else 0
-    allowed_user_ids = _get_allowed_user_ids(context)
-    if user_id not in allowed_user_ids:
+    if not _is_allowed_user(context, user_id):
         LOGGER.warning(
-            "Access denied: user_id=%s username=%s",
+            "Access denied: user_id=%s username=%s chat_id=%s reason=not_allowed",
             user_id,
             user.username if user else "unknown",
+            update.effective_chat.id if update.effective_chat else "unknown",
         )
         set_status(context, "error")
-        await safe_send_text(update, context, "Доступ запрещён.")
+        await _send_access_denied(update, context, user_id)
         return False
     rate_limiter = _get_rate_limiter(context)
     result = await rate_limiter.check(user_id)
@@ -126,6 +132,33 @@ async def _guard_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
         await safe_send_text(update, context, message)
         return False
     return True
+
+
+def _is_allowed_user(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    if user_id in _get_admin_user_ids(context):
+        return True
+    return _get_allowlist_store(context).is_allowed(user_id)
+
+
+def _is_admin(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    return user_id in _get_admin_user_ids(context)
+
+
+async def _send_access_denied(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+) -> None:
+    await safe_send_text(update, context, f"Доступ запрещён.\nТвой user_id: {user_id}")
+
+
+async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user_id = update.effective_user.id if update.effective_user else 0
+    if _is_admin(context, user_id):
+        return True
+    set_status(context, "error")
+    await safe_send_text(update, context, "Недостаточно прав.")
+    return False
 
 
 def _append_history(
@@ -204,7 +237,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Локальные команды: echo, upper, json_pretty.\n"
         "Служебные команды: /selfcheck, /health."
     )
-    await safe_send_text(update, context, message + access_note)
+    await menu.show_menu(update, context, message + access_note)
 
 
 @_with_error_handling
@@ -215,12 +248,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     access_note = ""
     if orchestrator.is_access_restricted():
         access_note = "\n\nДоступ ограничен whitelist пользователей."
-    await safe_send_text(
-        update,
-        context,
+    await safe_send_text(update, context, _build_help_text(access_note))
+
+
+def _build_help_text(access_note: str) -> str:
+    return (
         "Доступные команды:\n"
         "/start — приветствие и статус\n"
         "/help — помощь\n"
+        "/menu — показать меню\n"
         "/ping — pong + версия/время\n"
         "/tasks — список задач\n"
         "/task <name> <payload> — выполнить задачу\n"
@@ -232,7 +268,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/facts_off — выключить режим фактов\n"
         "/image <описание> — генерация изображения\n"
         "/selfcheck — проверка конфигурации\n"
-        "/health — диагностика сервера\n\n"
+        "/health — диагностика сервера\n"
+        "/allow <user_id> — добавить в whitelist (админ)\n"
+        "/deny <user_id> — удалить из whitelist (админ)\n"
+        "/allowlist — список whitelist (админ)\n\n"
         "Примеры:\n"
         "/task upper hello\n"
         "/task json_pretty {\"a\": 1}\n"
@@ -244,7 +283,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "json_pretty {\"a\":1}\n"
         "Или просто напишите сообщение без команды.\n"
         "Отправьте фото, чтобы распознать текст."
-        + access_note,
+        + access_note
+    )
+
+
+def _build_health_message(context: ContextTypes.DEFAULT_TYPE) -> str:
+    settings = context.application.bot_data["settings"]
+    rate_limiter = _get_rate_limiter(context)
+    start_time = context.application.bot_data.get("start_time", time.monotonic())
+    uptime = _format_uptime(start_time)
+    python_version = sys.version.split()[0]
+    telegram_version = telegram.__version__
+    return (
+        "Health:\n"
+        f"Uptime: {uptime}\n"
+        f"Rate limits: {rate_limiter.per_minute}/min, {rate_limiter.per_day}/day\n"
+        f"Python: {python_version}\n"
+        f"Telegram: {telegram_version}\n"
+        f"Orchestrator config: {settings.orchestrator_config_path}\n"
+        f"Rate limit cache: {rate_limiter.cache_size} users"
     )
 
 
@@ -435,6 +492,106 @@ async def facts_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_send_text(update, context, "Режим фактов выключён. Можно отвечать без источников.")
 
 
+@_with_error_handling
+async def allow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    if not context.args:
+        await safe_send_text(update, context, "Укажите user_id. Пример: /allow 123456")
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await safe_send_text(update, context, "Некорректный user_id. Пример: /allow 123456")
+        return
+    allowlist_store = _get_allowlist_store(context)
+    added = await allowlist_store.add(target_id)
+    admin_id = update.effective_user.id if update.effective_user else 0
+    LOGGER.info("Allowlist update: admin_id=%s target_id=%s action=allow", admin_id, target_id)
+    if added:
+        await safe_send_text(update, context, f"Пользователь {target_id} добавлен в whitelist.")
+    else:
+        await safe_send_text(update, context, f"Пользователь {target_id} уже в whitelist.")
+
+
+@_with_error_handling
+async def deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    if not context.args:
+        await safe_send_text(update, context, "Укажите user_id. Пример: /deny 123456")
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await safe_send_text(update, context, "Некорректный user_id. Пример: /deny 123456")
+        return
+    allowlist_store = _get_allowlist_store(context)
+    removed = await allowlist_store.remove(target_id)
+    admin_id = update.effective_user.id if update.effective_user else 0
+    LOGGER.info("Allowlist update: admin_id=%s target_id=%s action=deny", admin_id, target_id)
+    if removed:
+        await safe_send_text(update, context, f"Пользователь {target_id} удалён из whitelist.")
+    else:
+        await safe_send_text(update, context, f"Пользователь {target_id} не найден в whitelist.")
+
+
+@_with_error_handling
+async def allowlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    snapshot = _get_allowlist_store(context).snapshot()
+    if not snapshot.allowed_user_ids:
+        await safe_send_text(update, context, "Whitelist пуст.")
+        return
+    lines = [str(user_id) for user_id in snapshot.allowed_user_ids]
+    message = "Whitelist пользователей:\n" + "\n".join(lines) + f"\n\nВсего: {len(lines)}"
+    await safe_send_text(update, context, message)
+
+
+@_with_error_handling
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    await menu.show_menu(update, context)
+
+
+@_with_error_handling
+async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+    text = update.message.text.strip()
+    if text not in {
+        menu.STATUS_BUTTON,
+        menu.SUMMARY_BUTTON,
+        menu.FACTS_TOGGLE_BUTTON,
+        menu.HELP_BUTTON,
+    }:
+        return
+    if not await _guard_access(update, context):
+        return
+    orchestrator = _get_orchestrator(context)
+    if text == menu.STATUS_BUTTON:
+        await safe_send_text(update, context, _build_health_message(context))
+        return
+    if text == menu.SUMMARY_BUTTON:
+        await safe_send_text(update, context, "Суммаризация: summary: <текст> или /summary <текст>.")
+        return
+    if text == menu.FACTS_TOGGLE_BUTTON:
+        user_id = update.effective_user.id if update.effective_user else 0
+        new_value = not orchestrator.is_facts_only(user_id)
+        orchestrator.set_facts_only(user_id, new_value)
+        status = "включён" if new_value else "выключён"
+        await safe_send_text(update, context, f"Режим фактов {status}.")
+        return
+    if text == menu.HELP_BUTTON:
+        access_note = ""
+        if orchestrator.is_access_restricted():
+            access_note = "\n\nДоступ ограничен whitelist пользователей."
+        await safe_send_text(update, context, _build_help_text(access_note))
+        return
+
+
 def _extract_text_from_image(image_bytes: bytes) -> str:
     with Image.open(io.BytesIO(image_bytes)) as image:
         return pytesseract.image_to_string(image).strip()
@@ -496,6 +653,13 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     message = update.message.text if update.message else ""
     prompt = message.strip()
+    if prompt in {
+        menu.STATUS_BUTTON,
+        menu.SUMMARY_BUTTON,
+        menu.FACTS_TOGGLE_BUTTON,
+        menu.HELP_BUTTON,
+    }:
+        return
     if not prompt:
         return
     user_id = update.effective_user.id if update.effective_user else 0
@@ -514,14 +678,16 @@ async def selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
     settings = context.application.bot_data["settings"]
-    allowed_user_ids = sorted(settings.allowed_user_ids)
+    allowlist_snapshot = _get_allowlist_store(context).snapshot()
+    allowed_user_ids = allowlist_snapshot.allowed_user_ids
     if allowed_user_ids:
         allowed_summary = f"ok ({len(allowed_user_ids)}): {', '.join(map(str, allowed_user_ids))}"
     else:
         allowed_summary = "empty (доступ закрыт)"
     message = (
         "Self-check:\n"
-        f"ALLOWED_USER_IDS: {allowed_summary}\n"
+        f"ALLOWLIST_PATH: {settings.allowlist_path}\n"
+        f"ALLOWLIST_USERS: {allowed_summary}\n"
         f"RATE_LIMIT_PER_MINUTE: {settings.rate_limit_per_minute}\n"
         f"RATE_LIMIT_PER_DAY: {settings.rate_limit_per_day}\n"
         f"HISTORY_SIZE: {settings.history_size}\n"
@@ -534,22 +700,7 @@ async def selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
-    settings = context.application.bot_data["settings"]
-    rate_limiter = _get_rate_limiter(context)
-    start_time = context.application.bot_data.get("start_time", time.monotonic())
-    uptime = _format_uptime(start_time)
-    python_version = sys.version.split()[0]
-    telegram_version = telegram.__version__
-    message = (
-        "Health:\n"
-        f"Uptime: {uptime}\n"
-        f"Rate limits: {rate_limiter.per_minute}/min, {rate_limiter.per_day}/day\n"
-        f"Python: {python_version}\n"
-        f"Telegram: {telegram_version}\n"
-        f"Orchestrator config: {settings.orchestrator_config_path}\n"
-        f"Rate limit cache: {rate_limiter.cache_size} users"
-    )
-    await safe_send_text(update, context, message)
+    await safe_send_text(update, context, _build_health_message(context))
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
