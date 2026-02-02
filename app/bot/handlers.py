@@ -9,6 +9,7 @@ from telegram.ext import ContextTypes
 
 from app.core.orchestrator import Orchestrator
 from app.infra.storage import TaskStorage
+from perplexity_client import PerplexityRequestError, ask_perplexity
 
 LOGGER = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ def _get_storage(context: ContextTypes.DEFAULT_TYPE) -> TaskStorage:
     return context.application.bot_data["storage"]
 
 
-TELEGRAM_MESSAGE_LIMIT = 4096
+TELEGRAM_MESSAGE_LIMIT = 3900
 
 
 def _split_text(text: str, max_len: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
@@ -233,13 +234,32 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     prompt = message.strip()
     if not prompt:
         return
-
-    user_id = update.effective_user.id if update.effective_user else 0
-    execution = await orchestrator.handle_text(user_id, prompt)
-    if execution.status == "error":
-        await _reply_long(update, f"Ошибка: {execution.result}")
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты отвечаешь кратко и по делу. "
+                "Если используешь факты из интернета — опирайся на источники."
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        answer, citations = await ask_perplexity(messages)
+    except PerplexityRequestError:
+        LOGGER.exception("Perplexity request failed")
+        await _reply_long(update, "Ошибка запроса к Perplexity, смотри логи")
         return
-    await _reply_long(update, execution.result)
+
+    response = answer.strip() if answer else ""
+    if citations:
+        limited = citations[:5]
+        sources_lines = ["Источники:"]
+        sources_lines.extend(
+            f"{idx}) {url}" for idx, url in enumerate(limited, start=1)
+        )
+        response = (response + "\n\n" if response else "") + "\n".join(sources_lines)
+    await _reply_long(update, response or "Пустой ответ от Perplexity.")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
