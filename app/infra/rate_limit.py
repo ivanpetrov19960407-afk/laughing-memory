@@ -27,7 +27,7 @@ class RateLimiter:
             while state.minute_hits and state.minute_hits[0] <= cutoff:
                 state.minute_hits.popleft()
             if len(state.minute_hits) >= self._per_minute:
-                return False, "Лимит запросов. Попробуй позже."
+                return False, "Слишком часто, попробуйте позже."
             state.minute_hits.append(now.timestamp())
 
         if self._per_day and self._per_day > 0:
