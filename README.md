@@ -44,7 +44,7 @@ pip install -r requirements.txt
 2. Получите ключ Perplexity:
    - Откройте [Perplexity API keys](https://docs.perplexity.ai/docs/admin/api-key-management).
    - Создайте ключ и сохраните его в `PERPLEXITY_API_KEY`.
-3. Задайте переменные окружения (пример в `.env.example`, можно скопировать в `.env`).
+3. Задайте переменные окружения (пример в `.env.example`, можно скопировать в `.env`). Убедитесь, что в `.env` указан `PERPLEXITY_API_KEY`.
 
 Linux/macOS:
 ```bash
