@@ -36,7 +36,7 @@ class RateLimiter:
                 state.day = today
                 state.day_count = 0
             if state.day_count >= self._per_day:
-                return False, "Слишком часто, попробуйте позже."
+                return False, "Лимит запросов. Попробуй позже."
             state.day_count += 1
 
         return True, ""
