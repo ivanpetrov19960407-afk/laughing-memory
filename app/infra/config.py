@@ -16,6 +16,10 @@ class Settings:
     bot_token: str
     orchestrator_config_path: Path
     db_path: Path
+    openai_api_key: str | None
+    openai_model: str
+    openai_image_model: str
+    openai_timeout_seconds: float
     perplexity_api_key: str | None
     perplexity_base_url: str
     perplexity_model: str
@@ -40,6 +44,10 @@ def load_settings() -> Settings:
     config_path = Path(os.getenv("ORCHESTRATOR_CONFIG_PATH", DEFAULT_CONFIG_PATH))
     db_path = Path(os.getenv("BOT_DB_PATH", DEFAULT_DB_PATH))
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    openai_api_key = os.getenv("OPENAI_API_KEY") or None
+    openai_model = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+    openai_image_model = os.getenv("OPENAI_IMAGE_MODEL", "dall-e-3")
+    openai_timeout_seconds = _parse_optional_float(os.getenv("OPENAI_TIMEOUT_SECONDS"), 30.0)
     perplexity_api_key = os.getenv("PERPLEXITY_API_KEY") or None
     perplexity_base_url = os.getenv("PERPLEXITY_BASE_URL", "https://api.perplexity.ai")
     perplexity_model = os.getenv("PERPLEXITY_MODEL", "sonar")
@@ -60,6 +68,10 @@ def load_settings() -> Settings:
         bot_token=token,
         orchestrator_config_path=config_path,
         db_path=db_path,
+        openai_api_key=openai_api_key,
+        openai_model=openai_model,
+        openai_image_model=openai_image_model,
+        openai_timeout_seconds=openai_timeout_seconds,
         perplexity_api_key=perplexity_api_key,
         perplexity_base_url=perplexity_base_url,
         perplexity_model=perplexity_model,

@@ -1,19 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
+from app.infra.llm.base import LLMAPIError
 
-@dataclass(frozen=True)
-class PerplexityAPIError(RuntimeError):
-    status_code: int
-    message: str
-
-    def __str__(self) -> str:
-        return self.message
+class PerplexityAPIError(LLMAPIError):
+    """Perplexity-specific API error wrapper."""
 
 
 class PerplexityClient:
