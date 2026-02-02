@@ -1,2 +1,4 @@
-.env
-data/bot.db
+.venv/
+.cache/
+__pycache__/
+*.pyc
