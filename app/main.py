@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections import defaultdict, deque
 
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
@@ -10,7 +11,8 @@ from app.core.orchestrator import Orchestrator, load_orchestrator_config
 from app.infra.access import AccessController
 from app.infra.config import load_settings
 from app.infra.llm import OpenAIClient, PerplexityClient
-from app.infra.rate_limit import RateLimiter
+from app.infra.rate_limit import RateLimiter as LLMRateLimiter
+from app.infra.rate_limiter import RateLimiter
 from app.infra.storage import TaskStorage
 
 
@@ -62,7 +64,7 @@ def main() -> None:
     per_day = settings.llm_per_day
     if per_day is None:
         per_day = rate_limits.get("per_day")
-    rate_limiter = RateLimiter(per_minute=per_minute, per_day=per_day)
+    rate_limiter = LLMRateLimiter(per_minute=per_minute, per_day=per_day)
 
     orchestrator = Orchestrator(
         config=config,
@@ -87,6 +89,7 @@ def main() -> None:
     application.bot_data["message_limit"] = settings.telegram_message_limit
     application.bot_data["settings"] = settings
     application.bot_data["openai_client"] = openai_client
+    application.bot_data["start_time"] = time.monotonic()
 
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("help", handlers.help_command))
@@ -98,6 +101,8 @@ def main() -> None:
     application.add_handler(CommandHandler("search", handlers.search))
     application.add_handler(CommandHandler("image", handlers.image))
     application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
+    application.add_handler(CommandHandler("health", handlers.health))
+    application.add_handler(CommandHandler("status", handlers.health))
     application.add_handler(MessageHandler(filters.PHOTO, handlers.photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
     application.add_error_handler(handlers.error_handler)

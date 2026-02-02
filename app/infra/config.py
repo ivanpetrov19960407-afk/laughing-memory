@@ -59,8 +59,8 @@ def load_settings() -> Settings:
     llm_per_minute = _parse_optional_int(os.getenv("LLM_PER_MINUTE"))
     llm_per_day = _parse_optional_int(os.getenv("LLM_PER_DAY"))
     llm_history_turns = _parse_optional_int(os.getenv("LLM_HISTORY_TURNS"))
-    rate_limit_per_minute = _parse_int_with_default(os.getenv("RATE_LIMIT_PER_MINUTE"), 6)
-    rate_limit_per_day = _parse_int_with_default(os.getenv("RATE_LIMIT_PER_DAY"), 80)
+    rate_limit_per_minute = _parse_int_with_default(os.getenv("RATE_LIMIT_PER_MINUTE"), 10)
+    rate_limit_per_day = _parse_int_with_default(os.getenv("RATE_LIMIT_PER_DAY"), 200)
     history_size = _parse_int_with_default(os.getenv("HISTORY_SIZE"), 10)
     telegram_message_limit = _parse_int_with_default(os.getenv("TELEGRAM_MESSAGE_LIMIT"), 4000)
 
