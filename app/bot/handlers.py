@@ -405,7 +405,9 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.photo:
         return
     file = await update.message.photo[-1].get_file()
-    image_bytes = await file.download_to_memory()
+    buf = io.BytesIO()
+    await file.download_to_memory(out=buf)
+    image_bytes = buf.getvalue()
     loop = asyncio.get_running_loop()
     try:
         text = await loop.run_in_executor(None, _extract_text_from_image, bytes(image_bytes))
