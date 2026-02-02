@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Set
+
 from app.infra.allowlist import AllowlistStore
 
 
 class AccessController:
     def __init__(
         self,
-        allowlist: AllowlistStore | None,
+        allowlist: AllowlistStore | Set[int] | None,
         admin_user_ids: set[int] | None = None,
     ) -> None:
         self._allowlist = allowlist
@@ -17,7 +19,9 @@ class AccessController:
             return True
         if self._allowlist is None:
             return True
-        return self._allowlist.is_allowed(user_id)
+        if isinstance(self._allowlist, AllowlistStore):
+            return self._allowlist.is_allowed(user_id)
+        return user_id in self._allowlist
 
     def is_restricted(self) -> bool:
         return self._allowlist is not None
