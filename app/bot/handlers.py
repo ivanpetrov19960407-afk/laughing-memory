@@ -15,7 +15,7 @@ from telegram.ext import ContextTypes
 from PIL import Image
 import pytesseract
 
-from app.core.orchestrator import Orchestrator
+from app.core.orchestrator import Orchestrator, OrchestratorResult
 from app.infra.messaging import safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limiter import RateLimiter
@@ -159,6 +159,28 @@ async def _reply_with_history(
     await safe_send_text(update, context, response)
 
 
+def _build_user_context(update: Update) -> dict[str, int]:
+    user_id = update.effective_user.id if update.effective_user else 0
+    return {"user_id": user_id}
+
+
+def _log_orchestrator_result(
+    user_id: int,
+    prompt: str,
+    result: OrchestratorResult,
+) -> None:
+    LOGGER.info(
+        "Orchestrator result: user_id=%s intent=%s mode=%s status=%s prompt_len=%s response_len=%s sources=%s",
+        user_id,
+        result.intent,
+        result.mode,
+        result.status,
+        len(prompt),
+        len(result.text),
+        len(result.sources),
+    )
+
+
 @_with_error_handling
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     orchestrator = _get_orchestrator(context)
@@ -174,8 +196,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = (
         "Привет! Я бот-оркестратор задач.\n"
         f"Конфигурация: {title} (v{version}).\n"
-        "Команды: /help, /ping, /tasks, /task, /last, /ask, /search, /image.\n"
+        "Команды: /help, /ping, /tasks, /task, /last, /ask, /search, /summary, /facts_on, /facts_off, /image.\n"
         "Можно писать обычные сообщения — верну ответ LLM.\n"
+        "Суммаризация: summary: <текст> или /summary <текст>.\n"
+        "Режим фактов: /facts_on и /facts_off.\n"
         "Отправьте фото, чтобы распознать текст.\n"
         "Локальные команды: echo, upper, json_pretty.\n"
         "Служебные команды: /selfcheck, /health."
@@ -203,6 +227,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/last — последняя задача\n"
         "/ask <текст> — ответ LLM\n"
         "/search <текст> — ответ LLM с поиском\n"
+        "/summary <текст> — краткое резюме (LLM)\n"
+        "/facts_on — включить режим фактов\n"
+        "/facts_off — выключить режим фактов\n"
         "/image <описание> — генерация изображения\n"
         "/selfcheck — проверка конфигурации\n"
         "/health — диагностика сервера\n\n"
@@ -211,6 +238,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/task json_pretty {\"a\": 1}\n"
         "/ask Привет!\n"
         "search Путин биография\n"
+        "summary: большой текст для сжатия\n"
         "echo привет\n"
         "upper привет\n"
         "json_pretty {\"a\":1}\n"
@@ -336,12 +364,13 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_id = update.effective_user.id if update.effective_user else 0
     try:
-        result = await orchestrator.ask_llm(user_id, prompt)
+        result = await orchestrator.handle(f"/ask {prompt}", _build_user_context(update))
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
         return
-    await safe_send_text(update, context, result.result)
+    _log_orchestrator_result(user_id, prompt, result)
+    await safe_send_text(update, context, result.text)
 
 
 @_with_error_handling
@@ -359,12 +388,51 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_id = update.effective_user.id if update.effective_user else 0
     try:
-        result = await orchestrator.search_llm(user_id, prompt)
+        result = await orchestrator.handle(f"/search {prompt}", _build_user_context(update))
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
         return
-    await safe_send_text(update, context, result.result)
+    _log_orchestrator_result(user_id, prompt, result)
+    await safe_send_text(update, context, result.text)
+
+
+@_with_error_handling
+async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    orchestrator = _get_orchestrator(context)
+    if not await _guard_access(update, context):
+        return
+    prompt = " ".join(context.args).strip()
+    user_id = update.effective_user.id if update.effective_user else 0
+    try:
+        payload = f"/summary {prompt}" if prompt else "/summary"
+        result = await orchestrator.handle(payload, _build_user_context(update))
+    except Exception as exc:
+        set_status(context, "error")
+        await _handle_exception(update, context, exc)
+        return
+    _log_orchestrator_result(user_id, prompt, result)
+    await safe_send_text(update, context, result.text)
+
+
+@_with_error_handling
+async def facts_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    orchestrator = _get_orchestrator(context)
+    if not await _guard_access(update, context):
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    orchestrator.set_facts_only(user_id, True)
+    await safe_send_text(update, context, "Режим фактов включён. Буду отвечать только с источниками.")
+
+
+@_with_error_handling
+async def facts_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    orchestrator = _get_orchestrator(context)
+    if not await _guard_access(update, context):
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    orchestrator.set_facts_only(user_id, False)
+    await safe_send_text(update, context, "Режим фактов выключён. Можно отвечать без источников.")
 
 
 def _extract_text_from_image(image_bytes: bytes) -> str:
@@ -430,12 +498,13 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_id = update.effective_user.id if update.effective_user else 0
     try:
-        result = await orchestrator.handle_text(user_id, prompt)
+        result = await orchestrator.handle(prompt, _build_user_context(update))
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
         return
-    await safe_send_text(update, context, result.result)
+    _log_orchestrator_result(user_id, prompt, result)
+    await safe_send_text(update, context, result.text)
 
 
 @_with_error_handling
