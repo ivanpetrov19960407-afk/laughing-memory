@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+import re
+from typing import Any, Literal
 
 from app.core.models import TaskExecutionResult
 from app.core.tasks import InvalidPayloadError, TaskDefinition, TaskError, get_task_registry
@@ -16,6 +18,44 @@ from app.infra.storage import TaskStorage
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class OrchestratorResult:
+    text: str
+    status: Literal["ok", "refused", "error"]
+    mode: Literal["local", "llm"]
+    intent: str
+    sources: list[str] = field(default_factory=list)
+    debug: dict[str, Any] = field(default_factory=dict)
+
+
+def detect_intent(text: str) -> str:
+    trimmed = text.strip()
+    if not trimmed:
+        return "unknown"
+    lowered = trimmed.lower()
+    if lowered.startswith("summary:") or lowered.startswith("/summary"):
+        return "utility_summary"
+    if trimmed.startswith("/"):
+        return "command"
+    smalltalk_markers = (
+        "привет",
+        "здравств",
+        "как дела",
+        "спасибо",
+        "пока",
+        "hello",
+        "hi",
+        "hey",
+        "thanks",
+        "thank you",
+        "bye",
+        "goodbye",
+    )
+    if any(marker in lowered for marker in smalltalk_markers):
+        return "smalltalk"
+    return "question"
 
 
 class TaskNotFoundError(TaskError):
@@ -48,6 +88,8 @@ class Orchestrator:
         self._rate_limiter = rate_limiter
         self._llm_history_turns = llm_history_turns
         self._llm_model = llm_model
+        self._facts_only_default = _coerce_bool(config.get("facts_only_default", False))
+        self._facts_only_by_user: dict[int, bool] = {}
 
     @property
     def config(self) -> dict[str, Any]:
@@ -56,6 +98,87 @@ class Orchestrator:
     def list_tasks(self) -> list[TaskDefinition]:
         enabled = self._enabled_tasks()
         return [self._registry[name] for name in enabled if name in self._registry]
+
+    async def handle(self, text: str, user_context: dict[str, Any]) -> OrchestratorResult:
+        user_id = int(user_context.get("user_id") or 0)
+        allowed, error_message = self._ensure_allowed(user_id)
+        if not allowed:
+            return OrchestratorResult(
+                text=error_message,
+                status="refused",
+                mode="local",
+                intent="command",
+                sources=[],
+                debug={"reason": "access_denied"},
+            )
+        trimmed = text.strip()
+        intent = detect_intent(text)
+        if not trimmed:
+            return OrchestratorResult(
+                text="Запрос пустой.",
+                status="refused",
+                mode="local",
+                intent=intent,
+                sources=[],
+                debug={"reason": "empty_prompt"},
+            )
+
+        if intent == "smalltalk":
+            response = self._smalltalk_response(trimmed)
+            return OrchestratorResult(
+                text=response,
+                status="ok",
+                mode="local",
+                intent=intent,
+                sources=[],
+                debug={"strategy": "smalltalk_local"},
+            )
+
+        if intent == "utility_summary":
+            return await self._handle_summary(user_id, trimmed)
+
+        if intent == "command":
+            command, payload = _split_command(trimmed)
+            if command in {"/ask", "/search"}:
+                if not payload:
+                    return OrchestratorResult(
+                        text="Введите текст запроса. Пример: /ask Привет",
+                        status="refused",
+                        mode="local",
+                        intent=intent,
+                        sources=[],
+                        debug={"reason": "missing_payload", "command": command},
+                    )
+                mode = "search" if command == "/search" else "ask"
+                execution, citations = await self._request_llm(
+                    user_id,
+                    payload,
+                    mode=mode,
+                )
+                return self._build_llm_result(
+                    execution,
+                    citations,
+                    intent=intent,
+                    facts_only=self.is_facts_only(user_id),
+                )
+            if command == "/summary":
+                return await self._handle_summary(user_id, trimmed)
+            return OrchestratorResult(
+                text="Команда не поддерживается в этом режиме.",
+                status="refused",
+                mode="local",
+                intent=intent,
+                sources=[],
+                debug={"reason": "unsupported_command", "command": command},
+            )
+
+        execution, citations = await self._request_llm(user_id, trimmed, mode="ask")
+        return self._build_llm_result(
+            execution,
+            citations,
+            intent=intent,
+            facts_only=self.is_facts_only(user_id),
+        )
 
     def execute_task(self, user_id: int, task_name: str, payload: str) -> TaskExecutionResult:
         executed_at = datetime.now(timezone.utc)
@@ -94,44 +217,81 @@ class Orchestrator:
         self._storage.record_execution(execution)
         return execution
 
-    async def ask_llm(self, user_id: int, prompt: str, *, mode: str = "ask") -> TaskExecutionResult:
+    async def ask_llm(
+        self,
+        user_id: int,
+        prompt: str,
+        *,
+        mode: str = "ask",
+        system_prompt: str | None = None,
+    ) -> TaskExecutionResult:
+        execution, _ = await self._request_llm(
+            user_id,
+            prompt,
+            mode=mode,
+            system_prompt=system_prompt,
+        )
+        return execution
+
+    def set_facts_only(self, user_id: int, enabled: bool) -> None:
+        self._facts_only_by_user[user_id] = enabled
+
+    def is_facts_only(self, user_id: int) -> bool:
+        return self._facts_only_by_user.get(user_id, self._facts_only_default)
+
+    async def _request_llm(
+        self,
+        user_id: int,
+        prompt: str,
+        *,
+        mode: str = "ask",
+        system_prompt: str | None = None,
+    ) -> tuple[TaskExecutionResult, list[str]]:
         executed_at = datetime.now(timezone.utc)
         trimmed = prompt.strip()
         if not trimmed:
-            return self._error_execution(user_id, mode, prompt, "Запрос пустой.", executed_at)
+            execution = self._error_execution(user_id, mode, prompt, "Запрос пустой.", executed_at)
+            return execution, []
         if len(trimmed) > self._MAX_INPUT_LENGTH:
-            return self._error_execution(
+            execution = self._error_execution(
                 user_id,
                 mode,
                 trimmed,
                 "Слишком длинный запрос. Попробуйте короче.",
                 executed_at,
             )
+            return execution, []
         allowed, error_message = self._ensure_allowed(user_id)
         if not allowed:
-            return self._error_execution(user_id, mode, trimmed, error_message, executed_at)
+            execution = self._error_execution(user_id, mode, trimmed, error_message, executed_at)
+            return execution, []
         if self._rate_limiter is not None:
             allowed, rate_message = self._rate_limiter.check(user_id)
             if not allowed:
-                return self._error_execution(user_id, mode, trimmed, rate_message, executed_at)
+                execution = self._error_execution(user_id, mode, trimmed, rate_message, executed_at)
+                return execution, []
         llm_client = self._llm_client
         if llm_client is None or not getattr(llm_client, "api_key", None):
-            return self._error_execution(
+            execution = self._error_execution(
                 user_id,
                 mode,
                 trimmed,
                 "LLM не настроен: OPENAI_API_KEY или PERPLEXITY_API_KEY",
                 executed_at,
             )
+            return execution, []
         else:
             llm_config = self._config.get("llm", {})
             model = self._llm_model or llm_config.get("model", "sonar")
-            system_prompt = llm_config.get("system_prompt")
+            effective_system_prompt = system_prompt if system_prompt is not None else llm_config.get("system_prompt")
             if mode == "search":
-                system_prompt = llm_config.get("search_system_prompt", system_prompt)
+                effective_system_prompt = llm_config.get(
+                    "search_system_prompt",
+                    effective_system_prompt,
+                )
             messages: list[dict[str, Any]] = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
+            if effective_system_prompt:
+                messages.append({"role": "system", "content": effective_system_prompt})
             history_turns = self._resolve_history_turns(llm_config)
             if history_turns > 0:
                 recent = self._storage.get_recent_executions(
@@ -153,6 +313,7 @@ class Orchestrator:
                 max(len(messages) - 1, 0),
             )
             start_time = time.monotonic()
+            citations: list[str] = []
             try:
                 web_search_options = None
                 if mode == "search":
@@ -163,8 +324,8 @@ class Orchestrator:
                     web_search_options=web_search_options,
                 )
                 result = response.get("content", "")
+                citations = response.get("citations") or []
                 if mode == "search":
-                    citations = response.get("citations") or []
                     if citations:
                         lines = ["Источники:"]
                         for index, url in enumerate(citations, start=1):
@@ -196,7 +357,7 @@ class Orchestrator:
             user_id=user_id,
         )
         self._storage.record_execution(execution)
-        return execution
+        return execution, citations
 
     async def search_llm(self, user_id: int, prompt: str) -> TaskExecutionResult:
         return await self.ask_llm(user_id, prompt, mode="search")
@@ -370,6 +531,138 @@ class Orchestrator:
         )
         self._storage.record_execution(execution)
         return execution
+
+    async def _handle_summary(self, user_id: int, text: str) -> OrchestratorResult:
+        payload = _extract_summary_payload(text)
+        if not payload:
+            return OrchestratorResult(
+                text="Использование: summary: <текст> или /summary <текст>.",
+                status="refused",
+                mode="local",
+                intent="utility_summary",
+                sources=[],
+                debug={"reason": "missing_summary_payload"},
+            )
+        system_prompt = "Кратко, 5-8 пунктов, без выдумок и домыслов."
+        execution, citations = await self._request_llm(
+            user_id,
+            payload,
+            mode="summary",
+            system_prompt=system_prompt,
+        )
+        if execution.status != "success":
+            status = "error"
+            if "LLM не настроен" in execution.result:
+                status = "refused"
+            return OrchestratorResult(
+                text=execution.result,
+                status=status,
+                mode="llm",
+                intent="utility_summary",
+                sources=[],
+                debug={"task_name": execution.task_name},
+            )
+        return self._build_llm_result(
+            execution,
+            citations,
+            intent="utility_summary",
+            facts_only=self.is_facts_only(user_id),
+        )
+
+    def _build_llm_result(
+        self,
+        execution: TaskExecutionResult,
+        citations: list[str],
+        *,
+        intent: str,
+        facts_only: bool,
+    ) -> OrchestratorResult:
+        status = "ok" if execution.status == "success" else "error"
+        sources = citations if citations else _extract_sources_from_text(execution.result)
+        if facts_only and not sources:
+            return OrchestratorResult(
+                text=(
+                    "Не могу подтвердить источниками. "
+                    "Переформулируй или попроси без режима фактов."
+                ),
+                status="refused",
+                mode="llm",
+                intent=intent,
+                sources=[],
+                debug={"reason": "facts_only_no_sources"},
+            )
+        final_text = _ensure_sources_in_text(execution.result, sources)
+        return OrchestratorResult(
+            text=final_text,
+            status=status,
+            mode="llm",
+            intent=intent,
+            sources=sources,
+            debug={"task_name": execution.task_name},
+        )
+
+    def _smalltalk_response(self, text: str) -> str:
+        lowered = text.lower()
+        if "привет" in lowered or "hello" in lowered or "hi" in lowered or "hey" in lowered:
+            return "Привет! Чем помочь?"
+        if "как дела" in lowered:
+            return "Всё хорошо! Чем помочь?"
+        if "спасибо" in lowered or "thanks" in lowered or "thank you" in lowered:
+            return "Пожалуйста! Обращайтесь."
+        if "пока" in lowered or "bye" in lowered or "goodbye" in lowered:
+            return "Пока! Буду на связи."
+        return "Привет! Чем помочь?"
+
+
+def _extract_summary_payload(text: str) -> str:
+    trimmed = text.strip()
+    lowered = trimmed.lower()
+    if lowered.startswith("summary:"):
+        return trimmed[len("summary:") :].strip()
+    if lowered.startswith("/summary"):
+        parts = trimmed.split(maxsplit=1)
+        return parts[1].strip() if len(parts) > 1 else ""
+    return ""
+
+
+def _split_command(text: str) -> tuple[str, str]:
+    parts = text.split(maxsplit=1)
+    command = parts[0].lower()
+    payload = parts[1].strip() if len(parts) > 1 else ""
+    return command, payload
+
+
+def _extract_sources_from_text(text: str) -> list[str]:
+    urls = re.findall(r"https?://[^\s<>]+", text)
+    cleaned = []
+    for url in urls:
+        cleaned.append(url.rstrip(").,;\"'"))
+    seen: set[str] = set()
+    unique = []
+    for url in cleaned:
+        if url and url not in seen:
+            seen.add(url)
+            unique.append(url)
+    return unique
+
+
+def _ensure_sources_in_text(text: str, sources: list[str]) -> str:
+    if not sources:
+        return text
+    if any(source in text for source in sources):
+        return text
+    lines = ["Источники:"]
+    for index, url in enumerate(sources, start=1):
+        lines.append(f"{index}) {url}")
+    return f"{text}\n\n" + "\n".join(lines) if text else "\n".join(lines)
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def load_orchestrator_config(path: Path) -> dict[str, Any]:

@@ -37,6 +37,8 @@ def main() -> None:
 
     settings = load_settings()
     config = load_orchestrator_config(settings.orchestrator_config_path)
+    if settings.facts_only_default is not None:
+        config["facts_only_default"] = settings.facts_only_default
     storage = TaskStorage(settings.db_path)
     llm_client = None
     openai_client = None
@@ -99,6 +101,9 @@ def main() -> None:
     application.add_handler(CommandHandler("last", handlers.last))
     application.add_handler(CommandHandler("ask", handlers.ask))
     application.add_handler(CommandHandler("search", handlers.search))
+    application.add_handler(CommandHandler("summary", handlers.summary))
+    application.add_handler(CommandHandler("facts_on", handlers.facts_on))
+    application.add_handler(CommandHandler("facts_off", handlers.facts_off))
     application.add_handler(CommandHandler("image", handlers.image))
     application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
     application.add_handler(CommandHandler("health", handlers.health))

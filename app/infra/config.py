@@ -28,6 +28,7 @@ class Settings:
     llm_per_minute: int | None
     llm_per_day: int | None
     llm_history_turns: int | None
+    facts_only_default: bool | None
     rate_limit_per_minute: int
     rate_limit_per_day: int
     history_size: int
@@ -59,6 +60,7 @@ def load_settings() -> Settings:
     llm_per_minute = _parse_optional_int(os.getenv("LLM_PER_MINUTE"))
     llm_per_day = _parse_optional_int(os.getenv("LLM_PER_DAY"))
     llm_history_turns = _parse_optional_int(os.getenv("LLM_HISTORY_TURNS"))
+    facts_only_default = _parse_optional_bool(os.getenv("FACTS_ONLY_DEFAULT"))
     rate_limit_per_minute = _parse_int_with_default(os.getenv("RATE_LIMIT_PER_MINUTE"), 10)
     rate_limit_per_day = _parse_int_with_default(os.getenv("RATE_LIMIT_PER_DAY"), 200)
     history_size = _parse_int_with_default(os.getenv("HISTORY_SIZE"), 10)
@@ -80,6 +82,7 @@ def load_settings() -> Settings:
         llm_per_minute=llm_per_minute,
         llm_per_day=llm_per_day,
         llm_history_turns=llm_history_turns,
+        facts_only_default=facts_only_default,
         rate_limit_per_minute=rate_limit_per_minute,
         rate_limit_per_day=rate_limit_per_day,
         history_size=history_size,
@@ -119,6 +122,15 @@ def _parse_optional_float(value: str | None, default: float) -> float:
     if not trimmed:
         return default
     return float(trimmed)
+
+
+def _parse_optional_bool(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    trimmed = value.strip().lower()
+    if not trimmed:
+        return None
+    return trimmed in {"1", "true", "yes", "on"}
 
 
 def _parse_int_with_default(value: str | None, default: int) -> int:
