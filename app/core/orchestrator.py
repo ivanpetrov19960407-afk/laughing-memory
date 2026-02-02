@@ -219,6 +219,20 @@ class Orchestrator:
             )
         LOGGER.info("Incoming message: user_id=%s text_preview=%s", user_id, trimmed[:200])
         lower = trimmed.lower()
+        # Explicit task shortcut: !<task> <payload>
+        # Example: !echo hello
+        if trimmed.startswith("!"):
+            payload = trimmed[1:].strip()
+            if not payload:
+                return self._task_parse_error(user_id, text)
+            parts = payload.split(maxsplit=1)
+            if len(parts) < 2:
+                return self._task_parse_error(user_id, text)
+            task_name, task_payload = parts[0], parts[1].strip()
+            if not task_payload:
+                return self._task_parse_error(user_id, text)
+            LOGGER.info("Routing: user_id=%s action=task name=%s (!)", user_id, task_name)
+            return self.execute_task(user_id, task_name, task_payload)
         if lower.startswith("task ") or lower.startswith("task:"):
             payload = trimmed[5:] if lower.startswith("task ") else trimmed[5:]
             payload = payload.strip()
