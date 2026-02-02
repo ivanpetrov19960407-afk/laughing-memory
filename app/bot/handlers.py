@@ -3,19 +3,23 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import sys
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from functools import wraps
 
-from telegram import Message, Update
-from telegram.error import BadRequest
+import telegram
+from telegram import Update
 from telegram.ext import ContextTypes
 from PIL import Image
 import pytesseract
 
 from app.core.orchestrator import Orchestrator
+from app.infra.messaging import safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
-from app.infra.rate_limit import RateLimiter
+from app.infra.rate_limiter import RateLimiter
+from app.infra.request_context import log_request, set_status, start_request
 from app.infra.storage import TaskStorage
 
 LOGGER = logging.getLogger(__name__)
@@ -41,50 +45,8 @@ def _get_history(context: ContextTypes.DEFAULT_TYPE) -> dict[int, list[tuple[dat
     return context.application.bot_data["history"]
 
 
-def _get_message_limit(context: ContextTypes.DEFAULT_TYPE) -> int:
-    return context.application.bot_data["message_limit"]
-
-
 def _get_openai_client(context: ContextTypes.DEFAULT_TYPE) -> OpenAIClient | None:
     return context.application.bot_data.get("openai_client")
-
-
-def split_text(text: str, max_len: int) -> list[str]:
-    chunks: list[str] = []
-    remaining = text or ""
-    while remaining:
-        if len(remaining) <= max_len:
-            chunks.append(remaining)
-            break
-        split_at = remaining.rfind("\n", 0, max_len + 1)
-        if split_at == -1:
-            split_at = remaining.rfind(" ", 0, max_len + 1)
-        if split_at <= 0:
-            split_at = max_len
-        chunk = remaining[:split_at].rstrip()
-        if not chunk:
-            chunk = remaining[:max_len]
-            split_at = max_len
-        chunks.append(chunk)
-        remaining = remaining[split_at:].lstrip("\n ")
-    return chunks
-
-
-async def safe_reply(target: Update | Message, text: str, max_len: int) -> None:
-    message = target if isinstance(target, Message) else target.message
-    if not message:
-        return
-    for chunk in split_text(text, max_len=max_len):
-        try:
-            await message.reply_text(chunk)
-        except BadRequest as exc:
-            if "Message is too long" in str(exc):
-                LOGGER.warning("Telegram rejected message chunk as too long; splitting further.")
-                for subchunk in split_text(chunk, max_len=2000):
-                    await message.reply_text(subchunk)
-                continue
-            LOGGER.exception("Failed to send message chunk: %s", exc)
-            break
 
 
 def _with_error_handling(
@@ -92,13 +54,51 @@ def _with_error_handling(
 ) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]:
     @wraps(handler)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        request_context = start_request(update, context)
         try:
             await handler(update, context)
-        except Exception:
-            LOGGER.exception("Handler failed")
-            await safe_reply(update, "Ошибка обработки. Попробуй ещё раз.", _get_message_limit(context))
+        except Exception as exc:
+            set_status(context, "error")
+            await _handle_exception(update, context, exc)
+        finally:
+            log_request(LOGGER, request_context)
 
     return wrapper
+
+
+async def _handle_exception(update: Update, context: ContextTypes.DEFAULT_TYPE, error: Exception) -> None:
+    try:
+        await context.application.process_error(update, error)
+    except Exception:
+        LOGGER.exception("Failed to forward exception to error handler")
+
+
+def _format_wait_time(seconds: float | None) -> str:
+    if not seconds or seconds <= 0:
+        return "немного позже"
+    if seconds < 60:
+        return f"{int(seconds)} сек."
+    if seconds < 3600:
+        minutes = int(seconds // 60) or 1
+        return f"{minutes} мин."
+    hours = int(seconds // 3600) or 1
+    return f"{hours} ч."
+
+
+def _format_uptime(start_time: float) -> str:
+    elapsed = max(0.0, time.monotonic() - start_time)
+    days, rem = divmod(int(elapsed), 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or parts:
+        parts.append(f"{hours}h")
+    if minutes or parts:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds}s")
+    return " ".join(parts)
 
 
 async def _guard_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -111,12 +111,19 @@ async def _guard_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
             user_id,
             user.username if user else "unknown",
         )
-        await safe_reply(update, "Доступ запрещён.", _get_message_limit(context))
+        set_status(context, "error")
+        await safe_send_text(update, context, "Доступ запрещён.")
         return False
     rate_limiter = _get_rate_limiter(context)
-    allowed, _ = rate_limiter.check(user_id)
-    if not allowed:
-        await safe_reply(update, "Лимит запросов. Попробуй позже.", _get_message_limit(context))
+    result = await rate_limiter.check(user_id)
+    if not result.allowed:
+        set_status(context, "ratelimited")
+        wait_time = _format_wait_time(result.retry_after)
+        if result.scope == "day":
+            message = f"Лимит запросов на сегодня. Попробуй через {wait_time}."
+        else:
+            message = f"Слишком часто. Попробуй через {wait_time}."
+        await safe_send_text(update, context, message)
         return False
     return True
 
@@ -149,7 +156,7 @@ async def _reply_with_history(
     history = _append_history(context, user_id, "user", prompt)
     response = _format_history(history)
     _append_history(context, user_id, "assistant", response)
-    await safe_reply(update, response, _get_message_limit(context))
+    await safe_send_text(update, context, response)
 
 
 @_with_error_handling
@@ -171,9 +178,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Можно писать обычные сообщения — верну ответ LLM.\n"
         "Отправьте фото, чтобы распознать текст.\n"
         "Локальные команды: echo, upper, json_pretty.\n"
-        "Служебная команда: /selfcheck."
+        "Служебные команды: /selfcheck, /health."
     )
-    await safe_reply(update, message + access_note, _get_message_limit(context))
+    await safe_send_text(update, context, message + access_note)
 
 
 @_with_error_handling
@@ -184,8 +191,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     access_note = ""
     if orchestrator.is_access_restricted():
         access_note = "\n\nДоступ ограничен whitelist пользователей."
-    await safe_reply(
+    await safe_send_text(
         update,
+        context,
         "Доступные команды:\n"
         "/start — приветствие и статус\n"
         "/help — помощь\n"
@@ -196,7 +204,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/ask <текст> — ответ LLM\n"
         "/search <текст> — ответ LLM с поиском\n"
         "/image <описание> — генерация изображения\n"
-        "/selfcheck — проверка конфигурации\n\n"
+        "/selfcheck — проверка конфигурации\n"
+        "/health — диагностика сервера\n\n"
         "Примеры:\n"
         "/task upper hello\n"
         "/task json_pretty {\"a\": 1}\n"
@@ -208,14 +217,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Или просто напишите сообщение без команды.\n"
         "Отправьте фото, чтобы распознать текст."
         + access_note,
-        _get_message_limit(context),
     )
 
 
 @_with_error_handling
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        f"user_id={update.effective_user.id} chat_id={update.effective_chat.id}"
+    await safe_send_text(
+        update,
+        context,
+        f"user_id={update.effective_user.id} chat_id={update.effective_chat.id}",
     )
     return
 
@@ -226,7 +236,7 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     metadata = orchestrator.config.get("system_metadata", {})
     version = metadata.get("version", "unknown")
     now = datetime.now(timezone.utc).isoformat()
-    await safe_reply(update, f"pong (v{version}) {now}", _get_message_limit(context))
+    await safe_send_text(update, context, f"pong (v{version}) {now}")
 
 
 @_with_error_handling
@@ -236,13 +246,13 @@ async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     available = orchestrator.list_tasks()
     if not available:
-        await safe_reply(update, "Нет доступных задач.", _get_message_limit(context))
+        await safe_send_text(update, context, "Нет доступных задач.")
         return
     lines = [f"• {task.name}: {task.description}" for task in available]
-    await safe_reply(
+    await safe_send_text(
         update,
+        context,
         "Доступные задачи:\n" + "\n".join(lines),
-        _get_message_limit(context),
     )
 
 
@@ -253,32 +263,37 @@ async def task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     args = context.args
     if not args:
-        await safe_reply(update, "Укажите имя задачи и payload.", _get_message_limit(context))
+        await safe_send_text(update, context, "Укажите имя задачи и payload.")
         return
     if len(args) == 1:
-        await safe_reply(
+        await safe_send_text(
             update,
+            context,
             "Нужно передать payload. Пример: /task upper hello",
-            _get_message_limit(context),
         )
         return
 
     task_name = args[0]
     payload = " ".join(args[1:]).strip()
     if not payload:
-        await safe_reply(update, "Payload не может быть пустым.", _get_message_limit(context))
+        await safe_send_text(update, context, "Payload не может быть пустым.")
         return
 
     user_id = update.effective_user.id if update.effective_user else 0
-    execution = orchestrator.execute_task(user_id, task_name, payload)
+    try:
+        execution = orchestrator.execute_task(user_id, task_name, payload)
+    except Exception as exc:
+        set_status(context, "error")
+        await _handle_exception(update, context, exc)
+        return
 
-    await safe_reply(
+    await safe_send_text(
         update,
+        context,
         "Результат:\n"
         f"Задача: {execution.task_name}\n"
         f"Статус: {execution.status}\n"
         f"Ответ: {execution.result}",
-        _get_message_limit(context),
     )
 
 
@@ -291,18 +306,18 @@ async def last(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
     record = storage.get_last_execution(user_id)
     if not record:
-        await safe_reply(update, "История пуста.", _get_message_limit(context))
+        await safe_send_text(update, context, "История пуста.")
         return
 
-    await safe_reply(
+    await safe_send_text(
         update,
+        context,
         "Последняя задача:\n"
         f"Дата: {record['timestamp']}\n"
         f"Задача: {record['task_name']}\n"
         f"Статус: {record['status']}\n"
         f"Payload: {record['payload']}\n"
         f"Ответ: {record['result']}",
-        _get_message_limit(context),
     )
 
 
@@ -313,15 +328,20 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     prompt = " ".join(context.args).strip()
     if not prompt:
-        await safe_reply(
+        await safe_send_text(
             update,
+            context,
             "Введите текст запроса. Пример: /ask Привет",
-            _get_message_limit(context),
         )
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    result = await orchestrator.ask_llm(user_id, prompt)
-    await safe_reply(update, result.result, _get_message_limit(context))
+    try:
+        result = await orchestrator.ask_llm(user_id, prompt)
+    except Exception as exc:
+        set_status(context, "error")
+        await _handle_exception(update, context, exc)
+        return
+    await safe_send_text(update, context, result.result)
 
 
 @_with_error_handling
@@ -331,15 +351,20 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     prompt = " ".join(context.args).strip()
     if not prompt:
-        await safe_reply(
+        await safe_send_text(
             update,
+            context,
             "Введите текст запроса. Пример: /search Новости",
-            _get_message_limit(context),
         )
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    result = await orchestrator.search_llm(user_id, prompt)
-    await safe_reply(update, result.result, _get_message_limit(context))
+    try:
+        result = await orchestrator.search_llm(user_id, prompt)
+    except Exception as exc:
+        set_status(context, "error")
+        await _handle_exception(update, context, exc)
+        return
+    await safe_send_text(update, context, result.result)
 
 
 def _extract_text_from_image(image_bytes: bytes) -> str:
@@ -353,21 +378,21 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     prompt = " ".join(context.args).strip()
     if not prompt:
-        await safe_reply(
+        await safe_send_text(
             update,
+            context,
             "Укажите описание изображения. Пример: /image Слон в космосе",
-            _get_message_limit(context),
         )
         return
     openai_client = _get_openai_client(context)
     if openai_client is None or not openai_client.api_key:
-        await safe_reply(update, "Генерация изображений не настроена.", _get_message_limit(context))
+        await safe_send_text(update, context, "Генерация изображений не настроена.")
         return
     response = await openai_client.create_image(prompt=prompt)
     data = response.get("data") or []
     image_url = data[0].get("url") if data else None
     if not image_url:
-        await safe_reply(update, "Не удалось получить изображение.", _get_message_limit(context))
+        await safe_send_text(update, context, "Не удалось получить изображение.")
         return
     if update.message:
         await update.message.reply_photo(image_url)
@@ -386,12 +411,12 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = await loop.run_in_executor(None, _extract_text_from_image, bytes(image_bytes))
     except Exception:
         LOGGER.exception("OCR failed")
-        await safe_reply(update, "Не удалось распознать текст.", _get_message_limit(context))
+        await safe_send_text(update, context, "Не удалось распознать текст.")
         return
     if not text:
-        await safe_reply(update, "Текст не найден.", _get_message_limit(context))
+        await safe_send_text(update, context, "Текст не найден.")
         return
-    await safe_reply(update, text, _get_message_limit(context))
+    await safe_send_text(update, context, text)
 
 
 @_with_error_handling
@@ -404,8 +429,13 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not prompt:
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    result = await orchestrator.handle_text(user_id, prompt)
-    await safe_reply(update, result.result, _get_message_limit(context))
+    try:
+        result = await orchestrator.handle_text(user_id, prompt)
+    except Exception as exc:
+        set_status(context, "error")
+        await _handle_exception(update, context, exc)
+        return
+    await safe_send_text(update, context, result.result)
 
 
 @_with_error_handling
@@ -426,10 +456,33 @@ async def selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"HISTORY_SIZE: {settings.history_size}\n"
         f"TELEGRAM_MESSAGE_LIMIT: {settings.telegram_message_limit}"
     )
-    await safe_reply(update, message, _get_message_limit(context))
+    await safe_send_text(update, context, message)
+
+
+@_with_error_handling
+async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    settings = context.application.bot_data["settings"]
+    rate_limiter = _get_rate_limiter(context)
+    start_time = context.application.bot_data.get("start_time", time.monotonic())
+    uptime = _format_uptime(start_time)
+    python_version = sys.version.split()[0]
+    telegram_version = telegram.__version__
+    message = (
+        "Health:\n"
+        f"Uptime: {uptime}\n"
+        f"Rate limits: {rate_limiter.per_minute}/min, {rate_limiter.per_day}/day\n"
+        f"Python: {python_version}\n"
+        f"Telegram: {telegram_version}\n"
+        f"Orchestrator config: {settings.orchestrator_config_path}\n"
+        f"Rate limit cache: {rate_limiter.cache_size} users"
+    )
+    await safe_send_text(update, context, message)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    set_status(context, "error")
     LOGGER.exception("Unhandled exception", exc_info=context.error)
     if isinstance(update, Update) and update.message:
-        await safe_reply(update, "Ошибка обработки. Попробуй ещё раз.", _get_message_limit(context))
+        await safe_send_text(update, context, "Ошибка на сервере. Попробуй ещё раз.")
