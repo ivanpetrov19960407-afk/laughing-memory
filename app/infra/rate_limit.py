@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 
 @dataclass
 class _UserRateState:
-    minute_hits: list[datetime] = field(default_factory=list)
+    minute_hits: deque[float] = field(default_factory=deque)
     day: datetime.date | None = None
     day_count: int = 0
 
@@ -24,10 +24,11 @@ class RateLimiter:
 
         if self._per_minute and self._per_minute > 0:
             cutoff = now.timestamp() - 60
-            state.minute_hits = [hit for hit in state.minute_hits if hit.timestamp() > cutoff]
+            while state.minute_hits and state.minute_hits[0] <= cutoff:
+                state.minute_hits.popleft()
             if len(state.minute_hits) >= self._per_minute:
                 return False, "Слишком часто, попробуйте позже."
-            state.minute_hits.append(now)
+            state.minute_hits.append(now.timestamp())
 
         if self._per_day and self._per_day > 0:
             today = now.date()

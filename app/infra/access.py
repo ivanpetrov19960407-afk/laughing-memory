@@ -6,9 +6,9 @@ class AccessController:
         self._allowed_user_ids = allowed_user_ids
 
     def is_allowed(self, user_id: int) -> bool:
-        if not self._allowed_user_ids:
+        if self._allowed_user_ids is None:
             return True
         return user_id in self._allowed_user_ids
 
     def is_restricted(self) -> bool:
-        return bool(self._allowed_user_ids)
+        return self._allowed_user_ids is not None

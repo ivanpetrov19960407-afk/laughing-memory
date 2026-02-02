@@ -9,13 +9,14 @@ Telegram-бот-оркестратор с реальными задачами о
 - `/tasks` — список доступных задач.
 - `/task <name> <payload>` — запуск зарегистрированной задачи.
 - `/last` — последняя запись истории пользователя.
-- `/ask <текст>` — задать вопрос LLM.
-- `/search <текст>` — режим поиска через LLM (с источниками при наличии).
+- `/ask <текст>` — тестовый ответ с контекстом последних сообщений.
+- `/search <текст>` — тестовый ответ с контекстом последних сообщений.
+- `/selfcheck` — проверка конфигурации на сервере.
 
 Обычный текст без команды маршрутизируется так:
 - `task <name> <payload>` — запускает локальную задачу.
-- `search <текст>` — поисковый режим LLM.
-- любой другой текст — обычный LLM-запрос.
+- `search <текст>` — тестовый ответ с контекстом.
+- любой другой текст — ответ с контекстом последних сообщений.
 
 Поддерживаемые задачи:
 - `echo` — вернуть payload как есть.
@@ -41,23 +42,18 @@ pip install -r requirements.txt
 ## Запуск
 
 1. Создайте бота через [@BotFather](https://t.me/BotFather) и получите токен.
-2. Получите ключ Perplexity:
-   - Откройте [Perplexity API keys](https://docs.perplexity.ai/docs/admin/api-key-management).
-   - Создайте ключ и сохраните его в `PERPLEXITY_API_KEY`.
-3. Задайте переменные окружения (пример в `.env.example`, можно скопировать в `.env`). Убедитесь, что в `.env` указан `PERPLEXITY_API_KEY`.
+2. Задайте переменные окружения (пример в `.env.example`, можно скопировать в `.env`).
 
 Linux/macOS:
 ```bash
 export BOT_TOKEN="<ваш_токен>"
 export ORCHESTRATOR_CONFIG_PATH="config/orchestrator.json"
 export BOT_DB_PATH="data/bot.db"
-export PERPLEXITY_API_KEY="<ваш_ключ>"
-export PERPLEXITY_MODEL="sonar"
-export PERPLEXITY_TIMEOUT_SECONDS="15"
 export ALLOWED_USER_IDS="123456789,987654321"
-export LLM_PER_MINUTE="10"
-export LLM_PER_DAY="200"
-export LLM_HISTORY_TURNS="5"
+export RATE_LIMIT_PER_MINUTE="6"
+export RATE_LIMIT_PER_DAY="80"
+export HISTORY_SIZE="10"
+export TELEGRAM_MESSAGE_LIMIT="4000"
 ```
 
 Windows (PowerShell):
@@ -65,13 +61,11 @@ Windows (PowerShell):
 $env:BOT_TOKEN="<ваш_токен>"
 $env:ORCHESTRATOR_CONFIG_PATH="config/orchestrator.json"
 $env:BOT_DB_PATH="data/bot.db"
-$env:PERPLEXITY_API_KEY="<ваш_ключ>"
-$env:PERPLEXITY_MODEL="sonar"
-$env:PERPLEXITY_TIMEOUT_SECONDS="15"
 $env:ALLOWED_USER_IDS="123456789,987654321"
-$env:LLM_PER_MINUTE="10"
-$env:LLM_PER_DAY="200"
-$env:LLM_HISTORY_TURNS="5"
+$env:RATE_LIMIT_PER_MINUTE="6"
+$env:RATE_LIMIT_PER_DAY="80"
+$env:HISTORY_SIZE="10"
+$env:TELEGRAM_MESSAGE_LIMIT="4000"
 ```
 
 3. Запустите бота:
@@ -109,8 +103,9 @@ sudo journalctl -u <имя_сервиса> -f
 - `/tasks` — список задач.
 - `/task <name> <payload>` — выполнить локальную задачу.
 - `/last` — последняя запись истории.
-- `/ask <текст>` — вопрос в Perplexity.
-- `/search <текст>` — поиск с источниками (если есть).
+- `/ask <текст>` — тестовый ответ с контекстом.
+- `/search <текст>` — тестовый ответ с контекстом.
+- `/selfcheck` — проверка конфигурации.
 - `echo <текст>` — вернуть текст.
 - `upper <текст>` — текст в верхнем регистре.
 - `json_pretty <json>` — красивое форматирование JSON.
@@ -131,11 +126,16 @@ sudo journalctl -u <имя_сервиса> -f
 Если секции нет — доступны все задачи по умолчанию.
 
 ## Доступ и лимиты
-Доступ к боту можно ограничить whitelist пользователей через `ALLOWED_USER_IDS` или `config/orchestrator.json` (`access.allowed_user_ids`). Если список пустой или не задан — доступ открыт всем. При наличии whitelist другие пользователи получают ответ "Доступ запрещён.".
+Whitelist пользователей обязателен: `ALLOWED_USER_IDS` должен быть задан. Если список пустой — доступ закрыт всем, а бот пишет ошибку в лог.
 
-Лимиты LLM-запросов задаются через `LLM_PER_MINUTE` / `LLM_PER_DAY` или `rate_limits.llm` в `config/orchestrator.json`. Лимиты учитываются на пользователя и хранятся в памяти процесса.
+Ограничения запросов (на пользователя): `RATE_LIMIT_PER_MINUTE` и `RATE_LIMIT_PER_DAY`.
 
-Контекст LLM-запроса включает последние N успешных ходов (`ask`/`search`) — значение задаётся `LLM_HISTORY_TURNS` или `llm.history_turns`.
+Контекст диалога хранит последние `HISTORY_SIZE` сообщений, а отправка длинных ответов дробится по `TELEGRAM_MESSAGE_LIMIT`. Всё хранится в памяти процесса.
+
+## Проверка после обновления
+1. Убедитесь, что задали `ALLOWED_USER_IDS` и остальные переменные.
+2. Напишите в боте `/selfcheck` — команда покажет текущие лимиты и параметры контекста.
+3. Отправьте обычное сообщение и убедитесь, что бот отвечает "Ок. Последние сообщения: ...".
 
 ## Тесты
 ```bash
