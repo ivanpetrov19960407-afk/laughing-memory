@@ -37,6 +37,7 @@
         "history_turns": 5,
         "search_system_prompt": "Ты поисковый ассистент. Отвечай по фактам и добавляй ссылки (citations), если они есть."
     },
+    "facts_only_default": false,
     "orchestrator": {
         "agent_id": "orchestrator_001",
         "name": "Оркестратор",
