@@ -63,7 +63,7 @@ def test_orchestrator_ask_llm_missing_client(tmp_path: Path) -> None:
     execution = asyncio.run(orchestrator.ask_llm(user_id=1, prompt="hi"))
 
     assert execution.status == "error"
-    assert execution.result == "LLM не настроен: PERPLEXITY_API_KEY"
+    assert execution.result == "LLM не настроен: OPENAI_API_KEY или PERPLEXITY_API_KEY"
 
 
 def test_orchestrator_whitelist_blocks(tmp_path: Path) -> None:
