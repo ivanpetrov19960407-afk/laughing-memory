@@ -9,6 +9,11 @@ STATUS_BUTTON = "ℹ️ Статус"
 SUMMARY_BUTTON = "🧾 Summary"
 FACTS_TOGGLE_BUTTON = "🔎 Facts ON/OFF"
 HELP_BUTTON = "❓ Help"
+CHECK_BUTTON = "🧠 Check"
+REWRITE_BUTTON = "✍️ Rewrite"
+EXPLAIN_BUTTON = "🧩 Explain"
+CALC_BUTTON = "🧮 Calc"
+CALENDAR_BUTTON = "📅 Calendar"
 
 
 def build_main_menu() -> ReplyKeyboardMarkup:
@@ -16,6 +21,9 @@ def build_main_menu() -> ReplyKeyboardMarkup:
         [
             [STATUS_BUTTON, SUMMARY_BUTTON],
             [FACTS_TOGGLE_BUTTON, HELP_BUTTON],
+            [CHECK_BUTTON, REWRITE_BUTTON],
+            [EXPLAIN_BUTTON, CALC_BUTTON],
+            [CALENDAR_BUTTON],
         ],
         resize_keyboard=True,
         one_time_keyboard=False,

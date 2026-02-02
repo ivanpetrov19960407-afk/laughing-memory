@@ -16,7 +16,10 @@ from PIL import Image
 import pytesseract
 
 from app.bot import menu
+from app.core import calendar_store
+from app.core.calc import CalcError, parse_and_eval
 from app.core.orchestrator import Orchestrator, OrchestratorResult
+from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
 from app.infra.messaging import safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
@@ -197,6 +200,11 @@ def _build_user_context(update: Update) -> dict[str, int]:
     return {"user_id": user_id}
 
 
+def _build_tool_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> dict[str, object]:
+    user_id = update.effective_user.id if update.effective_user else 0
+    return {"user_id": user_id, "orchestrator": _get_orchestrator(context)}
+
+
 def _log_orchestrator_result(
     user_id: int,
     prompt: str,
@@ -229,12 +237,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = (
         "Привет! Я бот-оркестратор задач.\n"
         f"Конфигурация: {title} (v{version}).\n"
-        "Команды: /help, /ping, /tasks, /task, /last, /ask, /search, /summary, /facts_on, /facts_off, /image.\n"
+        "Команды: /help, /ping, /tasks, /task, /last, /ask, /search, /summary, /facts_on, /facts_off, /image, "
+        "/check, /rewrite, /explain, /calc, /calendar.\n"
         "Можно писать обычные сообщения — верну ответ LLM.\n"
         "Суммаризация: summary: <текст> или /summary <текст>.\n"
         "Режим фактов: /facts_on и /facts_off.\n"
         "Отправьте фото, чтобы распознать текст.\n"
-        "Локальные команды: echo, upper, json_pretty.\n"
+        "Локальные команды: echo, upper, json_pretty, calc, calendar.\n"
         "Служебные команды: /selfcheck, /health."
     )
     await menu.show_menu(update, context, message + access_note)
@@ -267,6 +276,11 @@ def _build_help_text(access_note: str) -> str:
         "/facts_on — включить режим фактов\n"
         "/facts_off — выключить режим фактов\n"
         "/image <описание> — генерация изображения\n"
+        "/check <текст> — проверка текста (LLM)\n"
+        "/rewrite <mode> <текст> — переписать текст (LLM)\n"
+        "/explain <текст> — объяснить текст (LLM)\n"
+        "/calc <expr> — калькулятор\n"
+        "/calendar <cmd> — планер (add/list/today/week/del)\n"
         "/selfcheck — проверка конфигурации\n"
         "/health — диагностика сервера\n"
         "/allow <user_id> — добавить в whitelist (админ)\n"
@@ -276,6 +290,11 @@ def _build_help_text(access_note: str) -> str:
         "/task upper hello\n"
         "/task json_pretty {\"a\": 1}\n"
         "/ask Привет!\n"
+        "/check текст\n"
+        "/rewrite simple текст\n"
+        "/explain текст\n"
+        "/calc 2+2\n"
+        "/calendar add 2026-02-05 18:30 Врач\n"
         "search Путин биография\n"
         "summary: большой текст для сжатия\n"
         "echo привет\n"
@@ -566,6 +585,11 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         menu.SUMMARY_BUTTON,
         menu.FACTS_TOGGLE_BUTTON,
         menu.HELP_BUTTON,
+        menu.CHECK_BUTTON,
+        menu.REWRITE_BUTTON,
+        menu.EXPLAIN_BUTTON,
+        menu.CALC_BUTTON,
+        menu.CALENDAR_BUTTON,
     }:
         return
     if not await _guard_access(update, context):
@@ -589,6 +613,25 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if orchestrator.is_access_restricted():
             access_note = "\n\nДоступ ограничен whitelist пользователей."
         await safe_send_text(update, context, _build_help_text(access_note))
+        return
+    if text == menu.CHECK_BUTTON:
+        await safe_send_text(update, context, "Проверка: /check <текст> или ответом на сообщение.")
+        return
+    if text == menu.REWRITE_BUTTON:
+        await safe_send_text(update, context, "Rewrite: /rewrite <simple|hard|short> <текст>.")
+        return
+    if text == menu.EXPLAIN_BUTTON:
+        await safe_send_text(update, context, "Explain: /explain <текст> или ответом на сообщение.")
+        return
+    if text == menu.CALC_BUTTON:
+        await safe_send_text(update, context, "Calc: /calc <выражение>.")
+        return
+    if text == menu.CALENDAR_BUTTON:
+        await safe_send_text(
+            update,
+            context,
+            "Calendar: /calendar add YYYY-MM-DD HH:MM <title> | list [YYYY-MM-DD YYYY-MM-DD] | today | week | del <id>.",
+        )
         return
 
 
@@ -621,6 +664,273 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if update.message:
         await update.message.reply_photo(image_url)
+
+
+def _format_calendar_list(
+    start: datetime | None,
+    end: datetime | None,
+) -> tuple[str, str]:
+    items = calendar_store.list_items(start, end)
+    if not items:
+        return "Нет событий.", "ok"
+    if len(items) > 20:
+        return "Слишком много, сузь диапазон.", "refused"
+    lines = []
+    for item in items:
+        dt_label = item.dt.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+        lines.append(f"{item.id} | {dt_label} | {item.title}")
+    return "\n".join(lines), "ok"
+
+
+@_with_error_handling
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    prompt = " ".join(context.args).strip()
+    if not prompt and update.message and update.message.reply_to_message:
+        prompt = (update.message.reply_to_message.text or "").strip()
+    if not prompt:
+        await safe_send_text(
+            update,
+            context,
+            "Использование: /check <текст> или ответом на сообщение.",
+        )
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    result = await llm_check(prompt, _build_tool_context(update, context))
+    _log_orchestrator_result(user_id, prompt, result)
+    await safe_send_text(update, context, result.text)
+
+
+@_with_error_handling
+async def rewrite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    if not context.args or len(context.args) < 2:
+        await safe_send_text(
+            update,
+            context,
+            "Использование: /rewrite <simple|hard|short> <текст>.",
+        )
+        return
+    mode = context.args[0].lower()
+    if mode not in {"simple", "hard", "short"}:
+        await safe_send_text(
+            update,
+            context,
+            "Некорректный режим. Использование: /rewrite <simple|hard|short> <текст>.",
+        )
+        return
+    prompt = " ".join(context.args[1:]).strip()
+    if not prompt:
+        await safe_send_text(
+            update,
+            context,
+            "Введите текст для переписывания. Пример: /rewrite simple текст.",
+        )
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    result = await llm_rewrite(mode, prompt, _build_tool_context(update, context))
+    _log_orchestrator_result(user_id, prompt, result)
+    await safe_send_text(update, context, result.text)
+
+
+@_with_error_handling
+async def explain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    prompt = " ".join(context.args).strip()
+    if not prompt and update.message and update.message.reply_to_message:
+        prompt = (update.message.reply_to_message.text or "").strip()
+    if not prompt:
+        await safe_send_text(
+            update,
+            context,
+            "Использование: /explain <текст> или ответом на сообщение.",
+        )
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    result = await llm_explain(prompt, _build_tool_context(update, context))
+    _log_orchestrator_result(user_id, prompt, result)
+    await safe_send_text(update, context, result.text)
+
+
+@_with_error_handling
+async def calc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    expression = " ".join(context.args).strip()
+    if not expression:
+        await safe_send_text(update, context, "Использование: /calc <выражение>.")
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    try:
+        result_value = parse_and_eval(expression)
+    except CalcError as exc:
+        result = OrchestratorResult(
+            text=f"Ошибка вычисления: {exc}",
+            status="error",
+            mode="local",
+            intent="utility_calc",
+        )
+        _log_orchestrator_result(user_id, expression, result)
+        await safe_send_text(update, context, result.text)
+        return
+    result = OrchestratorResult(
+        text=f"{expression} = {result_value}",
+        status="ok",
+        mode="local",
+        intent="utility_calc",
+    )
+    _log_orchestrator_result(user_id, expression, result)
+    await safe_send_text(update, context, result.text)
+
+
+@_with_error_handling
+async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    args = context.args
+    if not args:
+        await safe_send_text(
+            update,
+            context,
+            "Использование: /calendar add YYYY-MM-DD HH:MM <title> | list [YYYY-MM-DD YYYY-MM-DD] | "
+            "today | week | del <id>.",
+        )
+        return
+    command = args[0].lower()
+    if command == "add":
+        if len(args) < 4:
+            await safe_send_text(
+                update,
+                context,
+                "Использование: /calendar add YYYY-MM-DD HH:MM <title>.",
+            )
+            return
+        date_part = args[1]
+        time_part = args[2]
+        title = " ".join(args[3:]).strip()
+        if not title:
+            await safe_send_text(
+                update,
+                context,
+                "Укажите название события. Пример: /calendar add 2026-02-05 18:30 Врач.",
+            )
+            return
+        try:
+            dt = calendar_store.parse_local_datetime(f"{date_part} {time_part}")
+        except ValueError:
+            await safe_send_text(
+                update,
+                context,
+                "Неверный формат даты. Пример: /calendar add 2026-02-05 18:30 Врач.",
+            )
+            return
+        item = calendar_store.add_item(dt, title)
+        dt_label = dt.strftime("%Y-%m-%d %H:%M")
+        text = f"Добавлено: {item['id']} | {dt_label} | {title}"
+        result = OrchestratorResult(
+            text=text,
+            status="ok",
+            mode="local",
+            intent="utility_calendar",
+        )
+        user_id = update.effective_user.id if update.effective_user else 0
+        _log_orchestrator_result(user_id, " ".join(args), result)
+        await safe_send_text(update, context, text)
+        return
+    if command == "list":
+        start = end = None
+        if len(args) == 3:
+            try:
+                start_date = calendar_store.parse_date(args[1])
+                end_date = calendar_store.parse_date(args[2])
+            except ValueError:
+                await safe_send_text(
+                    update,
+                    context,
+                    "Неверный формат. Пример: /calendar list 2026-02-01 2026-02-28.",
+                )
+                return
+            start, _ = calendar_store.day_bounds(start_date)
+            _, end = calendar_store.day_bounds(end_date)
+        elif len(args) != 1:
+            await safe_send_text(
+                update,
+                context,
+                "Использование: /calendar list [YYYY-MM-DD YYYY-MM-DD].",
+            )
+            return
+        text, status = _format_calendar_list(start, end)
+        result = OrchestratorResult(
+            text=text,
+            status=status,
+            mode="local",
+            intent="utility_calendar",
+        )
+        user_id = update.effective_user.id if update.effective_user else 0
+        _log_orchestrator_result(user_id, " ".join(args), result)
+        await safe_send_text(update, context, text)
+        return
+    if command == "today":
+        today = datetime.now(tz=calendar_store.VIENNA_TZ).date()
+        start, end = calendar_store.day_bounds(today)
+        text, status = _format_calendar_list(start, end)
+        result = OrchestratorResult(
+            text=text,
+            status=status,
+            mode="local",
+            intent="utility_calendar",
+        )
+        user_id = update.effective_user.id if update.effective_user else 0
+        _log_orchestrator_result(user_id, " ".join(args), result)
+        await safe_send_text(update, context, text)
+        return
+    if command == "week":
+        today = datetime.now(tz=calendar_store.VIENNA_TZ).date()
+        start, end = calendar_store.week_bounds(today)
+        text, status = _format_calendar_list(start, end)
+        result = OrchestratorResult(
+            text=text,
+            status=status,
+            mode="local",
+            intent="utility_calendar",
+        )
+        user_id = update.effective_user.id if update.effective_user else 0
+        _log_orchestrator_result(user_id, " ".join(args), result)
+        await safe_send_text(update, context, text)
+        return
+    if command == "del":
+        if len(args) < 2:
+            await safe_send_text(update, context, "Использование: /calendar del <id>.")
+            return
+        item_id = args[1].strip()
+        if not item_id:
+            await safe_send_text(update, context, "Укажите id для удаления.")
+            return
+        removed = calendar_store.delete_item(item_id)
+        user_id = update.effective_user.id if update.effective_user else 0
+        if removed:
+            text = f"Удалено: {item_id}"
+            status = "ok"
+        else:
+            text = f"Не найдено: {item_id}"
+            status = "refused"
+        result = OrchestratorResult(
+            text=text,
+            status=status,
+            mode="local",
+            intent="utility_calendar",
+        )
+        _log_orchestrator_result(user_id, " ".join(args), result)
+        await safe_send_text(update, context, text)
+        return
+    await safe_send_text(
+        update,
+        context,
+        "Неизвестная команда. Использование: /calendar add|list|today|week|del.",
+    )
 
 
 @_with_error_handling
@@ -658,6 +968,11 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         menu.SUMMARY_BUTTON,
         menu.FACTS_TOGGLE_BUTTON,
         menu.HELP_BUTTON,
+        menu.CHECK_BUTTON,
+        menu.REWRITE_BUTTON,
+        menu.EXPLAIN_BUTTON,
+        menu.CALC_BUTTON,
+        menu.CALENDAR_BUTTON,
     }:
         return
     if not prompt:
