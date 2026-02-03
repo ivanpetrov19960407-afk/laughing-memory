@@ -19,7 +19,7 @@ class RequestContext:
     user_id: int
     username: str
     chat_id: int
-    text: str
+    input_text: str
     start_time: float
     status: str = "ok"
     response_size: int = 0
@@ -32,9 +32,11 @@ def _truncate_text(text: str, limit: int = 200) -> str:
     return text[:limit].rstrip() + "…"
 
 
-def _extract_text(update: Update | None) -> str:
+def _extract_input_text(update: Update | None) -> str:
     if update is None:
         return ""
+    if update.callback_query:
+        return update.callback_query.data or ""
     message = update.effective_message
     if not message:
         return ""
@@ -50,7 +52,7 @@ def start_request(update: Update | None, context: ContextTypes.DEFAULT_TYPE | No
         user_id=user.id if user else 0,
         username=user.username if user and user.username else "",
         chat_id=chat.id if chat else 0,
-        text=_extract_text(update),
+        input_text=_extract_input_text(update),
         start_time=time.monotonic(),
     )
     if context is not None:
@@ -70,6 +72,12 @@ def set_status(context: ContextTypes.DEFAULT_TYPE | None, status: str) -> None:
         request_context.status = status
 
 
+def set_input_text(context: ContextTypes.DEFAULT_TYPE | None, text: str) -> None:
+    request_context = get_request_context(context)
+    if request_context:
+        request_context.input_text = text
+
+
 def add_response_size(context: ContextTypes.DEFAULT_TYPE | None, size: int) -> None:
     request_context = get_request_context(context)
     if request_context:
@@ -78,7 +86,7 @@ def add_response_size(context: ContextTypes.DEFAULT_TYPE | None, size: int) -> N
 
 def log_request(logger: logging.Logger, request_context: RequestContext) -> None:
     duration_ms = (time.monotonic() - request_context.start_time) * 1000
-    truncated_text = _truncate_text(request_context.text)
+    truncated_text = _truncate_text(request_context.input_text)
     message = (
         "request_id={request_id} user_id={user_id} username={username} chat_id={chat_id} "
         "status={status} duration_ms={duration_ms:.1f} response_size={response_size} text=\"{text}\""

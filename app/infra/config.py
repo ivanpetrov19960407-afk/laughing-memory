@@ -42,6 +42,8 @@ class Settings:
     reminders_enabled: bool
     reminder_default_offset_minutes: int
     reminder_max_future_days: int
+    action_ttl_seconds: int
+    action_max_size: int
 
 
 def load_settings() -> Settings:
@@ -88,6 +90,8 @@ def load_settings() -> Settings:
         os.getenv("REMINDER_MAX_FUTURE_DAYS"),
         365,
     )
+    action_ttl_seconds = _parse_int_with_default(os.getenv("ACTION_TTL_SECONDS"), 600)
+    action_max_size = _parse_int_with_default(os.getenv("ACTION_MAX_SIZE"), 2000)
 
     return Settings(
         bot_token=token,
@@ -117,6 +121,8 @@ def load_settings() -> Settings:
         reminders_enabled=reminders_enabled,
         reminder_default_offset_minutes=reminder_default_offset_minutes,
         reminder_max_future_days=reminder_max_future_days,
+        action_ttl_seconds=action_ttl_seconds,
+        action_max_size=action_max_size,
     )
 
 

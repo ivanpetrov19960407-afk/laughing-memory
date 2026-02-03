@@ -46,6 +46,9 @@ def test_action_store_ttl_and_security(monkeypatch) -> None:
     assert stored is not None
     assert stored.payload["op"] == "menu_open"
     assert stored.intent == "test"
+    stored_second = store.get_action(user_id=1, chat_id=2, action_id=action_id)
+    assert stored_second is not None
+    assert stored_second.intent == "test"
 
     action_id_expired = store.store_action(action=action, user_id=1, chat_id=2)
     clock["value"] += 10
@@ -109,6 +112,38 @@ def test_callback_unknown_action_returns_refused(monkeypatch) -> None:
     result = captured["result"]
     assert result.status == "refused"
     assert "Кнопка устарела" in result.text
+
+
+def test_callback_logs_single_orchestrator_result(monkeypatch, caplog) -> None:
+    calls: list[str] = []
+
+    async def fake_send_text(update, context, text, reply_markup=None):
+        calls.append(text)
+
+    async def fake_guard_access(update, context, bucket="default"):
+        return True
+
+    async def fake_answer():
+        return None
+
+    async def fake_dispatch_action(update, context, stored):
+        return ok("Health: OK", intent="menu.status", mode="local")
+
+    update = DummyUpdate()
+    context = DummyContext()
+    store = context.application.bot_data["action_store"]
+    action = Action(id="menu.status", label="Status", payload={"op": "run_command", "command": "/health"})
+    action_id = store.store_action(action=action, user_id=1, chat_id=10)
+    update.callback_query = SimpleNamespace(data=f"a:{action_id}", answer=fake_answer)
+
+    caplog.set_level("INFO")
+    monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
+    monkeypatch.setattr(handlers, "_dispatch_action", fake_dispatch_action)
+    monkeypatch.setattr(handlers, "_send_text", fake_send_text)
+
+    asyncio.run(handlers.action_callback(update, context))
+    matches = [record for record in caplog.records if "Orchestrator result:" in record.getMessage()]
+    assert len(matches) == 1
 
 
 def test_send_result_deduplicates(monkeypatch) -> None:

@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import warnings
 from collections import defaultdict, deque
 
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+from telegram.warnings import PTBUserWarning
 
 from app.bot import actions, handlers
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
@@ -94,6 +96,7 @@ def main() -> None:
     )
     asyncio.run(dialog_memory.load())
 
+    warnings.filterwarnings("ignore", message="No JobQueue set up", category=PTBUserWarning)
     application = Application.builder().token(settings.bot_token).build()
     reminder_scheduler = ReminderScheduler(
         application=application,
@@ -119,7 +122,12 @@ def main() -> None:
     application.bot_data["openai_client"] = openai_client
     application.bot_data["start_time"] = time.monotonic()
     application.bot_data["dialog_memory"] = dialog_memory
-    application.bot_data["action_store"] = actions.ActionStore()
+    application.bot_data["action_store"] = actions.ActionStore(
+        ttl_seconds=settings.action_ttl_seconds,
+        max_items=settings.action_max_size,
+    )
+    if not application.job_queue:
+        logging.getLogger(__name__).warning("JobQueue not configured; reminders will run without it.")
 
     async def _restore_reminders(app: Application) -> None:
         if not settings.reminders_enabled:
@@ -160,10 +168,10 @@ def main() -> None:
     application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
     application.add_handler(CommandHandler("health", handlers.health))
     application.add_handler(CommandHandler("status", handlers.health))
-    application.add_handler(MessageHandler(filters.COMMAND, handlers.unknown_command))
     application.add_handler(CallbackQueryHandler(handlers.action_callback))
     application.add_handler(MessageHandler(filters.PHOTO, handlers.photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
+    application.add_handler(MessageHandler(filters.COMMAND, handlers.unknown_command))
     application.add_error_handler(handlers.error_handler)
 
     logging.getLogger(__name__).info("Bot started")
