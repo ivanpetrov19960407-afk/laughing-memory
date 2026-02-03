@@ -9,7 +9,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from app.bot import handlers
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
-from app.core import reminder_scheduler
+from app.core.reminders import ReminderScheduler
 from app.core.dialog_memory import DialogMemory
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
@@ -95,8 +95,11 @@ def main() -> None:
     asyncio.run(dialog_memory.load())
 
     application = Application.builder().token(settings.bot_token).build()
-    application.post_init = reminder_scheduler.post_init
-    application.post_shutdown = reminder_scheduler.post_shutdown
+    reminder_scheduler = ReminderScheduler(
+        application=application,
+        max_future_days=settings.reminder_max_future_days,
+    )
+    application.bot_data["reminder_scheduler"] = reminder_scheduler
     application.bot_data["orchestrator"] = orchestrator
     application.bot_data["storage"] = storage
     application.bot_data["allowlist_store"] = allowlist_store
@@ -112,6 +115,14 @@ def main() -> None:
     application.bot_data["openai_client"] = openai_client
     application.bot_data["start_time"] = time.monotonic()
     application.bot_data["dialog_memory"] = dialog_memory
+
+    async def _restore_reminders(app: Application) -> None:
+        if not settings.reminders_enabled:
+            logging.getLogger(__name__).info("Reminders disabled by config")
+            return
+        await reminder_scheduler.restore_all()
+
+    application.post_init = _restore_reminders
 
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("help", handlers.help_command))
@@ -134,6 +145,9 @@ def main() -> None:
     application.add_handler(CommandHandler("explain", handlers.explain))
     application.add_handler(CommandHandler("calc", handlers.calc))
     application.add_handler(CommandHandler("calendar", handlers.calendar))
+    application.add_handler(CommandHandler("reminders", handlers.reminders))
+    application.add_handler(CommandHandler("reminder_off", handlers.reminder_off))
+    application.add_handler(CommandHandler("reminder_on", handlers.reminder_on))
     application.add_handler(CommandHandler("allow", handlers.allow))
     application.add_handler(CommandHandler("deny", handlers.deny))
     application.add_handler(CommandHandler("allowlist", handlers.allowlist))

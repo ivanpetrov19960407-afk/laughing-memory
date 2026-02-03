@@ -21,8 +21,17 @@ class CalendarItem:
     dt: datetime
     chat_id: int
     user_id: int
-    remind_at: datetime
-    remind_sent: bool
+
+
+@dataclass(frozen=True)
+class ReminderItem:
+    id: str
+    event_id: str
+    user_id: int
+    chat_id: int
+    trigger_at: datetime
+    text: str
+    enabled: bool
     sent_at: str | None
 
 
@@ -32,7 +41,7 @@ def _calendar_path() -> Path:
 
 def _default_store(now: datetime | None = None) -> dict[str, object]:
     timestamp = (now or datetime.now(tz=VIENNA_TZ)).isoformat()
-    return {"items": [], "updated_at": timestamp}
+    return {"events": [], "reminders": [], "updated_at": timestamp}
 
 
 def load_store() -> dict[str, object]:
@@ -41,7 +50,8 @@ def load_store() -> dict[str, object]:
         return _default_store()
     try:
         with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
+            store = json.load(handle)
+            return _normalize_store(store)
     except json.JSONDecodeError:
         return _default_store()
 
@@ -56,6 +66,49 @@ def save_store_atomic(store: dict[str, object]) -> None:
     with tmp_path.open("w", encoding="utf-8") as handle:
         json.dump(store, handle, ensure_ascii=False, indent=2)
     tmp_path.replace(path)
+
+
+def _normalize_store(store: dict[str, object]) -> dict[str, object]:
+    if not isinstance(store, dict):
+        return _default_store()
+    if "events" in store and "reminders" in store:
+        return store
+    items = store.get("items") or []
+    events: list[dict[str, object]] = []
+    reminders: list[dict[str, object]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        ts = item.get("ts")
+        title = item.get("title")
+        if not isinstance(item_id, str) or not isinstance(ts, str) or not isinstance(title, str):
+            continue
+        events.append(
+            {
+                "event_id": item_id,
+                "dt_start": ts,
+                "text": title,
+                "created_at": item.get("created_at"),
+                "chat_id": item.get("chat_id"),
+                "user_id": item.get("user_id"),
+            }
+        )
+        remind_at = item.get("remind_at") or ts
+        reminders.append(
+            {
+                "reminder_id": item_id,
+                "event_id": item_id,
+                "user_id": item.get("user_id"),
+                "chat_id": item.get("chat_id"),
+                "trigger_at": remind_at,
+                "text": title,
+                "enabled": not bool(item.get("remind_sent", False)),
+                "sent_at": item.get("sent_at"),
+            }
+        )
+    timestamp = store.get("updated_at") or datetime.now(tz=VIENNA_TZ).isoformat()
+    return {"events": events, "reminders": reminders, "updated_at": timestamp}
 
 def _parse_datetime(value: str | None, fallback: datetime) -> datetime:
     if not value:
@@ -75,42 +128,58 @@ async def add_item(
     chat_id: int,
     remind_at: datetime | None = None,
     user_id: int = 0,
+    reminders_enabled: bool = True,
 ) -> dict[str, object]:
     async with _STORE_LOCK:
         store = load_store()
-        items = list(store.get("items") or [])
-        existing_ids = {item.get("id") for item in items if isinstance(item, dict)}
-        item_id = _generate_id(existing_ids)
+        events = list(store.get("events") or [])
+        reminders = list(store.get("reminders") or [])
+        existing_ids = {item.get("event_id") for item in events if isinstance(item, dict)}
+        event_id = _generate_id({item_id for item_id in existing_ids if isinstance(item_id, str)})
+        reminder_ids = {
+            item.get("reminder_id") for item in reminders if isinstance(item, dict) and item.get("reminder_id")
+        }
+        reminder_id = _generate_id({item_id for item_id in reminder_ids if isinstance(item_id, str)})
         now_iso = datetime.now(tz=VIENNA_TZ).isoformat()
         remind_at_value = (remind_at or dt).astimezone(VIENNA_TZ).isoformat()
-        item = {
-            "id": item_id,
-            "ts": dt.astimezone(VIENNA_TZ).isoformat(),
-            "title": title,
+        event = {
+            "event_id": event_id,
+            "dt_start": dt.astimezone(VIENNA_TZ).isoformat(),
+            "text": title,
             "created_at": now_iso,
             "chat_id": chat_id,
             "user_id": user_id,
-            "remind_at": remind_at_value,
-            "remind_sent": False,
         }
-        items.append(item)
-        store["items"] = items
+        reminder = {
+            "reminder_id": reminder_id,
+            "event_id": event_id,
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "trigger_at": remind_at_value,
+            "text": title,
+            "enabled": reminders_enabled,
+            "sent_at": None,
+        }
+        events.append(event)
+        reminders.append(reminder)
+        store["events"] = events
+        store["reminders"] = reminders
         store["updated_at"] = now_iso
         save_store_atomic(store)
-        return item
+        return {"event": event, "reminder": reminder}
 
 
 async def list_items(start: datetime | None = None, end: datetime | None = None) -> list[CalendarItem]:
     async with _STORE_LOCK:
         store = load_store()
-        items = store.get("items") or []
+        items = store.get("events") or []
     result: list[CalendarItem] = []
     for item in items:
         if not isinstance(item, dict):
             continue
-        ts = item.get("ts")
-        title = item.get("title")
-        item_id = item.get("id")
+        ts = item.get("dt_start")
+        title = item.get("text")
+        item_id = item.get("event_id")
         created_at = item.get("created_at")
         if not isinstance(ts, str) or not isinstance(title, str) or not isinstance(item_id, str):
             continue
@@ -124,8 +193,6 @@ async def list_items(start: datetime | None = None, end: datetime | None = None)
             continue
         if end and dt > end:
             continue
-        remind_at = _parse_datetime(item.get("remind_at"), dt)
-        remind_sent = bool(item.get("remind_sent", False))
         chat_id = item.get("chat_id")
         user_id = item.get("user_id")
         result.append(
@@ -137,80 +204,87 @@ async def list_items(start: datetime | None = None, end: datetime | None = None)
                 dt=dt,
                 chat_id=int(chat_id) if isinstance(chat_id, int) else 0,
                 user_id=int(user_id) if isinstance(user_id, int) else 0,
-                remind_at=remind_at,
-                remind_sent=remind_sent,
-                sent_at=item.get("sent_at") if isinstance(item.get("sent_at"), str) else None,
             )
         )
     result.sort(key=lambda item: item.dt)
     return result
 
 
-async def delete_item(item_id: str) -> bool:
+async def delete_item(item_id: str) -> tuple[bool, str | None]:
     async with _STORE_LOCK:
         store = load_store()
-        items = list(store.get("items") or [])
-        kept = [item for item in items if isinstance(item, dict) and item.get("id") != item_id]
-        if len(kept) == len(items):
-            return False
-        store["items"] = kept
+        events = list(store.get("events") or [])
+        reminders = list(store.get("reminders") or [])
+        kept_events = [
+            item for item in events if isinstance(item, dict) and item.get("event_id") != item_id
+        ]
+        if len(kept_events) == len(events):
+            return False, None
+        removed_reminder_id = None
+        kept_reminders = []
+        for reminder in reminders:
+            if not isinstance(reminder, dict):
+                continue
+            if reminder.get("event_id") == item_id:
+                removed_reminder_id = reminder.get("reminder_id")
+                continue
+            kept_reminders.append(reminder)
+        store["events"] = kept_events
+        store["reminders"] = kept_reminders
         store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
         save_store_atomic(store)
-        return True
+        return True, removed_reminder_id if isinstance(removed_reminder_id, str) else None
 
 
-async def list_due_reminders(now: datetime, limit: int | None = None) -> list[CalendarItem]:
+async def list_due_reminders(now: datetime, limit: int | None = None) -> list[ReminderItem]:
     async with _STORE_LOCK:
         store = load_store()
-        items = store.get("items") or []
-    result: list[CalendarItem] = []
+        items = store.get("reminders") or []
+    result: list[ReminderItem] = []
     for item in items:
         if not isinstance(item, dict):
             continue
-        ts = item.get("ts")
-        title = item.get("title")
-        item_id = item.get("id")
-        created_at = item.get("created_at")
-        if not isinstance(ts, str) or not isinstance(title, str) or not isinstance(item_id, str):
+        trigger_at = item.get("trigger_at")
+        reminder_id = item.get("reminder_id")
+        event_id = item.get("event_id")
+        text = item.get("text")
+        enabled = bool(item.get("enabled", True))
+        if (
+            not isinstance(trigger_at, str)
+            or not isinstance(reminder_id, str)
+            or not isinstance(event_id, str)
+            or not isinstance(text, str)
+        ):
             continue
-        try:
-            dt = datetime.fromisoformat(ts)
-        except ValueError:
-            continue
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=VIENNA_TZ)
-        remind_at = _parse_datetime(item.get("remind_at"), dt)
-        remind_sent = bool(item.get("remind_sent", False))
-        if remind_sent or remind_at > now:
+        remind_at = _parse_datetime(trigger_at, now)
+        if not enabled or remind_at > now:
             continue
         result.append(
-            CalendarItem(
-                id=item_id,
-                ts=ts,
-                title=title,
-                created_at=str(created_at),
-                dt=dt,
-                chat_id=int(item.get("chat_id")) if isinstance(item.get("chat_id"), int) else 0,
+            ReminderItem(
+                id=reminder_id,
+                event_id=event_id,
                 user_id=int(item.get("user_id")) if isinstance(item.get("user_id"), int) else 0,
-                remind_at=remind_at,
-                remind_sent=remind_sent,
+                chat_id=int(item.get("chat_id")) if isinstance(item.get("chat_id"), int) else 0,
+                trigger_at=remind_at,
+                text=text,
+                enabled=enabled,
                 sent_at=item.get("sent_at") if isinstance(item.get("sent_at"), str) else None,
             )
         )
-    result.sort(key=lambda item: item.remind_at)
+    result.sort(key=lambda item: item.trigger_at)
     if limit is not None:
         return result[:limit]
     return result
 
 
-async def mark_reminder_sent(item_id: str, sent_at: datetime, missed: bool = False) -> bool:
+async def mark_reminder_sent(reminder_id: str, sent_at: datetime, missed: bool = False) -> bool:
     async with _STORE_LOCK:
         store = load_store()
-        items = list(store.get("items") or [])
+        reminders = list(store.get("reminders") or [])
         updated = False
-        for item in items:
-            if isinstance(item, dict) and item.get("id") == item_id:
-                item["remind_sent"] = True
+        for item in reminders:
+            if isinstance(item, dict) and item.get("reminder_id") == reminder_id:
+                item["enabled"] = False
                 if not missed:
                     item["sent_at"] = sent_at.astimezone(VIENNA_TZ).isoformat()
                 elif "sent_at" not in item:
@@ -219,10 +293,209 @@ async def mark_reminder_sent(item_id: str, sent_at: datetime, missed: bool = Fal
                 break
         if not updated:
             return False
-        store["items"] = items
+        store["reminders"] = reminders
         store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
         save_store_atomic(store)
         return True
+
+
+async def list_reminders(
+    now: datetime,
+    limit: int | None = 5,
+    include_disabled: bool = False,
+) -> list[ReminderItem]:
+    async with _STORE_LOCK:
+        store = load_store()
+        reminders = list(store.get("reminders") or [])
+    result: list[ReminderItem] = []
+    for item in reminders:
+        if not isinstance(item, dict):
+            continue
+        reminder_id = item.get("reminder_id")
+        event_id = item.get("event_id")
+        trigger_at = item.get("trigger_at")
+        text = item.get("text")
+        enabled = bool(item.get("enabled", True))
+        if (
+            not isinstance(reminder_id, str)
+            or not isinstance(event_id, str)
+            or not isinstance(trigger_at, str)
+            or not isinstance(text, str)
+        ):
+            continue
+        if not include_disabled and not enabled:
+            continue
+        trigger_dt = _parse_datetime(trigger_at, now)
+        if trigger_dt < now:
+            continue
+        result.append(
+            ReminderItem(
+                id=reminder_id,
+                event_id=event_id,
+                user_id=int(item.get("user_id")) if isinstance(item.get("user_id"), int) else 0,
+                chat_id=int(item.get("chat_id")) if isinstance(item.get("chat_id"), int) else 0,
+                trigger_at=trigger_dt,
+                text=text,
+                enabled=enabled,
+                sent_at=item.get("sent_at") if isinstance(item.get("sent_at"), str) else None,
+            )
+        )
+    result.sort(key=lambda item: item.trigger_at)
+    if limit is None:
+        return result
+    return result[:limit]
+
+
+async def get_reminder(reminder_id: str) -> ReminderItem | None:
+    async with _STORE_LOCK:
+        store = load_store()
+        reminders = list(store.get("reminders") or [])
+    for item in reminders:
+        if not isinstance(item, dict) or item.get("reminder_id") != reminder_id:
+            continue
+        trigger_at = item.get("trigger_at")
+        text = item.get("text")
+        event_id = item.get("event_id")
+        if not isinstance(trigger_at, str) or not isinstance(text, str) or not isinstance(event_id, str):
+            return None
+        trigger_dt = _parse_datetime(trigger_at, datetime.now(tz=VIENNA_TZ))
+        return ReminderItem(
+            id=reminder_id,
+            event_id=event_id,
+            user_id=int(item.get("user_id")) if isinstance(item.get("user_id"), int) else 0,
+            chat_id=int(item.get("chat_id")) if isinstance(item.get("chat_id"), int) else 0,
+            trigger_at=trigger_dt,
+            text=text,
+            enabled=bool(item.get("enabled", True)),
+            sent_at=item.get("sent_at") if isinstance(item.get("sent_at"), str) else None,
+        )
+    return None
+
+
+async def get_event(event_id: str) -> CalendarItem | None:
+    async with _STORE_LOCK:
+        store = load_store()
+        events = list(store.get("events") or [])
+    for item in events:
+        if not isinstance(item, dict) or item.get("event_id") != event_id:
+            continue
+        ts = item.get("dt_start")
+        title = item.get("text")
+        created_at = item.get("created_at")
+        if not isinstance(ts, str) or not isinstance(title, str):
+            return None
+        try:
+            dt = datetime.fromisoformat(ts)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=VIENNA_TZ)
+        chat_id = item.get("chat_id")
+        user_id = item.get("user_id")
+        return CalendarItem(
+            id=event_id,
+            ts=ts,
+            title=title,
+            created_at=str(created_at),
+            dt=dt,
+            chat_id=int(chat_id) if isinstance(chat_id, int) else 0,
+            user_id=int(user_id) if isinstance(user_id, int) else 0,
+        )
+    return None
+
+
+async def disable_reminder(reminder_id: str) -> bool:
+    async with _STORE_LOCK:
+        store = load_store()
+        reminders = list(store.get("reminders") or [])
+        updated = False
+        for item in reminders:
+            if isinstance(item, dict) and item.get("reminder_id") == reminder_id:
+                item["enabled"] = False
+                updated = True
+                break
+        if not updated:
+            return False
+        store["reminders"] = reminders
+        store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
+        save_store_atomic(store)
+        return True
+
+
+async def enable_reminder(reminder_id: str) -> bool:
+    async with _STORE_LOCK:
+        store = load_store()
+        reminders = list(store.get("reminders") or [])
+        updated = False
+        for item in reminders:
+            if isinstance(item, dict) and item.get("reminder_id") == reminder_id:
+                item["enabled"] = True
+                updated = True
+                break
+        if not updated:
+            return False
+        store["reminders"] = reminders
+        store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
+        save_store_atomic(store)
+        return True
+
+
+async def ensure_reminder_for_event(
+    event: CalendarItem,
+    trigger_at: datetime,
+    enabled: bool = True,
+) -> ReminderItem:
+    async with _STORE_LOCK:
+        store = load_store()
+        reminders = list(store.get("reminders") or [])
+        for item in reminders:
+            if isinstance(item, dict) and item.get("event_id") == event.id:
+                item["enabled"] = enabled
+                item["trigger_at"] = trigger_at.astimezone(VIENNA_TZ).isoformat()
+                store["reminders"] = reminders
+                store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
+                save_store_atomic(store)
+                return ReminderItem(
+                    id=str(item.get("reminder_id")),
+                    event_id=event.id,
+                    user_id=event.user_id,
+                    chat_id=event.chat_id,
+                    trigger_at=trigger_at.astimezone(VIENNA_TZ),
+                    text=event.title,
+                    enabled=enabled,
+                    sent_at=item.get("sent_at") if isinstance(item.get("sent_at"), str) else None,
+                )
+        reminder_id = _generate_id(
+            {
+                item_id
+                for item_id in (item.get("reminder_id") for item in reminders if isinstance(item, dict))
+                if isinstance(item_id, str)
+            }
+        )
+        reminder = {
+            "reminder_id": reminder_id,
+            "event_id": event.id,
+            "user_id": event.user_id,
+            "chat_id": event.chat_id,
+            "trigger_at": trigger_at.astimezone(VIENNA_TZ).isoformat(),
+            "text": event.title,
+            "enabled": enabled,
+            "sent_at": None,
+        }
+        reminders.append(reminder)
+        store["reminders"] = reminders
+        store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
+        save_store_atomic(store)
+        return ReminderItem(
+            id=reminder_id,
+            event_id=event.id,
+            user_id=event.user_id,
+            chat_id=event.chat_id,
+            trigger_at=trigger_at.astimezone(VIENNA_TZ),
+            text=event.title,
+            enabled=enabled,
+            sent_at=None,
+        )
 
 
 def parse_local_datetime(value: str) -> datetime:

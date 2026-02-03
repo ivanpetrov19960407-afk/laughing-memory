@@ -1,0 +1,171 @@
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from telegram.ext import Application, ContextTypes
+
+from app.core import calendar_store
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _get_default_offset_minutes() -> int:
+    try:
+        value = int(os.getenv("REMINDER_DEFAULT_OFFSET_MINUTES", "10"))
+    except ValueError:
+        return 10
+    return max(0, value)
+
+
+def _get_max_future_days() -> int:
+    try:
+        value = int(os.getenv("REMINDER_MAX_FUTURE_DAYS", "365"))
+    except ValueError:
+        return 365
+    return max(1, value)
+
+
+class ReminderScheduler:
+    def __init__(
+        self,
+        application: Application,
+        calendar_store_module=calendar_store,
+        timezone: ZoneInfo = calendar_store.VIENNA_TZ,
+        max_future_days: int | None = None,
+    ) -> None:
+        self._application = application
+        self._store = calendar_store_module
+        self._timezone = timezone
+        self._max_future_days = max_future_days or _get_max_future_days()
+
+    async def schedule_reminder(self, reminder: calendar_store.ReminderItem) -> str | None:
+        if not self._application.job_queue:
+            LOGGER.warning("Reminder scheduling skipped: job_queue unavailable (reminder_id=%s)", reminder.id)
+            return None
+        if not reminder.enabled:
+            LOGGER.info("Reminder skipped (disabled): reminder_id=%s", reminder.id)
+            return None
+        now = datetime.now(tz=self._timezone)
+        if reminder.trigger_at <= now:
+            LOGGER.info(
+                "Reminder skipped (past trigger): reminder_id=%s trigger_at=%s",
+                reminder.id,
+                reminder.trigger_at.isoformat(),
+            )
+            return None
+        if reminder.trigger_at > now + timedelta(days=self._max_future_days):
+            LOGGER.info(
+                "Reminder skipped (too far): reminder_id=%s trigger_at=%s",
+                reminder.id,
+                reminder.trigger_at.isoformat(),
+            )
+            return None
+        job_name = self._job_name(reminder.id)
+        for job in self._application.job_queue.get_jobs_by_name(job_name):
+            job.schedule_removal()
+        self._application.job_queue.run_once(
+            self._job_callback,
+            when=reminder.trigger_at,
+            name=job_name,
+            data={"reminder_id": reminder.id},
+        )
+        LOGGER.info(
+            "Reminder scheduled: reminder_id=%s event_id=%s trigger_at=%s",
+            reminder.id,
+            reminder.event_id,
+            reminder.trigger_at.isoformat(),
+        )
+        return job_name
+
+    async def cancel_reminder(self, reminder_id: str) -> bool:
+        removed = False
+        if self._application.job_queue:
+            for job in self._application.job_queue.get_jobs_by_name(self._job_name(reminder_id)):
+                job.schedule_removal()
+                removed = True
+        store_updated = await self._store.disable_reminder(reminder_id)
+        LOGGER.info(
+            "Reminder canceled: reminder_id=%s job_removed=%s store_updated=%s",
+            reminder_id,
+            removed,
+            store_updated,
+        )
+        return removed or store_updated
+
+    async def restore_all(self, now: datetime | None = None) -> int:
+        current = now or datetime.now(tz=self._timezone)
+        reminders = await self._store.list_reminders(current, limit=None)
+        restored = 0
+        for reminder in reminders:
+            if reminder.trigger_at <= current:
+                continue
+            if reminder.trigger_at > current + timedelta(days=self._max_future_days):
+                continue
+            if await self.schedule_reminder(reminder):
+                restored += 1
+        LOGGER.info("Reminder restore complete: restored=%s total=%s", restored, len(reminders))
+        return restored
+
+    async def schedule_for_event(
+        self,
+        event: calendar_store.CalendarItem,
+        trigger_at: datetime | None = None,
+        enabled: bool = True,
+    ) -> calendar_store.ReminderItem:
+        reminder_time = trigger_at or event.dt
+        reminder = await self._store.ensure_reminder_for_event(
+            event=event,
+            trigger_at=reminder_time,
+            enabled=enabled,
+        )
+        await self.schedule_reminder(reminder)
+        return reminder
+
+    async def _job_callback(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        reminder_id = None
+        if context.job and isinstance(context.job.data, dict):
+            reminder_id = context.job.data.get("reminder_id")
+        if not reminder_id or not isinstance(reminder_id, str):
+            LOGGER.warning("Reminder job missing reminder_id")
+            return
+        reminder = await self._store.get_reminder(reminder_id)
+        if reminder is None:
+            LOGGER.warning("Reminder not found: reminder_id=%s", reminder_id)
+            return
+        if not reminder.enabled:
+            LOGGER.info("Reminder disabled before send: reminder_id=%s", reminder_id)
+            return
+        event = await self._store.get_event(reminder.event_id)
+        event_dt = event.dt if event else reminder.trigger_at
+        event_label = event_dt.astimezone(self._timezone).strftime("%Y-%m-%d %H:%M")
+        text = f"⏰ Напоминание: {reminder.text}\nКогда: {event_label} (Europe/Vienna)"
+        try:
+            await self._application.bot.send_message(chat_id=reminder.chat_id, text=text)
+        except Exception:
+            LOGGER.exception(
+                "Reminder send failed: reminder_id=%s event_id=%s chat_id=%s trigger_at=%s",
+                reminder.id,
+                reminder.event_id,
+                reminder.chat_id,
+                reminder.trigger_at.isoformat(),
+            )
+            return
+        await self._store.mark_reminder_sent(reminder.id, datetime.now(tz=self._timezone), missed=False)
+        LOGGER.info(
+            "Reminder sent: reminder_id=%s event_id=%s chat_id=%s trigger_at=%s",
+            reminder.id,
+            reminder.event_id,
+            reminder.chat_id,
+            reminder.trigger_at.isoformat(),
+        )
+
+    @staticmethod
+    def _job_name(reminder_id: str) -> str:
+        return f"reminder:{reminder_id}"
+
+
+def get_default_offset_minutes() -> int:
+    return _get_default_offset_minutes()

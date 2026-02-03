@@ -36,43 +36,45 @@ async def _process_due_reminders(application: Application) -> None:
     for item in due_items:
         if not item.chat_id:
             LOGGER.warning(
-                "Reminder skipped (missing chat_id): event_id=%s user_id=%s chat_id=%s remind_at=%s",
+                "Reminder skipped (missing chat_id): reminder_id=%s user_id=%s chat_id=%s trigger_at=%s",
                 item.id,
                 item.user_id,
                 item.chat_id,
-                item.remind_at.isoformat(),
+                item.trigger_at.isoformat(),
             )
             await calendar_store.mark_reminder_sent(item.id, now, missed=True)
             continue
-        if now - item.remind_at > grace_window:
+        if now - item.trigger_at > grace_window:
             LOGGER.warning(
-                "Reminder missed: event_id=%s user_id=%s chat_id=%s remind_at=%s",
+                "Reminder missed: reminder_id=%s user_id=%s chat_id=%s trigger_at=%s",
                 item.id,
                 item.user_id,
                 item.chat_id,
-                item.remind_at.isoformat(),
+                item.trigger_at.isoformat(),
             )
             await calendar_store.mark_reminder_sent(item.id, now, missed=True)
             continue
-        message_time = item.dt.astimezone(calendar_store.VIENNA_TZ).strftime("%H:%M, %Y-%m-%d")
-        text = f"⏰ Напоминание: {item.title} ({message_time})"
+        event = await calendar_store.get_event(item.event_id)
+        event_dt = event.dt if event else item.trigger_at
+        message_time = event_dt.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+        text = f"⏰ Напоминание: {item.text}\nКогда: {message_time} (Europe/Vienna)"
         try:
             await safe_send_bot_text(application.bot, item.chat_id, text)
         except Exception:
             LOGGER.exception(
-                "Reminder send failed: event_id=%s user_id=%s chat_id=%s remind_at=%s",
+                "Reminder send failed: reminder_id=%s user_id=%s chat_id=%s trigger_at=%s",
                 item.id,
                 item.user_id,
                 item.chat_id,
-                item.remind_at.isoformat(),
+                item.trigger_at.isoformat(),
             )
             continue
         LOGGER.info(
-            "Reminder sent: event_id=%s user_id=%s chat_id=%s remind_at=%s request_id=%s",
+            "Reminder sent: reminder_id=%s user_id=%s chat_id=%s trigger_at=%s request_id=%s",
             item.id,
             item.user_id,
             item.chat_id,
-            item.remind_at.isoformat(),
+            item.trigger_at.isoformat(),
             "-",
         )
         await calendar_store.mark_reminder_sent(item.id, now, missed=False)
