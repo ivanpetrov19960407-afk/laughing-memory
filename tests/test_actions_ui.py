@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from app.bot import handlers
+from app.bot import actions, handlers, menu
+from app.core.result import Action, ok
+from app.infra.request_context import start_request
 from app.infra.rate_limiter import RateLimiter
 
 
@@ -11,7 +13,7 @@ class DummyContext:
     def __init__(self) -> None:
         self.application = SimpleNamespace(
             bot_data={
-                "action_store": handlers.ActionPayloadStore(),
+                "action_store": actions.ActionStore(),
                 "ui_rate_limiter": RateLimiter(),
                 "rate_limiter": RateLimiter(),
             }
@@ -25,26 +27,41 @@ class DummyUpdate:
         self.effective_chat = SimpleNamespace(id=chat_id)
         self.message = SimpleNamespace(text="/menu")
         self.effective_message = self.message
+        self.callback_query = None
 
 
-def test_action_payload_store_ttl_and_security(monkeypatch) -> None:
+def test_action_store_ttl_and_security(monkeypatch) -> None:
     clock = {"value": 100.0}
 
     def fake_monotonic() -> float:
         return clock["value"]
 
-    monkeypatch.setattr(handlers.time, "monotonic", fake_monotonic)
-    store = handlers.ActionPayloadStore(ttl_seconds=5, max_items=10)
-    token = store.store(user_id=1, chat_id=2, action_id="test", payload={"op": "menu_open"})
+    monkeypatch.setattr(actions.time, "monotonic", fake_monotonic)
+    store = actions.ActionStore(ttl_seconds=5, max_items=10)
+    action = Action(id="test", label="Test", payload={"op": "menu_open"})
+    token = store.store_action(action=action, user_id=1, chat_id=2)
 
-    assert store.pop(user_id=1, chat_id=999, token=token) is None
-    stored = store.pop(user_id=1, chat_id=2, token=token)
+    assert store.pop_action(user_id=1, chat_id=999, token=token) is None
+    stored = store.pop_action(user_id=1, chat_id=2, token=token)
     assert stored is not None
     assert stored.payload["op"] == "menu_open"
 
-    token_expired = store.store(user_id=1, chat_id=2, action_id="test", payload={"op": "menu_open"})
+    token_expired = store.store_action(action=action, user_id=1, chat_id=2)
     clock["value"] += 10
-    assert store.pop(user_id=1, chat_id=2, token=token_expired) is None
+    assert store.pop_action(user_id=1, chat_id=2, token=token_expired) is None
+
+
+def test_build_inline_keyboard() -> None:
+    store = actions.ActionStore()
+    action_list = [
+        Action(id="one", label="One", payload={"op": "run_command", "command": "/help"}),
+        Action(id="two", label="Two", payload={"op": "run_command", "command": "/menu"}),
+    ]
+    keyboard = actions.build_inline_keyboard(action_list, store=store, user_id=1, chat_id=2)
+    assert keyboard is not None
+    buttons = keyboard.inline_keyboard
+    assert buttons[0][0].text == "One"
+    assert buttons[0][0].callback_data.startswith(actions.CALLBACK_PREFIX)
 
 
 def test_menu_command_returns_actions(monkeypatch) -> None:
@@ -56,12 +73,57 @@ def test_menu_command_returns_actions(monkeypatch) -> None:
     async def fake_guard_access(update, context, bucket="default"):
         return True
 
-    monkeypatch.setattr(handlers, "_send_result", fake_send_result)
+    monkeypatch.setattr(handlers, "send_result", fake_send_result)
     monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
 
     update = DummyUpdate()
     context = DummyContext()
+    context.application.bot_data["orchestrator"] = SimpleNamespace(is_facts_only=lambda user_id: False)
     asyncio.run(handlers.menu_command(update, context))
 
     result = captured["result"]
     assert result.actions
+
+
+def test_callback_unknown_action_returns_refused(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_send_result(update, context, result, reply_markup=None):
+        captured["result"] = result
+
+    async def fake_guard_access(update, context, bucket="default"):
+        return True
+
+    async def fake_answer():
+        return None
+
+    update = DummyUpdate()
+    update.callback_query = SimpleNamespace(data="a:missing", answer=fake_answer)
+    context = DummyContext()
+
+    monkeypatch.setattr(handlers, "send_result", fake_send_result)
+    monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
+
+    asyncio.run(handlers.action_callback(update, context))
+    result = captured["result"]
+    assert result.status == "refused"
+    assert "Кнопка устарела" in result.text
+
+
+def test_send_result_deduplicates(monkeypatch) -> None:
+    calls: list[str] = []
+
+    async def fake_send_text(update, context, text, reply_markup=None):
+        calls.append(text)
+
+    update = DummyUpdate()
+    context = DummyContext()
+    context.application.bot_data["orchestrator"] = SimpleNamespace(is_facts_only=lambda user_id: False)
+    start_request(update, context)
+    result = menu.build_menu_actions(facts_enabled=False)
+    orchestrator_result = ok("Меню:", intent="command.menu", mode="local", actions=result)
+
+    monkeypatch.setattr(handlers, "_send_text", fake_send_text)
+    asyncio.run(handlers.send_result(update, context, orchestrator_result))
+    asyncio.run(handlers.send_result(update, context, orchestrator_result))
+    assert len(calls) == 1
