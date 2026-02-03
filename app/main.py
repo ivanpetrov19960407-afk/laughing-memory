@@ -10,6 +10,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from app.bot import handlers
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
 from app.core import reminder_scheduler
+from app.core.dialog_memory import DialogMemory
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.config import load_settings
@@ -87,6 +88,11 @@ def main() -> None:
         llm_history_turns=settings.llm_history_turns,
         llm_model=settings.openai_model if openai_client else settings.perplexity_model,
     )
+    dialog_memory = DialogMemory(
+        settings.dialog_memory_path,
+        max_turns=settings.context_max_turns,
+    )
+    asyncio.run(dialog_memory.load())
 
     application = Application.builder().token(settings.bot_token).build()
     application.post_init = reminder_scheduler.post_init
@@ -105,6 +111,7 @@ def main() -> None:
     application.bot_data["settings"] = settings
     application.bot_data["openai_client"] = openai_client
     application.bot_data["start_time"] = time.monotonic()
+    application.bot_data["dialog_memory"] = dialog_memory
 
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("help", handlers.help_command))
@@ -117,6 +124,10 @@ def main() -> None:
     application.add_handler(CommandHandler("summary", handlers.summary))
     application.add_handler(CommandHandler("facts_on", handlers.facts_on))
     application.add_handler(CommandHandler("facts_off", handlers.facts_off))
+    application.add_handler(CommandHandler("context_on", handlers.context_on))
+    application.add_handler(CommandHandler("context_off", handlers.context_off))
+    application.add_handler(CommandHandler("context_clear", handlers.context_clear))
+    application.add_handler(CommandHandler("context_status", handlers.context_status))
     application.add_handler(CommandHandler("image", handlers.image))
     application.add_handler(CommandHandler("check", handlers.check))
     application.add_handler(CommandHandler("rewrite", handlers.rewrite))

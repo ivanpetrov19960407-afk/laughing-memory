@@ -101,6 +101,9 @@ class Orchestrator:
 
     async def handle(self, text: str, user_context: dict[str, Any]) -> OrchestratorResult:
         user_id = int(user_context.get("user_id") or 0)
+        dialog_context = user_context.get("dialog_context")
+        dialog_message_count = user_context.get("dialog_message_count")
+        request_id = user_context.get("request_id")
         allowed, error_message = self._ensure_allowed(user_id)
         if not allowed:
             return OrchestratorResult(
@@ -154,6 +157,9 @@ class Orchestrator:
                     user_id,
                     payload,
                     mode=mode,
+                    dialog_context=dialog_context if isinstance(dialog_context, str) else None,
+                    dialog_message_count=dialog_message_count if isinstance(dialog_message_count, int) else None,
+                    request_id=request_id if isinstance(request_id, str) else None,
                 )
                 return self._build_llm_result(
                     execution,
@@ -172,7 +178,14 @@ class Orchestrator:
                 debug={"reason": "unsupported_command", "command": command},
             )
 
-        execution, citations = await self._request_llm(user_id, trimmed, mode="ask")
+        execution, citations = await self._request_llm(
+            user_id,
+            trimmed,
+            mode="ask",
+            dialog_context=dialog_context if isinstance(dialog_context, str) else None,
+            dialog_message_count=dialog_message_count if isinstance(dialog_message_count, int) else None,
+            request_id=request_id if isinstance(request_id, str) else None,
+        )
         return self._build_llm_result(
             execution,
             citations,
@@ -224,12 +237,18 @@ class Orchestrator:
         *,
         mode: str = "ask",
         system_prompt: str | None = None,
+        dialog_context: str | None = None,
+        dialog_message_count: int | None = None,
+        request_id: str | None = None,
     ) -> TaskExecutionResult:
         execution, _ = await self._request_llm(
             user_id,
             prompt,
             mode=mode,
             system_prompt=system_prompt,
+            dialog_context=dialog_context,
+            dialog_message_count=dialog_message_count,
+            request_id=request_id,
         )
         return execution
 
@@ -246,6 +265,9 @@ class Orchestrator:
         *,
         mode: str = "ask",
         system_prompt: str | None = None,
+        dialog_context: str | None = None,
+        dialog_message_count: int | None = None,
+        request_id: str | None = None,
     ) -> tuple[TaskExecutionResult, list[str]]:
         executed_at = datetime.now(timezone.utc)
         trimmed = prompt.strip()
@@ -304,7 +326,24 @@ class Orchestrator:
                         continue
                     messages.append({"role": "user", "content": record["payload"]})
                     messages.append({"role": "assistant", "content": record["result"]})
-            messages.append({"role": "user", "content": trimmed})
+            combined_prompt = trimmed
+            context_text = dialog_context.strip() if isinstance(dialog_context, str) else ""
+            if context_text:
+                combined_prompt = f"{context_text}\n\n{trimmed}"
+                count_messages = dialog_message_count if isinstance(dialog_message_count, int) else None
+                LOGGER.info(
+                    "LLM context applied: user_id=%s count_messages=%s request_id=%s",
+                    user_id,
+                    count_messages if count_messages is not None else "unknown",
+                    request_id or "-",
+                )
+                LOGGER.debug(
+                    "LLM context details: user_id=%s count_messages=%s chars=%s",
+                    user_id,
+                    count_messages if count_messages is not None else "unknown",
+                    len(context_text),
+                )
+            messages.append({"role": "user", "content": combined_prompt})
             LOGGER.info(
                 "LLM request: user_id=%s mode=%s prompt_len=%s history=%s",
                 user_id,

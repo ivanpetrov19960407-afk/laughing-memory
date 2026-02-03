@@ -18,13 +18,14 @@ import pytesseract
 from app.bot import menu
 from app.core import calendar_store
 from app.core.calc import CalcError, parse_and_eval
+from app.core.dialog_memory import DialogMemory, DialogMessage
 from app.core.orchestrator import Orchestrator, OrchestratorResult
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
 from app.infra.messaging import safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limiter import RateLimiter
-from app.infra.request_context import log_request, set_status, start_request
+from app.infra.request_context import get_request_context, log_request, set_status, start_request
 from app.infra.storage import TaskStorage
 
 LOGGER = logging.getLogger(__name__)
@@ -52,6 +53,10 @@ def _get_rate_limiter(context: ContextTypes.DEFAULT_TYPE) -> RateLimiter:
 
 def _get_history(context: ContextTypes.DEFAULT_TYPE) -> dict[int, list[tuple[datetime, str, str]]]:
     return context.application.bot_data["history"]
+
+
+def _get_dialog_memory(context: ContextTypes.DEFAULT_TYPE) -> DialogMemory | None:
+    return context.application.bot_data.get("dialog_memory")
 
 
 def _get_openai_client(context: ContextTypes.DEFAULT_TYPE) -> OpenAIClient | None:
@@ -200,6 +205,66 @@ def _build_user_context(update: Update) -> dict[str, int]:
     return {"user_id": user_id}
 
 
+def _build_user_context_with_dialog(
+    update: Update,
+    *,
+    dialog_context: str | None,
+    dialog_message_count: int,
+    request_id: str | None,
+) -> dict[str, object]:
+    user_id = update.effective_user.id if update.effective_user else 0
+    payload: dict[str, object] = {"user_id": user_id}
+    if dialog_context:
+        payload["dialog_context"] = dialog_context
+        payload["dialog_message_count"] = dialog_message_count
+    if request_id:
+        payload["request_id"] = request_id
+    return payload
+
+
+def _should_store_assistant_response(result: OrchestratorResult) -> bool:
+    if result.status != "ok":
+        return False
+    lowered = result.text.lower()
+    if "доступ запрещ" in lowered:
+        return False
+    if "traceback" in lowered or "stacktrace" in lowered or "stack trace" in lowered:
+        return False
+    if lowered.startswith("ошибка"):
+        return False
+    return True
+
+
+def _drop_latest_user_message(
+    messages: list[DialogMessage],
+    prompt: str,
+) -> list[DialogMessage]:
+    if not messages:
+        return messages
+    last = messages[-1]
+    if last.role == "user" and last.text.strip() == prompt.strip():
+        return messages[:-1]
+    return messages
+
+
+async def _prepare_dialog_context(
+    memory: DialogMemory | None,
+    *,
+    user_id: int,
+    chat_id: int,
+    prompt: str,
+) -> tuple[str | None, int]:
+    if memory is None:
+        return None, 0
+    if not await memory.is_enabled(user_id):
+        return None, 0
+    messages = await memory.get_context(user_id, chat_id)
+    messages = _drop_latest_user_message(messages, prompt)
+    if not messages:
+        return None, 0
+    return memory.format_context(messages), len(messages)
+
+
 def _build_tool_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> dict[str, object]:
     user_id = update.effective_user.id if update.effective_user else 0
     return {"user_id": user_id, "orchestrator": _get_orchestrator(context)}
@@ -238,7 +303,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Привет! Я бот-оркестратор задач.\n"
         f"Конфигурация: {title} (v{version}).\n"
         "Команды: /help, /ping, /tasks, /task, /last, /ask, /search, /summary, /facts_on, /facts_off, /image, "
-        "/check, /rewrite, /explain, /calc, /calendar.\n"
+        "/check, /rewrite, /explain, /calc, /calendar, /context_on, /context_off, /context_clear, /context_status.\n"
         "Можно писать обычные сообщения — верну ответ LLM.\n"
         "Суммаризация: summary: <текст> или /summary <текст>.\n"
         "Режим фактов: /facts_on и /facts_off.\n"
@@ -275,6 +340,10 @@ def _build_help_text(access_note: str) -> str:
         "/summary <текст> — краткое резюме (LLM)\n"
         "/facts_on — включить режим фактов\n"
         "/facts_off — выключить режим фактов\n"
+        "/context_on — включить контекст диалога\n"
+        "/context_off — выключить контекст диалога\n"
+        "/context_clear — очистить историю контекста\n"
+        "/context_status — статус контекста\n"
         "/image <описание> — генерация изображения\n"
         "/check <текст> — проверка текста (LLM)\n"
         "/rewrite <mode> <текст> — переписать текст (LLM)\n"
@@ -439,14 +508,36 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    dialog_memory = _get_dialog_memory(context)
+    if dialog_memory and await dialog_memory.is_enabled(user_id):
+        await dialog_memory.add_user(user_id, chat_id, prompt)
+    dialog_context, dialog_count = await _prepare_dialog_context(
+        dialog_memory,
+        user_id=user_id,
+        chat_id=chat_id,
+        prompt=prompt,
+    )
+    request_context = get_request_context(context)
+    request_id = request_context.request_id if request_context else None
     try:
-        result = await orchestrator.handle(f"/ask {prompt}", _build_user_context(update))
+        result = await orchestrator.handle(
+            f"/ask {prompt}",
+            _build_user_context_with_dialog(
+                update,
+                dialog_context=dialog_context,
+                dialog_message_count=dialog_count,
+                request_id=request_id,
+            ),
+        )
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
         return
     _log_orchestrator_result(user_id, prompt, result)
     await safe_send_text(update, context, result.text)
+    if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
+        await dialog_memory.add_assistant(user_id, chat_id, result.text)
 
 
 @_with_error_handling
@@ -463,14 +554,36 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    dialog_memory = _get_dialog_memory(context)
+    if dialog_memory and await dialog_memory.is_enabled(user_id):
+        await dialog_memory.add_user(user_id, chat_id, prompt)
+    dialog_context, dialog_count = await _prepare_dialog_context(
+        dialog_memory,
+        user_id=user_id,
+        chat_id=chat_id,
+        prompt=prompt,
+    )
+    request_context = get_request_context(context)
+    request_id = request_context.request_id if request_context else None
     try:
-        result = await orchestrator.handle(f"/search {prompt}", _build_user_context(update))
+        result = await orchestrator.handle(
+            f"/search {prompt}",
+            _build_user_context_with_dialog(
+                update,
+                dialog_context=dialog_context,
+                dialog_message_count=dialog_count,
+                request_id=request_id,
+            ),
+        )
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
         return
     _log_orchestrator_result(user_id, prompt, result)
     await safe_send_text(update, context, result.text)
+    if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
+        await dialog_memory.add_assistant(user_id, chat_id, result.text)
 
 
 @_with_error_handling
@@ -509,6 +622,61 @@ async def facts_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
     orchestrator.set_facts_only(user_id, False)
     await safe_send_text(update, context, "Режим фактов выключён. Можно отвечать без источников.")
+
+
+@_with_error_handling
+async def context_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    dialog_memory = _get_dialog_memory(context)
+    if dialog_memory is None:
+        await safe_send_text(update, context, "Контекст диалога не настроен.")
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    await dialog_memory.set_enabled(user_id, True)
+    await safe_send_text(update, context, "Контекст диалога включён.")
+
+
+@_with_error_handling
+async def context_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    dialog_memory = _get_dialog_memory(context)
+    if dialog_memory is None:
+        await safe_send_text(update, context, "Контекст диалога не настроен.")
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    await dialog_memory.set_enabled(user_id, False)
+    await safe_send_text(update, context, "Контекст диалога выключён.")
+
+
+@_with_error_handling
+async def context_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    dialog_memory = _get_dialog_memory(context)
+    if dialog_memory is None:
+        await safe_send_text(update, context, "Контекст диалога не настроен.")
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    await dialog_memory.clear(user_id, chat_id)
+    await safe_send_text(update, context, "История контекста очищена.")
+
+
+@_with_error_handling
+async def context_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    dialog_memory = _get_dialog_memory(context)
+    if dialog_memory is None:
+        await safe_send_text(update, context, "Контекст диалога не настроен.")
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    enabled, count = await dialog_memory.get_status(user_id, chat_id)
+    status = "включён" if enabled else "выключён"
+    await safe_send_text(update, context, f"Контекст {status}. Сообщений в истории: {count}.")
 
 
 @_with_error_handling
@@ -1013,14 +1181,36 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not prompt:
         return
     user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    dialog_memory = _get_dialog_memory(context)
+    if dialog_memory and await dialog_memory.is_enabled(user_id):
+        await dialog_memory.add_user(user_id, chat_id, prompt)
+    dialog_context, dialog_count = await _prepare_dialog_context(
+        dialog_memory,
+        user_id=user_id,
+        chat_id=chat_id,
+        prompt=prompt,
+    )
+    request_context = get_request_context(context)
+    request_id = request_context.request_id if request_context else None
     try:
-        result = await orchestrator.handle(prompt, _build_user_context(update))
+        result = await orchestrator.handle(
+            prompt,
+            _build_user_context_with_dialog(
+                update,
+                dialog_context=dialog_context,
+                dialog_message_count=dialog_count,
+                request_id=request_id,
+            ),
+        )
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
         return
     _log_orchestrator_result(user_id, prompt, result)
     await safe_send_text(update, context, result.text)
+    if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
+        await dialog_memory.add_assistant(user_id, chat_id, result.text)
 
 
 @_with_error_handling
