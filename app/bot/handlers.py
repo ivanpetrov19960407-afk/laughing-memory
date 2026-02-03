@@ -6,7 +6,7 @@ import logging
 import sys
 import time
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 import telegram
@@ -294,7 +294,7 @@ def _build_help_text(access_note: str) -> str:
         "/rewrite simple текст\n"
         "/explain текст\n"
         "/calc 2+2\n"
-        "/calendar add 2026-02-05 18:30 Врач\n"
+        "/calendar add 2026-02-05 18:30 -m 10 Врач\n"
         "search Путин биография\n"
         "summary: большой текст для сжатия\n"
         "echo привет\n"
@@ -630,7 +630,7 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await safe_send_text(
             update,
             context,
-            "Calendar: /calendar add YYYY-MM-DD HH:MM <title> | list [YYYY-MM-DD YYYY-MM-DD] | today | week | del <id>.",
+            "Calendar: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> | list [YYYY-MM-DD YYYY-MM-DD] | today | week | del <id> | debug_due.",
         )
         return
 
@@ -666,11 +666,11 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_photo(image_url)
 
 
-def _format_calendar_list(
+async def _format_calendar_list(
     start: datetime | None,
     end: datetime | None,
 ) -> tuple[str, str]:
-    items = calendar_store.list_items(start, end)
+    items = await calendar_store.list_items(start, end)
     if not items:
         return "Нет событий.", "ok"
     if len(items) > 20:
@@ -795,8 +795,8 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await safe_send_text(
             update,
             context,
-            "Использование: /calendar add YYYY-MM-DD HH:MM <title> | list [YYYY-MM-DD YYYY-MM-DD] | "
-            "today | week | del <id>.",
+            "Использование: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> | list [YYYY-MM-DD YYYY-MM-DD] | "
+            "today | week | del <id> | debug_due.",
         )
         return
     command = args[0].lower()
@@ -805,12 +805,28 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await safe_send_text(
                 update,
                 context,
-                "Использование: /calendar add YYYY-MM-DD HH:MM <title>.",
+                "Использование: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title>.",
             )
             return
         date_part = args[1]
         time_part = args[2]
-        title = " ".join(args[3:]).strip()
+        minutes_before = None
+        title_start = 3
+        if len(args) >= 5 and args[3] == "-m":
+            try:
+                minutes_before = int(args[4])
+            except ValueError:
+                await safe_send_text(
+                    update,
+                    context,
+                    "Минуты должны быть числом. Пример: /calendar add 2026-02-03 18:30 -m 10 Позвонить маме.",
+                )
+                return
+            if minutes_before < 0:
+                await safe_send_text(update, context, "Минуты не могут быть отрицательными.")
+                return
+            title_start = 5
+        title = " ".join(args[title_start:]).strip()
         if not title:
             await safe_send_text(
                 update,
@@ -827,7 +843,12 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Неверный формат даты. Пример: /calendar add 2026-02-05 18:30 Врач.",
             )
             return
-        item = calendar_store.add_item(dt, title)
+        remind_at = dt
+        if minutes_before is not None:
+            remind_at = dt - timedelta(minutes=minutes_before)
+        chat_id = update.effective_chat.id if update.effective_chat else 0
+        user_id = update.effective_user.id if update.effective_user else 0
+        item = await calendar_store.add_item(dt, title, chat_id=chat_id, remind_at=remind_at, user_id=user_id)
         dt_label = dt.strftime("%Y-%m-%d %H:%M")
         text = f"Добавлено: {item['id']} | {dt_label} | {title}"
         result = OrchestratorResult(
@@ -862,7 +883,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Использование: /calendar list [YYYY-MM-DD YYYY-MM-DD].",
             )
             return
-        text, status = _format_calendar_list(start, end)
+        text, status = await _format_calendar_list(start, end)
         result = OrchestratorResult(
             text=text,
             status=status,
@@ -876,7 +897,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if command == "today":
         today = datetime.now(tz=calendar_store.VIENNA_TZ).date()
         start, end = calendar_store.day_bounds(today)
-        text, status = _format_calendar_list(start, end)
+        text, status = await _format_calendar_list(start, end)
         result = OrchestratorResult(
             text=text,
             status=status,
@@ -890,7 +911,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if command == "week":
         today = datetime.now(tz=calendar_store.VIENNA_TZ).date()
         start, end = calendar_store.week_bounds(today)
-        text, status = _format_calendar_list(start, end)
+        text, status = await _format_calendar_list(start, end)
         result = OrchestratorResult(
             text=text,
             status=status,
@@ -909,7 +930,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not item_id:
             await safe_send_text(update, context, "Укажите id для удаления.")
             return
-        removed = calendar_store.delete_item(item_id)
+        removed = await calendar_store.delete_item(item_id)
         user_id = update.effective_user.id if update.effective_user else 0
         if removed:
             text = f"Удалено: {item_id}"
@@ -926,10 +947,24 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         _log_orchestrator_result(user_id, " ".join(args), result)
         await safe_send_text(update, context, text)
         return
+    if command == "debug_due":
+        now = datetime.now(tz=calendar_store.VIENNA_TZ)
+        due_items = await calendar_store.list_due_reminders(now, limit=5)
+        if not due_items:
+            await safe_send_text(update, context, "Нет просроченных напоминаний.")
+            return
+        lines = []
+        for item in due_items:
+            remind_label = item.remind_at.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+            lines.append(
+                f"{item.id} | remind_at={remind_label} | sent={item.remind_sent} | {item.title}"
+            )
+        await safe_send_text(update, context, "\n".join(lines))
+        return
     await safe_send_text(
         update,
         context,
-        "Неизвестная команда. Использование: /calendar add|list|today|week|del.",
+        "Неизвестная команда. Использование: /calendar add|list|today|week|del|debug_due.",
     )
 
 
