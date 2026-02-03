@@ -9,8 +9,9 @@ import pytest
 from app.bot import handlers
 from app.core import calendar_store
 from app.core.orchestrator import Orchestrator
-from app.core.result import Action, OrchestratorResult, ok
+from app.core.result import Action, OrchestratorResult, ok, ratelimited
 from app.core.tools_calendar import list_calendar_items, list_reminders
+from app.infra.rate_limiter import RateLimiter
 from app.infra.storage import TaskStorage
 
 
@@ -27,12 +28,19 @@ class FakeLLMClient:
 
 class DummyContext:
     def __init__(self) -> None:
-        self.application = SimpleNamespace(bot_data={"action_store": handlers.ActionPayloadStore()})
+        self.application = SimpleNamespace(
+            bot_data={
+                "action_store": handlers.ActionPayloadStore(),
+                "ui_rate_limiter": RateLimiter(),
+                "rate_limiter": RateLimiter(),
+            }
+        )
 
 
 class DummyUpdate:
     def __init__(self, user_id: int = 1) -> None:
         self.effective_user = SimpleNamespace(id=user_id)
+        self.effective_chat = SimpleNamespace(id=100)
 
 
 def test_result_defaults_empty_lists() -> None:
@@ -40,6 +48,11 @@ def test_result_defaults_empty_lists() -> None:
     assert result.sources == []
     assert result.actions == []
     assert result.attachments == []
+
+
+def test_ratelimited_result_is_valid() -> None:
+    result = ratelimited("slow down", intent="rate_limit", mode="local")
+    result.validate()
 
 
 def test_tool_calendar_returns_result(tmp_path, monkeypatch) -> None:
@@ -130,7 +143,7 @@ def test_handler_renders_actions_keyboard(monkeypatch) -> None:
     reply_markup = captured["reply_markup"]
     assert reply_markup is not None
     assert reply_markup.inline_keyboard[0][0].text == "Click me"
-    assert reply_markup.inline_keyboard[0][0].callback_data.startswith("act:")
+    assert reply_markup.inline_keyboard[0][0].callback_data.startswith("a:")
 
 
 def test_actions_and_debug_separation() -> None:

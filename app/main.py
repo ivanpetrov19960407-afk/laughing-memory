@@ -108,6 +108,10 @@ def main() -> None:
         per_minute=settings.rate_limit_per_minute,
         per_day=settings.rate_limit_per_day,
     )
+    application.bot_data["ui_rate_limiter"] = RateLimiter(
+        per_minute=max(20, settings.rate_limit_per_minute * 3),
+        per_day=max(200, settings.rate_limit_per_day * 3),
+    )
     application.bot_data["history"] = defaultdict(lambda: deque(maxlen=settings.history_size))
     application.bot_data["history_size"] = settings.history_size
     application.bot_data["message_limit"] = settings.telegram_message_limit
@@ -159,8 +163,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.COMMAND, handlers.unknown_command))
     application.add_handler(CallbackQueryHandler(handlers.action_callback))
     application.add_handler(MessageHandler(filters.PHOTO, handlers.photo))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.menu_button), group=0)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat), group=1)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
     application.add_error_handler(handlers.error_handler)
 
     logging.getLogger(__name__).info("Bot started")

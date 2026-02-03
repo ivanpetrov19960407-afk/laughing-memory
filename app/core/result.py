@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-ResultStatus = Literal["ok", "refused", "error"]
+ResultStatus = Literal["ok", "refused", "error", "ratelimited"]
 ResultMode = Literal["local", "llm", "tool"]
 
 LOGGER = logging.getLogger(__name__)
@@ -72,8 +72,8 @@ class OrchestratorResult:
         errors = []
         if not isinstance(self.text, str):
             errors.append("text must be str")
-        if self.status not in {"ok", "refused", "error"}:
-            errors.append("status must be ok/refused/error")
+        if self.status not in {"ok", "refused", "error", "ratelimited"}:
+            errors.append("status must be ok/refused/error/ratelimited")
         if self.mode not in {"local", "llm", "tool"}:
             errors.append("mode must be local/llm/tool")
         if not isinstance(self.intent, str) or not self.intent.strip():
@@ -92,6 +92,10 @@ class OrchestratorResult:
             errors.append("debug must not include actions data")
         if any(_action_payload_contains_debug(item) for item in self.actions):
             errors.append("actions must not include debug data")
+        if not _is_json_safe(self.debug):
+            errors.append("debug must be JSON-serializable")
+        if any(not _is_json_safe(_action_payload(item)) for item in self.actions):
+            errors.append("action payloads must be JSON-serializable")
         if errors:
             raise ValueError("; ".join(errors))
 
@@ -162,6 +166,28 @@ def error(
     )
 
 
+def ratelimited(
+    text: str,
+    intent: str,
+    *,
+    mode: ResultMode = "local",
+    sources: list[Source] | None = None,
+    actions: list[Action] | None = None,
+    attachments: list[Attachment] | None = None,
+    debug: dict[str, Any] | None = None,
+) -> OrchestratorResult:
+    return OrchestratorResult(
+        text=text,
+        status="ratelimited",
+        mode=mode,
+        intent=intent,
+        sources=sources or [],
+        actions=actions or [],
+        attachments=attachments or [],
+        debug=debug or {},
+    )
+
+
 def ensure_valid(
     result: OrchestratorResult,
     *,
@@ -190,6 +216,34 @@ def _action_payload_contains_debug(action: Action | dict[str, Any]) -> bool:
         payload = action.get("payload")
         return isinstance(payload, dict) and "debug" in payload
     return False
+
+
+def _action_payload(action: Action | dict[str, Any]) -> Any:
+    if isinstance(action, Action):
+        return action.payload
+    if isinstance(action, dict):
+        return action.get("payload")
+    return None
+
+
+def _is_json_safe(payload: Any) -> bool:
+    if payload is None:
+        return True
+    if isinstance(payload, (str, int, float, bool)):
+        return True
+    if isinstance(payload, (bytes, bytearray)):
+        return True
+    if isinstance(payload, dict) or isinstance(payload, list):
+        try:
+            _json_dumps(payload)
+        except Exception:
+            return False
+        return True
+    try:
+        _json_dumps(payload)
+    except Exception:
+        return False
+    return True
 
 
 def _is_valid_source(item: Source | dict[str, Any]) -> bool:
