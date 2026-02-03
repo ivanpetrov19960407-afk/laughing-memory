@@ -16,7 +16,7 @@ from telegram.ext import ContextTypes
 from PIL import Image
 import pytesseract
 
-from app.bot import menu
+from app.bot import menu, routing
 from app.core import calendar_store
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMemory, DialogMessage
@@ -70,6 +70,49 @@ def _get_reminder_scheduler(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data.get("reminder_scheduler")
 
 
+async def _get_active_modes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    user_id = update.effective_user.id if update.effective_user else 0
+    orchestrator = context.application.bot_data.get("orchestrator")
+    facts_status = "unknown"
+    if isinstance(orchestrator, Orchestrator) and user_id:
+        facts_status = "on" if orchestrator.is_facts_only(user_id) else "off"
+
+    dialog_memory = _get_dialog_memory(context)
+    if dialog_memory is None or not user_id:
+        context_status = "off" if dialog_memory is None else "unknown"
+    else:
+        context_status = "on" if await dialog_memory.is_enabled(user_id) else "off"
+
+    settings = context.application.bot_data.get("settings")
+    reminders_status = "unknown"
+    if settings is not None and hasattr(settings, "reminders_enabled"):
+        reminders_status = "on" if settings.reminders_enabled else "off"
+
+    return f"facts={facts_status}, context={context_status}, reminders={reminders_status}"
+
+
+async def _log_route(update: Update, context: ContextTypes.DEFAULT_TYPE, handler_name: str) -> None:
+    user_id = update.effective_user.id if update.effective_user else 0
+    message = update.effective_message
+    text = message.text if message and message.text else ""
+    command = routing.normalize_command(text)
+    if text:
+        message_type = "command" if command else "text"
+    else:
+        message_type = "non_text"
+    route = routing.resolve_text_route(text) if text else "non_text"
+    modes = await _get_active_modes(update, context)
+    LOGGER.info(
+        "Route: user_id=%s type=%s command=%s handler=%s route=%s modes=%s",
+        user_id,
+        message_type,
+        command or "-",
+        handler_name,
+        route,
+        modes,
+    )
+
+
 def _with_error_handling(
     handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]],
 ) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]:
@@ -77,6 +120,7 @@ def _with_error_handling(
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         request_context = start_request(update, context)
         try:
+            await _log_route(update, context, handler.__name__)
             await handler(update, context)
         except Exception as exc:
             set_status(context, "error")
@@ -425,13 +469,28 @@ def _build_help_text(access_note: str) -> str:
     )
 
 
-def _build_health_message(context: ContextTypes.DEFAULT_TYPE) -> str:
+async def _build_health_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int | None = None,
+) -> str:
     settings = context.application.bot_data["settings"]
     rate_limiter = _get_rate_limiter(context)
     start_time = context.application.bot_data.get("start_time", time.monotonic())
     uptime = _format_uptime(start_time)
     python_version = sys.version.split()[0]
     telegram_version = telegram.__version__
+    modes = "-"
+    if user_id is not None:
+        orchestrator = _get_orchestrator(context)
+        dialog_memory = _get_dialog_memory(context)
+        facts_status = "on" if orchestrator.is_facts_only(user_id) else "off"
+        if dialog_memory is None:
+            context_status = "off"
+        else:
+            context_status = "on" if await dialog_memory.is_enabled(user_id) else "off"
+        reminders_status = "on" if settings.reminders_enabled else "off"
+        modes = f"facts={facts_status}, context={context_status}, reminders={reminders_status}"
     return (
         "Health:\n"
         f"Uptime: {uptime}\n"
@@ -439,7 +498,8 @@ def _build_health_message(context: ContextTypes.DEFAULT_TYPE) -> str:
         f"Python: {python_version}\n"
         f"Telegram: {telegram_version}\n"
         f"Orchestrator config: {settings.orchestrator_config_path}\n"
-        f"Rate limit cache: {rate_limiter.cache_size} users"
+        f"Rate limit cache: {rate_limiter.cache_size} users\n"
+        f"Modes: {modes}"
     )
 
 
@@ -826,7 +886,8 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     orchestrator = _get_orchestrator(context)
     if text == menu.STATUS_BUTTON:
-        await safe_send_text(update, context, _build_health_message(context))
+        user_id = update.effective_user.id if update.effective_user else 0
+        await safe_send_text(update, context, await _build_health_message(context, user_id=user_id))
         return
     if text == menu.SUMMARY_BUTTON:
         await safe_send_text(update, context, "Суммаризация: summary: <текст> или /summary <текст>.")
@@ -1229,6 +1290,16 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def reminders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
+    message_text = update.message.text if update.message else ""
+    if message_text and routing.normalize_command(message_text) != "/reminders":
+        user_id = update.effective_user.id if update.effective_user else 0
+        LOGGER.warning(
+            "Reminders route guard: user_id=%s command=%s fallback=llm",
+            user_id,
+            routing.normalize_command(message_text) or "-",
+        )
+        await chat(update, context)
+        return
     user_id = update.effective_user.id if update.effective_user else 0
     limit = 5
     if context.args:
@@ -1452,7 +1523,8 @@ async def selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
-    await safe_send_text(update, context, _build_health_message(context))
+    user_id = update.effective_user.id if update.effective_user else 0
+    await safe_send_text(update, context, await _build_health_message(context, user_id=user_id))
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

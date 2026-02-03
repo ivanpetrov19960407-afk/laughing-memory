@@ -3,7 +3,9 @@ from pathlib import Path
 import asyncio
 
 from app.core.orchestrator import Orchestrator
-from app.core.text_safety import SAFE_FALLBACK_TEXT
+import re
+
+from app.core.text_safety import SAFE_FALLBACK_TEXT, SOURCES_DISCLAIMER_TEXT
 from app.infra.storage import TaskStorage
 
 
@@ -54,6 +56,34 @@ class FakeLLMWithSourcesOnly:
         return "Источники:\n[1]\n[2]\nпо данным sources"
 
 
+class FakeLLMWithSourceRequest:
+    def __init__(self) -> None:
+        self.api_key = "fake-key"
+        self.calls = 0
+
+    async def create_chat_completion(self, *, model: str, messages: list[dict], max_tokens=None, web_search_options=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {"content": "Исследования показывают 45% улучшение, подтверждено МРТ."}
+        return {
+            "content": (
+                "Эффект плацебо — это улучшение состояния благодаря ожиданию пользы. "
+                "Он связан с восприятием, вниманием и контекстом лечения. "
+                "Такое ожидание способно менять самочувствие без активного вещества."
+            )
+        }
+
+    async def generate_text(self, *, model: str, messages: list[dict], max_tokens=None, web_search_options=None) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            return "Исследования показывают 45% улучшение, подтверждено МРТ."
+        return (
+            "Эффект плацебо — это улучшение состояния благодаря ожиданию пользы. "
+            "Он связан с восприятием, вниманием и контекстом лечения. "
+            "Такое ожидание способно менять самочувствие без активного вещества."
+        )
+
+
 def test_orchestrator_ask_no_fake_citations(tmp_path: Path) -> None:
     db_path = tmp_path / "bot.db"
     storage = TaskStorage(db_path)
@@ -74,3 +104,18 @@ def test_sanitizer_failure_fallback(tmp_path: Path) -> None:
     result = asyncio.run(orchestrator.handle("Что такое HTTP?", {"user_id": 1}))
 
     assert result.text == SAFE_FALLBACK_TEXT
+
+
+def test_sources_request_adds_disclaimer(tmp_path: Path) -> None:
+    db_path = tmp_path / "bot.db"
+    storage = TaskStorage(db_path)
+    orchestrator = Orchestrator(config={}, storage=storage, llm_client=FakeLLMWithSourceRequest())
+
+    result = asyncio.run(orchestrator.handle("Объясни эффект плацебо со ссылками на исследования", {"user_id": 1}))
+
+    assert result.text.startswith(SOURCES_DISCLAIMER_TEXT)
+    assert "%" not in result.text
+    assert re.search(r"\d", result.text) is None
+    body = result.text[len(SOURCES_DISCLAIMER_TEXT) :].strip().lower()
+    assert "исследован" not in body
+    assert "подтвержден" not in body

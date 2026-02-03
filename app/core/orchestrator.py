@@ -18,7 +18,7 @@ from app.core.result import (
     ok,
     refused,
 )
-from app.core.text_safety import SAFE_FALLBACK_TEXT, sanitize_llm_text
+from app.core.text_safety import SAFE_FALLBACK_TEXT, SOURCES_DISCLAIMER_TEXT, is_sources_request, sanitize_llm_text
 from app.core.tasks import TaskDefinition, TaskError, get_task_registry
 from app.infra.access import AccessController
 from app.infra.llm import LLMAPIError, LLMClient, LLMGuardError, ensure_plain_text
@@ -252,6 +252,7 @@ class Orchestrator:
     ) -> tuple[TaskExecutionResult, list[str]]:
         executed_at = datetime.now(timezone.utc)
         trimmed = prompt.strip()
+        sources_requested = is_sources_request(trimmed)
         if not trimmed:
             execution = self._error_execution(user_id, mode, prompt, "Запрос пустой.", executed_at)
             return execution, []
@@ -292,64 +293,89 @@ class Orchestrator:
                     "search_system_prompt",
                     effective_system_prompt,
                 )
-            messages: list[dict[str, Any]] = []
-            if effective_system_prompt:
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": f"{effective_system_prompt}\n\n{_PLAIN_TEXT_SYSTEM_PROMPT}",
-                    }
-                )
-            else:
-                messages.append({"role": "system", "content": _PLAIN_TEXT_SYSTEM_PROMPT})
-            history_turns = self._resolve_history_turns(llm_config)
-            if history_turns > 0:
-                recent = self._storage.get_recent_executions(
-                    user_id,
-                    task_names=["ask", "search"],
-                    limit=history_turns,
-                )
-                for record in recent:
-                    if record["status"] != "success":
-                        continue
-                    messages.append({"role": "user", "content": record["payload"]})
-                    messages.append({"role": "assistant", "content": record["result"]})
-            combined_prompt = trimmed
-            context_text = dialog_context.strip() if isinstance(dialog_context, str) else ""
-            if context_text:
-                combined_prompt = f"{context_text}\n\n{trimmed}"
-                count_messages = dialog_message_count if isinstance(dialog_message_count, int) else None
+            def _build_messages(request_prompt: str) -> list[dict[str, Any]]:
+                messages: list[dict[str, Any]] = []
+                if effective_system_prompt:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": f"{effective_system_prompt}\n\n{_PLAIN_TEXT_SYSTEM_PROMPT}",
+                        }
+                    )
+                else:
+                    messages.append({"role": "system", "content": _PLAIN_TEXT_SYSTEM_PROMPT})
+                history_turns = self._resolve_history_turns(llm_config)
+                if history_turns > 0:
+                    recent = self._storage.get_recent_executions(
+                        user_id,
+                        task_names=["ask", "search"],
+                        limit=history_turns,
+                    )
+                    for record in recent:
+                        if record["status"] != "success":
+                            continue
+                        messages.append({"role": "user", "content": record["payload"]})
+                        messages.append({"role": "assistant", "content": record["result"]})
+                combined_prompt = request_prompt
+                context_text = dialog_context.strip() if isinstance(dialog_context, str) else ""
+                if context_text:
+                    combined_prompt = f"{context_text}\n\n{request_prompt}"
+                    count_messages = dialog_message_count if isinstance(dialog_message_count, int) else None
+                    LOGGER.info(
+                        "LLM context applied: user_id=%s count_messages=%s request_id=%s",
+                        user_id,
+                        count_messages if count_messages is not None else "unknown",
+                        request_id or "-",
+                    )
+                    LOGGER.debug(
+                        "LLM context details: user_id=%s count_messages=%s chars=%s",
+                        user_id,
+                        count_messages if count_messages is not None else "unknown",
+                        len(context_text),
+                    )
+                messages.append({"role": "user", "content": combined_prompt})
+                return messages
+
+            def _log_request(messages: list[dict[str, Any]], *, attempt: str = "primary") -> None:
                 LOGGER.info(
-                    "LLM context applied: user_id=%s count_messages=%s request_id=%s",
+                    "LLM request: user_id=%s mode=%s prompt_len=%s history=%s attempt=%s",
                     user_id,
-                    count_messages if count_messages is not None else "unknown",
-                    request_id or "-",
+                    mode,
+                    len(trimmed),
+                    max(len(messages) - 1, 0),
+                    attempt,
                 )
-                LOGGER.debug(
-                    "LLM context details: user_id=%s count_messages=%s chars=%s",
-                    user_id,
-                    count_messages if count_messages is not None else "unknown",
-                    len(context_text),
-                )
-            messages.append({"role": "user", "content": combined_prompt})
-            LOGGER.info(
-                "LLM request: user_id=%s mode=%s prompt_len=%s history=%s",
-                user_id,
-                mode,
-                len(trimmed),
-                max(len(messages) - 1, 0),
-            )
+
             start_time = time.monotonic()
             try:
+                messages = _build_messages(trimmed)
+                _log_request(messages)
                 response_text = await llm_client.generate_text(
                     model=model,
                     messages=messages,
                     web_search_options=None,
                 )
                 result = ensure_plain_text(response_text)
-                sanitized, meta = sanitize_llm_text(result)
+                sanitized, meta = sanitize_llm_text(result, sources_requested=sources_requested)
+                if sources_requested and meta.get("needs_regeneration"):
+                    regen_instruction = (
+                        "Ответь простым языком, без цифр, без упоминаний исследований/методов/нейровизуализации, "
+                        "2–6 предложений."
+                    )
+                    regen_prompt = f"{trimmed}\n\n{regen_instruction}"
+                    regen_messages = _build_messages(regen_prompt)
+                    _log_request(regen_messages, attempt="regen")
+                    response_text = await llm_client.generate_text(
+                        model=model,
+                        messages=regen_messages,
+                        web_search_options=None,
+                    )
+                    result = ensure_plain_text(response_text)
+                    sanitized, meta = sanitize_llm_text(result, sources_requested=sources_requested)
                 if meta["failed"]:
                     result = SAFE_FALLBACK_TEXT
+                    if sources_requested:
+                        result = f"{SOURCES_DISCLAIMER_TEXT}\n{result}"
                     LOGGER.warning(
                         "LLM text sanitization failed: user_id=%s mode=%s meta=%s",
                         user_id,
