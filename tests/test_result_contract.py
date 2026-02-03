@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.bot import handlers
+from app.bot import actions, handlers
 from app.core import calendar_store
 from app.core.orchestrator import Orchestrator
 from app.core.result import Action, OrchestratorResult, ok, ratelimited
@@ -30,17 +30,19 @@ class DummyContext:
     def __init__(self) -> None:
         self.application = SimpleNamespace(
             bot_data={
-                "action_store": handlers.ActionPayloadStore(),
+                "action_store": actions.ActionStore(),
                 "ui_rate_limiter": RateLimiter(),
                 "rate_limiter": RateLimiter(),
             }
         )
+        self.chat_data: dict[str, object] = {}
 
 
 class DummyUpdate:
     def __init__(self, user_id: int = 1) -> None:
         self.effective_user = SimpleNamespace(id=user_id)
         self.effective_chat = SimpleNamespace(id=100)
+        self.callback_query = None
 
 
 def test_result_defaults_empty_lists() -> None:
@@ -121,7 +123,7 @@ def test_handler_does_not_leak_debug(monkeypatch) -> None:
     monkeypatch.setattr(handlers, "safe_send_text", fake_safe_send_text)
 
     result = ok("Hello", intent="test", mode="local", debug={"secret": "token"})
-    asyncio.run(handlers._send_result(DummyUpdate(), DummyContext(), result))
+    asyncio.run(handlers.send_result(DummyUpdate(), DummyContext(), result))
 
     assert captured["text"] == "Hello"
     assert "secret" not in str(captured["text"])
@@ -138,7 +140,7 @@ def test_handler_renders_actions_keyboard(monkeypatch) -> None:
 
     action = Action(id="test", label="Click me", payload={"foo": "bar"})
     result = ok("Hello", intent="test", mode="local", actions=[action])
-    asyncio.run(handlers._send_result(DummyUpdate(), DummyContext(), result))
+    asyncio.run(handlers.send_result(DummyUpdate(), DummyContext(), result))
 
     reply_markup = captured["reply_markup"]
     assert reply_markup is not None

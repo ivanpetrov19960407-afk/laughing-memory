@@ -7,7 +7,7 @@ from collections import defaultdict, deque
 
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
-from app.bot import handlers
+from app.bot import actions, handlers
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
 from app.core.reminders import ReminderScheduler
 from app.core.dialog_memory import DialogMemory
@@ -119,7 +119,7 @@ def main() -> None:
     application.bot_data["openai_client"] = openai_client
     application.bot_data["start_time"] = time.monotonic()
     application.bot_data["dialog_memory"] = dialog_memory
-    application.bot_data["action_store"] = handlers.ActionPayloadStore()
+    application.bot_data["action_store"] = actions.ActionStore()
 
     async def _restore_reminders(app: Application) -> None:
         if not settings.reminders_enabled:
