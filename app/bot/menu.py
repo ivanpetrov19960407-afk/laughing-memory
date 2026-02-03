@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from telegram import ReplyKeyboardMarkup, Update
-from telegram.ext import ContextTypes
-
-from app.infra.messaging import safe_send_text
+from telegram import ReplyKeyboardMarkup
 
 STATUS_BUTTON = "ℹ️ Статус"
 SUMMARY_BUTTON = "🧾 Summary"
@@ -30,10 +27,6 @@ def build_main_menu() -> ReplyKeyboardMarkup:
     )
 
 
-async def show_menu(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    text: str | None = None,
-) -> None:
+def build_menu_payload(text: str | None = None) -> tuple[str, ReplyKeyboardMarkup]:
     message = text or "Меню:"
-    await safe_send_text(update, context, message, reply_markup=build_main_menu())
+    return message, build_main_menu()
