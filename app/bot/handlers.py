@@ -23,7 +23,7 @@ from app.core import calendar_store
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMemory, DialogMessage
 from app.core.orchestrator import Orchestrator
-from app.core.result import Action, OrchestratorResult, ensure_valid, error, ok, refused
+from app.core.result import Action, OrchestratorResult, ensure_valid, error, ok, ratelimited, refused
 from app.core.tools_calendar import list_calendar_items, list_reminders
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
@@ -34,39 +34,44 @@ from app.infra.request_context import get_request_context, log_request, set_stat
 from app.infra.storage import TaskStorage
 
 LOGGER = logging.getLogger(__name__)
-_CALLBACK_PREFIX = "act:"
+_CALLBACK_PREFIX = "a:"
 _CALLBACK_TTL_SECONDS = 600
 
 
 @dataclass
 class _StoredAction:
     user_id: int
+    chat_id: int
     action_id: str
     payload: dict[str, Any]
+    created_at: float
     expires_at: float
 
 
 class ActionPayloadStore:
-    def __init__(self, *, ttl_seconds: int = _CALLBACK_TTL_SECONDS, max_items: int = 1000) -> None:
+    def __init__(self, *, ttl_seconds: int = _CALLBACK_TTL_SECONDS, max_items: int = 2000) -> None:
         self._ttl_seconds = ttl_seconds
         self._max_items = max_items
         self._items: dict[str, _StoredAction] = {}
 
-    def store(self, *, user_id: int, action_id: str, payload: dict[str, Any]) -> str:
+    def store(self, *, user_id: int, chat_id: int, action_id: str, payload: dict[str, Any]) -> str:
         self._cleanup()
         token = self._generate_token()
+        now = time.monotonic()
         self._items[token] = _StoredAction(
             user_id=user_id,
+            chat_id=chat_id,
             action_id=action_id,
             payload=payload,
-            expires_at=time.monotonic() + self._ttl_seconds,
+            created_at=now,
+            expires_at=now + self._ttl_seconds,
         )
         return token
 
-    def pop(self, *, user_id: int, token: str) -> _StoredAction | None:
+    def pop(self, *, user_id: int, chat_id: int, token: str) -> _StoredAction | None:
         self._cleanup()
         item = self._items.get(token)
-        if item is None or item.user_id != user_id:
+        if item is None or item.user_id != user_id or item.chat_id != chat_id:
             return None
         if item.expires_at < time.monotonic():
             self._items.pop(token, None)
@@ -107,7 +112,9 @@ def _get_admin_user_ids(context: ContextTypes.DEFAULT_TYPE) -> set[int]:
     return context.application.bot_data["admin_user_ids"]
 
 
-def _get_rate_limiter(context: ContextTypes.DEFAULT_TYPE) -> RateLimiter:
+def _get_rate_limiter(context: ContextTypes.DEFAULT_TYPE, *, bucket: str = "default") -> RateLimiter:
+    if bucket == "ui":
+        return context.application.bot_data["ui_rate_limiter"]
     return context.application.bot_data["rate_limiter"]
 
 
@@ -232,7 +239,7 @@ def _format_uptime(start_time: float) -> str:
     return " ".join(parts)
 
 
-async def _guard_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def _guard_access(update: Update, context: ContextTypes.DEFAULT_TYPE, *, bucket: str = "default") -> bool:
     user = update.effective_user
     user_id = user.id if user else 0
     if not _is_allowed_user(context, user_id):
@@ -245,7 +252,7 @@ async def _guard_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
         set_status(context, "error")
         await _send_access_denied(update, context, user_id)
         return False
-    rate_limiter = _get_rate_limiter(context)
+    rate_limiter = _get_rate_limiter(context, bucket=bucket)
     result = await rate_limiter.check(user_id)
     if not result.allowed:
         set_status(context, "ratelimited")
@@ -254,10 +261,9 @@ async def _guard_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
             message = f"Лимит запросов на сегодня. Попробуй через {wait_time}."
         else:
             message = f"Слишком часто. Попробуй через {wait_time}."
-        result_message = _build_simple_result(
+        result_message = ratelimited(
             message,
             intent="rate_limit",
-            status="refused",
             mode="local",
             debug={"scope": result.scope, "retry_after": result.retry_after},
         )
@@ -354,6 +360,8 @@ def _build_simple_result(
         return ok(text, intent=intent, mode=mode, debug=debug)
     if status == "refused":
         return refused(text, intent=intent, mode=mode, debug=debug)
+    if status == "ratelimited":
+        return ratelimited(text, intent=intent, mode=mode, debug=debug)
     return error(text, intent=intent, mode=mode, debug=debug)
 
 
@@ -428,14 +436,15 @@ def _log_orchestrator_result(
     result: OrchestratorResult,
 ) -> None:
     LOGGER.info(
-        "Orchestrator result: user_id=%s intent=%s mode=%s status=%s prompt_len=%s response_len=%s sources=%s",
+        "Orchestrator result: user_id=%s intent=%s mode=%s status=%s sources=%s actions=%s attachments=%s response_len=%s",
         user_id,
         result.intent,
         result.mode,
         result.status,
-        len(prompt),
-        len(result.text),
         len(result.sources),
+        len(result.actions),
+        len(result.attachments),
+        len(result.text),
     )
     if result.debug:
         LOGGER.info("Orchestrator debug: user_id=%s intent=%s debug=%s", user_id, result.intent, result.debug)
@@ -446,9 +455,10 @@ def _encode_action_data(
     *,
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
+    chat_id: int,
 ) -> str:
     store = _get_action_store(context)
-    token = store.store(user_id=user_id, action_id=action.id, payload=action.payload)
+    token = store.store(user_id=user_id, chat_id=chat_id, action_id=action.id, payload=action.payload)
     data = f"{_CALLBACK_PREFIX}{token}"
     if len(data.encode("utf-8")) > 64:
         LOGGER.warning("Callback data too long for action_id=%s token=%s", action.id, token)
@@ -461,13 +471,22 @@ def _build_action_keyboard(
     *,
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
+    chat_id: int,
 ) -> InlineKeyboardMarkup | None:
     if not actions:
         return None
-    buttons = [
-        [InlineKeyboardButton(action.label, callback_data=_encode_action_data(action, context=context, user_id=user_id))]
-        for action in actions
-    ]
+    buttons: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for index, action in enumerate(actions, start=1):
+        row.append(
+            InlineKeyboardButton(
+                action.label,
+                callback_data=_encode_action_data(action, context=context, user_id=user_id, chat_id=chat_id),
+            )
+        )
+        if len(row) == 2 or index == len(actions):
+            buttons.append(row)
+            row = []
     return InlineKeyboardMarkup(buttons)
 
 
@@ -523,7 +542,14 @@ async def _send_result(
 ) -> None:
     public_result = ensure_valid(result)
     user_id = update.effective_user.id if update.effective_user else 0
-    inline_keyboard = _build_action_keyboard(public_result.actions, context=context, user_id=user_id)
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    _log_orchestrator_result(user_id, "", public_result)
+    inline_keyboard = _build_action_keyboard(
+        public_result.actions,
+        context=context,
+        user_id=user_id,
+        chat_id=chat_id,
+    )
     effective_reply_markup = reply_markup if reply_markup is not None else inline_keyboard
     await _send_text(update, context, public_result.text, reply_markup=effective_reply_markup)
     await _send_attachments(update, context, public_result.attachments)
@@ -532,7 +558,7 @@ async def _send_result(
 @_with_error_handling
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     orchestrator = _get_orchestrator(context)
-    if not await _guard_access(update, context):
+    if not await _guard_access(update, context, bucket="ui"):
         return
     metadata = orchestrator.config.get("system_metadata", {})
     title = metadata.get("title", "Orchestrator")
@@ -554,15 +580,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Локальные команды: echo, upper, json_pretty, calc, calendar.\n"
         "Служебные команды: /selfcheck, /health."
     )
-    menu_text, menu_markup = menu.build_menu_payload(message + access_note)
-    result = _build_simple_result(menu_text, intent="command.start", status="ok", mode="local")
-    await _send_result(update, context, result, reply_markup=menu_markup)
+    result = ok(
+        message + access_note,
+        intent="command.start",
+        mode="local",
+        actions=menu.build_menu_actions(),
+    )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     orchestrator = _get_orchestrator(context)
-    if not await _guard_access(update, context):
+    if not await _guard_access(update, context, bucket="ui"):
         return
     access_note = ""
     if orchestrator.is_access_restricted():
@@ -682,7 +712,7 @@ async def _build_health_message(
 @_with_error_handling
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     orchestrator = _get_orchestrator(context)
-    if not await _guard_access(update, context):
+    if not await _guard_access(update, context, bucket="ui"):
         return
     metadata = orchestrator.config.get("system_metadata", {})
     version = metadata.get("version", "unknown")
@@ -1184,122 +1214,15 @@ async def allowlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @_with_error_handling
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context):
+    if not await _guard_access(update, context, bucket="ui"):
         return
-    menu_text, menu_markup = menu.build_menu_payload()
-    result = _build_simple_result(menu_text, intent="command.menu", status="ok", mode="local")
-    await _send_result(update, context, result, reply_markup=menu_markup)
-
-
-@_with_error_handling
-async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.message.text:
-        return
-    text = update.message.text.strip()
-    if text not in {
-        menu.STATUS_BUTTON,
-        menu.SUMMARY_BUTTON,
-        menu.FACTS_TOGGLE_BUTTON,
-        menu.HELP_BUTTON,
-        menu.CHECK_BUTTON,
-        menu.REWRITE_BUTTON,
-        menu.EXPLAIN_BUTTON,
-        menu.CALC_BUTTON,
-        menu.CALENDAR_BUTTON,
-    }:
-        return
-    if not await _guard_access(update, context):
-        return
-    orchestrator = _get_orchestrator(context)
-    if text == menu.STATUS_BUTTON:
-        user_id = update.effective_user.id if update.effective_user else 0
-        result = _build_simple_result(
-            await _build_health_message(context, user_id=user_id),
-            intent="menu.status",
-            status="ok",
-            mode="local",
-        )
-        await _send_result(update, context, result)
-        return
-    if text == menu.SUMMARY_BUTTON:
-        result = _build_simple_result(
-            "Суммаризация: summary: <текст> или /summary <текст>.",
-            intent="menu.summary",
-            status="ok",
-            mode="local",
-        )
-        await _send_result(update, context, result)
-        return
-    if text == menu.FACTS_TOGGLE_BUTTON:
-        user_id = update.effective_user.id if update.effective_user else 0
-        new_value = not orchestrator.is_facts_only(user_id)
-        orchestrator.set_facts_only(user_id, new_value)
-        status = "включён" if new_value else "выключён"
-        result = _build_simple_result(
-            f"Режим фактов {status}.",
-            intent="menu.facts_toggle",
-            status="ok",
-            mode="local",
-        )
-        await _send_result(update, context, result)
-        return
-    if text == menu.HELP_BUTTON:
-        access_note = ""
-        if orchestrator.is_access_restricted():
-            access_note = "\n\nДоступ ограничен whitelist пользователей."
-        result = _build_simple_result(
-            _build_help_text(access_note),
-            intent="menu.help",
-            status="ok",
-            mode="local",
-        )
-        await _send_result(update, context, result)
-        return
-    if text == menu.CHECK_BUTTON:
-        result = _build_simple_result(
-            "Проверка: /check <текст> или ответом на сообщение.",
-            intent="menu.check",
-            status="ok",
-            mode="local",
-        )
-        await _send_result(update, context, result)
-        return
-    if text == menu.REWRITE_BUTTON:
-        result = _build_simple_result(
-            "Rewrite: /rewrite <simple|hard|short> <текст>.",
-            intent="menu.rewrite",
-            status="ok",
-            mode="local",
-        )
-        await _send_result(update, context, result)
-        return
-    if text == menu.EXPLAIN_BUTTON:
-        result = _build_simple_result(
-            "Explain: /explain <текст> или ответом на сообщение.",
-            intent="menu.explain",
-            status="ok",
-            mode="local",
-        )
-        await _send_result(update, context, result)
-        return
-    if text == menu.CALC_BUTTON:
-        result = _build_simple_result(
-            "Calc: /calc <выражение>.",
-            intent="menu.calc",
-            status="ok",
-            mode="local",
-        )
-        await _send_result(update, context, result)
-        return
-    if text == menu.CALENDAR_BUTTON:
-        result = _build_simple_result(
-            "Calendar: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> | list [YYYY-MM-DD YYYY-MM-DD] | today | week | del <id> | debug_due.",
-            intent="menu.calendar",
-            status="ok",
-            mode="local",
-        )
-        await _send_result(update, context, result)
-        return
+    result = ok(
+        "Меню:",
+        intent="command.menu",
+        mode="local",
+        actions=menu.build_menu_actions(),
+    )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -1307,9 +1230,12 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     if query is None:
         return
+    if not await _guard_access(update, context, bucket="ui"):
+        return
     await query.answer()
     data = query.data or ""
     user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
     if not data.startswith(_CALLBACK_PREFIX):
         result = refused(
             "Действие недоступно.",
@@ -1322,7 +1248,7 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     token = data[len(_CALLBACK_PREFIX) :]
     store = _get_action_store(context)
-    stored = store.pop(user_id=user_id, token=token)
+    stored = store.pop(user_id=user_id, chat_id=chat_id, token=token)
     if stored is None:
         result = refused(
             "Действие недоступно или устарело.",
@@ -1346,6 +1272,45 @@ async def _dispatch_action(
     orchestrator = _get_orchestrator(context)
     user_id = update.effective_user.id if update.effective_user else 0
     payload = stored.payload
+    op = payload.get("op")
+    if op == "menu_open":
+        return ok("Меню:", intent="menu.open", mode="local", actions=menu.build_menu_actions())
+    if op == "run_command":
+        command = payload.get("command")
+        args = payload.get("args", "")
+        if not isinstance(command, str):
+            return error(
+                "Некорректные данные действия.",
+                intent="ui.action",
+                mode="local",
+                debug={"reason": "invalid_command"},
+            )
+        return await _dispatch_command_payload(
+            update,
+            context,
+            command=command,
+            args=args if isinstance(args, str) else "",
+        )
+    if op == "reminder_off":
+        reminder_id = payload.get("id")
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="ui.action",
+                mode="local",
+                debug={"reason": "invalid_reminder_id"},
+            )
+        return await _handle_reminder_off(context, user_id=user_id, reminder_id=reminder_id)
+    if op == "reminder_on":
+        event_id = payload.get("event_id")
+        if not isinstance(event_id, str) or not event_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="ui.action",
+                mode="local",
+                debug={"reason": "invalid_event_id"},
+            )
+        return await _handle_reminder_on(context, user_id=user_id, event_id=event_id)
     if stored.action_id == "task.execute":
         task_name = payload.get("name")
         task_payload = payload.get("payload")
@@ -1365,6 +1330,105 @@ async def _dispatch_action(
         intent="ui.action",
         mode="local",
         debug={"reason": "unknown_action", "action_id": stored.action_id},
+    )
+
+
+async def _dispatch_command_payload(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    command: str,
+    args: str,
+) -> OrchestratorResult:
+    normalized = routing.normalize_command(command)
+    orchestrator = _get_orchestrator(context)
+    if normalized in {"/menu", "/start"}:
+        return ok("Меню:", intent="menu.open", mode="local", actions=menu.build_menu_actions())
+    if normalized == "/calc":
+        return ok("Calc: /calc <выражение>.", intent="menu.calc", mode="local")
+    if normalized == "/calendar":
+        return ok(
+            "Calendar: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> | list [YYYY-MM-DD YYYY-MM-DD] | today | week | del <id> | debug_due.",
+            intent="menu.calendar",
+            mode="local",
+        )
+    if normalized == "/check":
+        return ok("Проверка: /check <текст> или ответом на сообщение.", intent="menu.check", mode="local")
+    if normalized == "/help":
+        access_note = ""
+        if orchestrator.is_access_restricted():
+            access_note = "\n\nДоступ ограничен whitelist пользователей."
+        return ok(_build_help_text(access_note), intent="menu.help", mode="local")
+    if normalized == "/health":
+        user_id = update.effective_user.id if update.effective_user else 0
+        message = await _build_health_message(context, user_id=user_id)
+        return ok(message, intent="menu.status", mode="local")
+    return refused(
+        f"Команда недоступна: {command}",
+        intent="ui.action",
+        mode="local",
+        debug={"command": command, "args": args},
+    )
+
+
+async def _handle_reminder_off(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    reminder_id: str,
+) -> OrchestratorResult:
+    scheduler = _get_reminder_scheduler(context)
+    if scheduler:
+        try:
+            await scheduler.cancel_reminder(reminder_id)
+        except Exception:
+            LOGGER.exception("Failed to cancel reminder: reminder_id=%s", reminder_id)
+            return error(
+                "Не удалось отменить напоминание.",
+                intent="utility_reminders.off",
+                mode="local",
+            )
+    else:
+        await calendar_store.disable_reminder(reminder_id)
+    return ok(
+        f"Напоминание отключено: {reminder_id}",
+        intent="utility_reminders.off",
+        mode="local",
+    )
+
+
+async def _handle_reminder_on(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    event_id: str,
+) -> OrchestratorResult:
+    event = await calendar_store.get_event(event_id)
+    if event is None:
+        return refused(
+            f"Событие не найдено: {event_id}",
+            intent="utility_reminders.on",
+            mode="local",
+        )
+    settings = context.application.bot_data.get("settings")
+    offset_minutes = settings.reminder_default_offset_minutes if settings is not None else 10
+    trigger_at = event.dt - timedelta(minutes=offset_minutes) if offset_minutes else event.dt
+    scheduler = _get_reminder_scheduler(context)
+    reminder = await calendar_store.ensure_reminder_for_event(event, trigger_at, enabled=True)
+    if scheduler and settings is not None and settings.reminders_enabled:
+        try:
+            await scheduler.schedule_reminder(reminder)
+        except Exception:
+            LOGGER.exception("Failed to schedule reminder: reminder_id=%s", reminder.id)
+            return error(
+                "Не удалось включить напоминание.",
+                intent="utility_reminders.on",
+                mode="local",
+            )
+    return ok(
+        f"Напоминание включено: {reminder.id}",
+        intent="utility_reminders.on",
+        mode="local",
     )
 
 
@@ -1791,27 +1855,7 @@ async def reminder_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         _log_orchestrator_result(user_id, " ".join(context.args), result)
         await _send_result(update, context, result)
         return
-    scheduler = _get_reminder_scheduler(context)
-    if scheduler:
-        try:
-            await scheduler.cancel_reminder(reminder_id)
-        except Exception:
-            LOGGER.exception("Failed to cancel reminder: reminder_id=%s", reminder_id)
-            result = error(
-                "Не удалось отменить напоминание.",
-                intent="utility_reminders.off",
-                mode="local",
-            )
-            _log_orchestrator_result(user_id, " ".join(context.args), result)
-            await _send_result(update, context, result)
-            return
-    else:
-        await calendar_store.disable_reminder(reminder_id)
-    result = ok(
-        f"Напоминание отключено: {reminder_id}",
-        intent="utility_reminders.off",
-        mode="local",
-    )
+    result = await _handle_reminder_off(context, user_id=user_id, reminder_id=reminder_id)
     _log_orchestrator_result(user_id, " ".join(context.args), result)
     await _send_result(update, context, result)
 
@@ -1836,39 +1880,7 @@ async def reminder_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         _log_orchestrator_result(user_id, " ".join(context.args), result)
         await _send_result(update, context, result)
         return
-    event = await calendar_store.get_event(event_id)
-    if event is None:
-        result = refused(
-            f"Событие не найдено: {event_id}",
-            intent="utility_reminders.on",
-            mode="local",
-        )
-        _log_orchestrator_result(user_id, " ".join(context.args), result)
-        await _send_result(update, context, result)
-        return
-    settings = context.application.bot_data.get("settings")
-    offset_minutes = settings.reminder_default_offset_minutes if settings is not None else 10
-    trigger_at = event.dt - timedelta(minutes=offset_minutes) if offset_minutes else event.dt
-    scheduler = _get_reminder_scheduler(context)
-    reminder = await calendar_store.ensure_reminder_for_event(event, trigger_at, enabled=True)
-    if scheduler and settings is not None and settings.reminders_enabled:
-        try:
-            await scheduler.schedule_reminder(reminder)
-        except Exception:
-            LOGGER.exception("Failed to schedule reminder: reminder_id=%s", reminder.id)
-            result = error(
-                "Не удалось включить напоминание.",
-                intent="utility_reminders.on",
-                mode="local",
-            )
-            _log_orchestrator_result(user_id, " ".join(context.args), result)
-            await _send_result(update, context, result)
-            return
-    result = ok(
-        f"Напоминание включено: {reminder.id}",
-        intent="utility_reminders.on",
-        mode="local",
-    )
+    result = await _handle_reminder_on(context, user_id=user_id, event_id=event_id)
     _log_orchestrator_result(user_id, " ".join(context.args), result)
     await _send_result(update, context, result)
 
@@ -1916,18 +1928,6 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     message = update.message.text if update.message else ""
     prompt = message.strip()
-    if prompt in {
-        menu.STATUS_BUTTON,
-        menu.SUMMARY_BUTTON,
-        menu.FACTS_TOGGLE_BUTTON,
-        menu.HELP_BUTTON,
-        menu.CHECK_BUTTON,
-        menu.REWRITE_BUTTON,
-        menu.EXPLAIN_BUTTON,
-        menu.CALC_BUTTON,
-        menu.CALENDAR_BUTTON,
-    }:
-        return
     if not prompt:
         return
     user_id = update.effective_user.id if update.effective_user else 0
@@ -1994,7 +1994,7 @@ async def selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @_with_error_handling
 async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context):
+    if not await _guard_access(update, context, bucket="ui"):
         return
     user_id = update.effective_user.id if update.effective_user else 0
     result = _build_simple_result(

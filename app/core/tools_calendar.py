@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.core import calendar_store
-from app.core.result import OrchestratorResult, ensure_valid, ok, refused
+from app.core.result import Action, OrchestratorResult, ensure_valid, ok, refused
 
 
 async def list_calendar_items(
@@ -34,7 +34,15 @@ async def list_reminders(
     if not items:
         return ensure_valid(ok("Нет запланированных напоминаний.", intent=intent, mode="tool"))
     lines = []
+    actions: list[Action] = []
     for item in items:
         when_label = item.trigger_at.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
         lines.append(f"{item.id} | {when_label} | {item.text}")
-    return ensure_valid(ok("\n".join(lines), intent=intent, mode="tool"))
+        actions.append(
+            Action(
+                id=f"reminder_off:{item.id}",
+                label="🔕 Off",
+                payload={"op": "reminder_off", "id": item.id},
+            )
+        )
+    return ensure_valid(ok("\n".join(lines), intent=intent, mode="tool", actions=actions))

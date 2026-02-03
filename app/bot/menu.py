@@ -1,32 +1,33 @@
 from __future__ import annotations
 
-from telegram import ReplyKeyboardMarkup
-
-STATUS_BUTTON = "ℹ️ Статус"
-SUMMARY_BUTTON = "🧾 Summary"
-FACTS_TOGGLE_BUTTON = "🔎 Facts ON/OFF"
-HELP_BUTTON = "❓ Help"
-CHECK_BUTTON = "🧠 Check"
-REWRITE_BUTTON = "✍️ Rewrite"
-EXPLAIN_BUTTON = "🧩 Explain"
-CALC_BUTTON = "🧮 Calc"
-CALENDAR_BUTTON = "📅 Calendar"
+from app.core.result import Action
 
 
-def build_main_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [
-            [STATUS_BUTTON, SUMMARY_BUTTON],
-            [FACTS_TOGGLE_BUTTON, HELP_BUTTON],
-            [CHECK_BUTTON, REWRITE_BUTTON],
-            [EXPLAIN_BUTTON, CALC_BUTTON],
-            [CALENDAR_BUTTON],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=False,
-    )
-
-
-def build_menu_payload(text: str | None = None) -> tuple[str, ReplyKeyboardMarkup]:
-    message = text or "Меню:"
-    return message, build_main_menu()
+def build_menu_actions() -> list[Action]:
+    return [
+        Action(
+            id="calc_help",
+            label="🧮 Calc",
+            payload={"op": "run_command", "command": "/calc", "args": ""},
+        ),
+        Action(
+            id="calendar_help",
+            label="📅 Calendar",
+            payload={"op": "run_command", "command": "/calendar", "args": ""},
+        ),
+        Action(
+            id="check_help",
+            label="🧠 Check",
+            payload={"op": "run_command", "command": "/check", "args": ""},
+        ),
+        Action(
+            id="help",
+            label="❓ Help",
+            payload={"op": "run_command", "command": "/help", "args": ""},
+        ),
+        Action(
+            id="health",
+            label="ℹ️ Статус",
+            payload={"op": "run_command", "command": "/health", "args": ""},
+        ),
+    ]
