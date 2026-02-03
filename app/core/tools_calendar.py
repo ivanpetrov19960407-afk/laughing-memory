@@ -40,9 +40,17 @@ async def list_reminders(
         lines.append(f"{item.id} | {when_label} | {item.text}")
         actions.append(
             Action(
-                id=f"reminder_off:{item.id}",
-                label="🔕 Off",
-                payload={"op": "reminder_off", "id": item.id},
+                id=f"reminder_snooze:{item.id}",
+                label="⏸ Отложить на 10 минут",
+                payload={"op": "reminder_snooze", "id": item.id, "minutes": 10},
             )
         )
+        actions.append(
+            Action(
+                id=f"reminder_delete:{item.id}",
+                label="🗑 Удалить",
+                payload={"op": "reminder_delete", "id": item.id},
+            )
+        )
+    actions.append(Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}))
     return ensure_valid(ok("\n".join(lines), intent=intent, mode="tool", actions=actions))

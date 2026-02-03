@@ -15,10 +15,30 @@ MENU_LABELS = {
     "🧾 Summary",
     "🔎 Facts ON",
     "🔎 Facts OFF",
+    "💬 Чат",
+    "🔎 Поиск",
+    "📅 Календарь",
+    "⏰ Напоминания",
+    "⚙️ Настройки",
+    "❌ Отмена",
+    "🏠 Меню",
 }
 
 
-def build_menu_actions(*, facts_enabled: bool) -> list[Action]:
+def build_menu_actions(*, facts_enabled: bool, enable_menu: bool) -> list[Action]:
+    if not enable_menu:
+        return build_legacy_menu_actions(facts_enabled=facts_enabled)
+    return [
+        Action(id="menu.chat", label="💬 Чат", payload={"op": "menu_section", "section": "chat"}),
+        Action(id="menu.search", label="🔎 Поиск", payload={"op": "menu_section", "section": "search"}),
+        Action(id="menu.calendar", label="📅 Календарь", payload={"op": "menu_section", "section": "calendar"}),
+        Action(id="menu.reminders", label="⏰ Напоминания", payload={"op": "menu_section", "section": "reminders"}),
+        Action(id="menu.settings", label="⚙️ Настройки", payload={"op": "menu_section", "section": "settings"}),
+        Action(id="menu.cancel", label="❌ Отмена", payload={"op": "wizard_cancel"}),
+    ]
+
+
+def build_legacy_menu_actions(*, facts_enabled: bool) -> list[Action]:
     facts_label = "🔎 Facts OFF" if facts_enabled else "🔎 Facts ON"
     facts_command = "/facts_off" if facts_enabled else "/facts_on"
     return [
