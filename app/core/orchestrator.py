@@ -3,14 +3,21 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import re
-from typing import Any, Literal
+from typing import Any
 
 from app.core.models import TaskExecutionResult
-from app.core.tasks import InvalidPayloadError, TaskDefinition, TaskError, get_task_registry
+from app.core.result import (
+    OrchestratorResult,
+    Source,
+    ensure_valid,
+    error,
+    ok,
+    refused,
+)
+from app.core.tasks import TaskDefinition, TaskError, get_task_registry
 from app.infra.access import AccessController
 from app.infra.llm import LLMAPIError, LLMClient
 from app.infra.rate_limit import RateLimiter
@@ -18,16 +25,6 @@ from app.infra.storage import TaskStorage
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class OrchestratorResult:
-    text: str
-    status: Literal["ok", "refused", "error"]
-    mode: Literal["local", "llm"]
-    intent: str
-    sources: list[str] = field(default_factory=list)
-    debug: dict[str, Any] = field(default_factory=dict)
 
 
 def detect_intent(text: str) -> str:
@@ -106,35 +103,35 @@ class Orchestrator:
         request_id = user_context.get("request_id")
         allowed, error_message = self._ensure_allowed(user_id)
         if not allowed:
-            return OrchestratorResult(
-                text=error_message,
-                status="refused",
-                mode="local",
-                intent="command",
-                sources=[],
-                debug={"reason": "access_denied"},
+            return ensure_valid(
+                refused(
+                    error_message,
+                    intent="command",
+                    mode="local",
+                    debug={"reason": "access_denied"},
+                )
             )
         trimmed = text.strip()
         intent = detect_intent(text)
         if not trimmed:
-            return OrchestratorResult(
-                text="Запрос пустой.",
-                status="refused",
-                mode="local",
-                intent=intent,
-                sources=[],
-                debug={"reason": "empty_prompt"},
+            return ensure_valid(
+                refused(
+                    "Запрос пустой.",
+                    intent=intent,
+                    mode="local",
+                    debug={"reason": "empty_prompt"},
+                )
             )
 
         if intent == "smalltalk":
             response = self._smalltalk_response(trimmed)
-            return OrchestratorResult(
-                text=response,
-                status="ok",
-                mode="local",
-                intent=intent,
-                sources=[],
-                debug={"strategy": "smalltalk_local"},
+            return ensure_valid(
+                ok(
+                    response,
+                    intent=intent,
+                    mode="local",
+                    debug={"strategy": "smalltalk_local"},
+                )
             )
 
         if intent == "utility_summary":
@@ -144,13 +141,13 @@ class Orchestrator:
             command, payload = _split_command(trimmed)
             if command in {"/ask", "/search"}:
                 if not payload:
-                    return OrchestratorResult(
-                        text="Введите текст запроса. Пример: /ask Привет",
-                        status="refused",
-                        mode="local",
-                        intent=intent,
-                        sources=[],
-                        debug={"reason": "missing_payload", "command": command},
+                    return ensure_valid(
+                        refused(
+                            "Введите текст запроса. Пример: /ask Привет",
+                            intent=intent,
+                            mode="local",
+                            debug={"reason": "missing_payload", "command": command},
+                        )
                     )
                 mode = "search" if command == "/search" else "ask"
                 execution, citations = await self._request_llm(
@@ -169,13 +166,13 @@ class Orchestrator:
                 )
             if command == "/summary":
                 return await self._handle_summary(user_id, trimmed)
-            return OrchestratorResult(
-                text="Команда не поддерживается в этом режиме.",
-                status="refused",
-                mode="local",
-                intent=intent,
-                sources=[],
-                debug={"reason": "unsupported_command", "command": command},
+            return ensure_valid(
+                refused(
+                    "Команда не поддерживается в этом режиме.",
+                    intent=intent,
+                    mode="local",
+                    debug={"reason": "unsupported_command", "command": command},
+                )
             )
 
         execution, citations = await self._request_llm(
@@ -193,42 +190,39 @@ class Orchestrator:
             facts_only=self.is_facts_only(user_id),
         )
 
-    def execute_task(self, user_id: int, task_name: str, payload: str) -> TaskExecutionResult:
+    def execute_task(self, user_id: int, task_name: str, payload: str) -> OrchestratorResult:
         executed_at = datetime.now(timezone.utc)
         allowed, error_message = self._ensure_allowed(user_id)
         if not allowed:
-            execution = TaskExecutionResult(
-                task_name=task_name,
-                payload=payload,
-                result=error_message,
-                status="error",
-                executed_at=executed_at,
-                user_id=user_id,
+            result = refused(
+                error_message,
+                intent=f"task.{task_name}",
+                mode="tool",
+                debug={"reason": "access_denied"},
             )
-            self._storage.record_execution(execution)
-            return execution
+            self._record_task_result(user_id, task_name, payload, result, executed_at)
+            return ensure_valid(result)
         try:
             task = self._get_task(task_name)
             result = task.handler(payload)
-            status = "success"
         except TaskError as exc:
-            result = str(exc)
-            status = "error"
+            result = error(
+                str(exc),
+                intent=f"task.{task_name}",
+                mode="tool",
+                debug={"reason": "task_error"},
+            )
             LOGGER.warning("Task execution failed: %s", exc, exc_info=True)
         except Exception as exc:  # pragma: no cover - safety net
-            result = "Unexpected error while executing task."
-            status = "error"
+            result = error(
+                "Unexpected error while executing task.",
+                intent=f"task.{task_name}",
+                mode="tool",
+                debug={"reason": "unexpected_exception"},
+            )
             LOGGER.exception("Unexpected error while executing task: %s", exc)
-        execution = TaskExecutionResult(
-            task_name=task_name,
-            payload=payload,
-            result=result,
-            status=status,
-            executed_at=executed_at,
-            user_id=user_id,
-        )
-        self._storage.record_execution(execution)
-        return execution
+        self._record_task_result(user_id, task_name, payload, result, executed_at)
+        return ensure_valid(result)
 
     async def ask_llm(
         self,
@@ -401,20 +395,36 @@ class Orchestrator:
     async def search_llm(self, user_id: int, prompt: str) -> TaskExecutionResult:
         return await self.ask_llm(user_id, prompt, mode="search")
 
-    async def handle_text(self, user_id: int, text: str) -> TaskExecutionResult:
+    async def handle_text(self, user_id: int, text: str) -> OrchestratorResult:
         allowed, error_message = self._ensure_allowed(user_id)
         if not allowed:
-            return self._error_execution(user_id, "text", text, error_message)
+            return ensure_valid(
+                refused(
+                    error_message,
+                    intent="text",
+                    mode="local",
+                    debug={"reason": "access_denied"},
+                )
+            )
 
         trimmed = text.strip()
         if not trimmed:
-            return self._error_execution(user_id, "text", text, "Запрос пустой.")
+            return ensure_valid(
+                refused(
+                    "Запрос пустой.",
+                    intent="text",
+                    mode="local",
+                    debug={"reason": "empty_prompt"},
+                )
+            )
         if len(trimmed) > self._MAX_INPUT_LENGTH:
-            return self._error_execution(
-                user_id,
-                "text",
-                trimmed,
-                "Слишком длинный запрос. Попробуйте короче.",
+            return ensure_valid(
+                refused(
+                    "Слишком длинный запрос. Попробуйте короче.",
+                    intent="text",
+                    mode="local",
+                    debug={"reason": "input_too_long"},
+                )
             )
         LOGGER.info("Incoming message: user_id=%s text_preview=%s", user_id, trimmed[:200])
         lower = trimmed.lower()
@@ -423,76 +433,146 @@ class Orchestrator:
         if trimmed.startswith("!"):
             payload = trimmed[1:].strip()
             if not payload:
-                return self._task_parse_error(user_id, text)
+                return ensure_valid(
+                    error(
+                        "Формат: task <name> <payload>",
+                        intent="task",
+                        mode="tool",
+                        debug={"reason": "missing_payload"},
+                    )
+                )
             parts = payload.split(maxsplit=1)
             if len(parts) < 2:
-                return self._task_parse_error(user_id, text)
+                return ensure_valid(
+                    error(
+                        "Формат: task <name> <payload>",
+                        intent="task",
+                        mode="tool",
+                        debug={"reason": "missing_payload"},
+                    )
+                )
             task_name, task_payload = parts[0], parts[1].strip()
             if not task_payload:
-                return self._task_parse_error(user_id, text)
+                return ensure_valid(
+                    error(
+                        "Формат: task <name> <payload>",
+                        intent="task",
+                        mode="tool",
+                        debug={"reason": "missing_payload"},
+                    )
+                )
             LOGGER.info("Routing: user_id=%s action=task name=%s (!)", user_id, task_name)
             return self.execute_task(user_id, task_name, task_payload)
         if lower.startswith("task ") or lower.startswith("task:"):
             payload = trimmed[5:] if lower.startswith("task ") else trimmed[5:]
             payload = payload.strip()
             if not payload:
-                return self._task_parse_error(user_id, text)
+                return ensure_valid(
+                    error(
+                        "Формат: task <name> <payload>",
+                        intent="task",
+                        mode="tool",
+                        debug={"reason": "missing_payload"},
+                    )
+                )
             parts = payload.split(maxsplit=1)
             if len(parts) < 2:
-                return self._task_parse_error(user_id, text)
+                return ensure_valid(
+                    error(
+                        "Формат: task <name> <payload>",
+                        intent="task",
+                        mode="tool",
+                        debug={"reason": "missing_payload"},
+                    )
+                )
             task_name, task_payload = parts[0], parts[1].strip()
             if not task_payload:
-                return self._task_parse_error(user_id, text)
+                return ensure_valid(
+                    error(
+                        "Формат: task <name> <payload>",
+                        intent="task",
+                        mode="tool",
+                        debug={"reason": "missing_payload"},
+                    )
+                )
             LOGGER.info("Routing: user_id=%s action=task name=%s", user_id, task_name)
             return self.execute_task(user_id, task_name, task_payload)
 
         if lower.startswith("echo ") or lower.startswith("echo:"):
             payload = trimmed[4:].strip()
             if not payload:
-                return self._task_parse_error(user_id, text)
+                return ensure_valid(
+                    error(
+                        "Формат: task <name> <payload>",
+                        intent="task",
+                        mode="tool",
+                        debug={"reason": "missing_payload"},
+                    )
+                )
             LOGGER.info("Routing: user_id=%s action=local name=echo", user_id)
             return self.execute_task(user_id, "echo", payload)
 
         if lower.startswith("upper ") or lower.startswith("upper:"):
             payload = trimmed[5:].strip()
             if not payload:
-                return self._task_parse_error(user_id, text)
+                return ensure_valid(
+                    error(
+                        "Формат: task <name> <payload>",
+                        intent="task",
+                        mode="tool",
+                        debug={"reason": "missing_payload"},
+                    )
+                )
             LOGGER.info("Routing: user_id=%s action=local name=upper", user_id)
             return self.execute_task(user_id, "upper", payload)
 
         if lower.startswith("json_pretty ") or lower.startswith("json_pretty:"):
             payload = trimmed[12:].strip()
             if not payload:
-                return self._task_parse_error(user_id, text)
+                return ensure_valid(
+                    error(
+                        "Формат: task <name> <payload>",
+                        intent="task",
+                        mode="tool",
+                        debug={"reason": "missing_payload"},
+                    )
+                )
             LOGGER.info("Routing: user_id=%s action=local name=json_pretty", user_id)
             return self.execute_task(user_id, "json_pretty", payload)
 
         if lower.startswith("/search "):
             payload = trimmed[8:].strip()
             if not payload:
-                return self._error_execution(
-                    user_id,
-                    "search",
-                    "",
-                    "Введите текст поиска. Пример: /search Новости",
+                return ensure_valid(
+                    refused(
+                        "Введите текст поиска. Пример: /search Новости",
+                        intent="search",
+                        mode="llm",
+                        debug={"reason": "missing_payload"},
+                    )
                 )
             LOGGER.info("Routing: user_id=%s action=perplexity mode=search", user_id)
-            return await self.search_llm(user_id, payload)
+            execution = await self.search_llm(user_id, payload)
+            return self._build_llm_result(execution, [], intent="search", facts_only=False)
 
         if lower.startswith("search ") or lower.startswith("search:"):
             payload = trimmed[7:].strip()
             if not payload:
-                return self._error_execution(
-                    user_id,
-                    "search",
-                    "",
-                    "Введите текст поиска. Пример: search Новости",
+                return ensure_valid(
+                    refused(
+                        "Введите текст поиска. Пример: search Новости",
+                        intent="search",
+                        mode="llm",
+                        debug={"reason": "missing_payload"},
+                    )
                 )
             LOGGER.info("Routing: user_id=%s action=perplexity mode=search", user_id)
-            return await self.search_llm(user_id, payload)
+            execution = await self.search_llm(user_id, payload)
+            return self._build_llm_result(execution, [], intent="search", facts_only=False)
 
         LOGGER.info("Routing: user_id=%s action=perplexity mode=ask", user_id)
-        return await self.ask_llm(user_id, trimmed, mode="ask")
+        execution = await self.ask_llm(user_id, trimmed, mode="ask")
+        return self._build_llm_result(execution, [], intent="ask", facts_only=False)
 
     def is_allowed(self, user_id: int) -> bool:
         return self._ensure_allowed(user_id)[0]
@@ -559,28 +639,16 @@ class Orchestrator:
             return "Временная ошибка сервиса. Попробуйте позже."
         return "Не удалось получить ответ от сервиса."
 
-    def _task_parse_error(self, user_id: int, text: str) -> TaskExecutionResult:
-        execution = TaskExecutionResult(
-            task_name="task",
-            payload=text,
-            result="Формат: task <name> <payload>",
-            status="error",
-            executed_at=datetime.now(timezone.utc),
-            user_id=user_id,
-        )
-        self._storage.record_execution(execution)
-        return execution
-
     async def _handle_summary(self, user_id: int, text: str) -> OrchestratorResult:
         payload = _extract_summary_payload(text)
         if not payload:
-            return OrchestratorResult(
-                text="Использование: summary: <текст> или /summary <текст>.",
-                status="refused",
-                mode="local",
-                intent="utility_summary",
-                sources=[],
-                debug={"reason": "missing_summary_payload"},
+            return ensure_valid(
+                refused(
+                    "Использование: summary: <текст> или /summary <текст>.",
+                    intent="utility_summary",
+                    mode="local",
+                    debug={"reason": "missing_summary_payload"},
+                )
             )
         system_prompt = "Кратко, 5-8 пунктов, без выдумок и домыслов."
         execution, citations = await self._request_llm(
@@ -593,14 +661,22 @@ class Orchestrator:
             status = "error"
             if "LLM не настроен" in execution.result:
                 status = "refused"
-            return OrchestratorResult(
-                text=execution.result,
-                status=status,
-                mode="llm",
-                intent="utility_summary",
-                sources=[],
-                debug={"task_name": execution.task_name},
+            result = (
+                error(
+                    execution.result,
+                    intent="utility_summary",
+                    mode="llm",
+                    debug={"task_name": execution.task_name},
+                )
+                if status == "error"
+                else refused(
+                    execution.result,
+                    intent="utility_summary",
+                    mode="llm",
+                    debug={"task_name": execution.task_name},
+                )
             )
+            return ensure_valid(result)
         return self._build_llm_result(
             execution,
             citations,
@@ -617,28 +693,54 @@ class Orchestrator:
         facts_only: bool,
     ) -> OrchestratorResult:
         status = "ok" if execution.status == "success" else "error"
-        sources = citations if citations else _extract_sources_from_text(execution.result)
+        sources = _build_sources_from_citations(citations) if citations else _extract_sources_from_text(execution.result)
         if facts_only and not sources:
-            return OrchestratorResult(
-                text=(
-                    "Не могу подтвердить источниками. "
-                    "Переформулируй или попроси без режима фактов."
-                ),
-                status="refused",
-                mode="llm",
-                intent=intent,
-                sources=[],
-                debug={"reason": "facts_only_no_sources"},
+            return ensure_valid(
+                refused(
+                    "Не могу подтвердить источниками. Переформулируй или попроси без режима фактов.",
+                    intent=intent,
+                    mode="llm",
+                    debug={"reason": "facts_only_no_sources"},
+                )
             )
         final_text = _ensure_sources_in_text(execution.result, sources)
-        return OrchestratorResult(
-            text=final_text,
-            status=status,
-            mode="llm",
-            intent=intent,
-            sources=sources,
-            debug={"task_name": execution.task_name},
+        result = (
+            ok(
+                final_text,
+                intent=intent,
+                mode="llm",
+                sources=sources,
+                debug={"task_name": execution.task_name},
+            )
+            if status == "ok"
+            else error(
+                final_text,
+                intent=intent,
+                mode="llm",
+                sources=sources,
+                debug={"task_name": execution.task_name},
+            )
         )
+        return ensure_valid(result)
+
+    def _record_task_result(
+        self,
+        user_id: int,
+        task_name: str,
+        payload: str,
+        result: OrchestratorResult,
+        executed_at: datetime,
+    ) -> None:
+        status = "success" if result.status == "ok" else "error"
+        execution = TaskExecutionResult(
+            task_name=task_name,
+            payload=payload,
+            result=result.text,
+            status=status,
+            executed_at=executed_at,
+            user_id=user_id,
+        )
+        self._storage.record_execution(execution)
 
     def _smalltalk_response(self, text: str) -> str:
         lowered = text.lower()
@@ -671,29 +773,37 @@ def _split_command(text: str) -> tuple[str, str]:
     return command, payload
 
 
-def _extract_sources_from_text(text: str) -> list[str]:
+def _extract_sources_from_text(text: str) -> list[Source]:
     urls = re.findall(r"https?://[^\s<>]+", text)
-    cleaned = []
+    cleaned: list[str] = []
     for url in urls:
         cleaned.append(url.rstrip(").,;\"'"))
     seen: set[str] = set()
-    unique = []
+    unique: list[Source] = []
     for url in cleaned:
         if url and url not in seen:
             seen.add(url)
-            unique.append(url)
+            unique.append(Source(title=url, url=url, snippet=""))
     return unique
 
 
-def _ensure_sources_in_text(text: str, sources: list[str]) -> str:
+def _ensure_sources_in_text(text: str, sources: list[Source]) -> str:
     if not sources:
         return text
-    if any(source in text for source in sources):
+    if any(source.url in text for source in sources):
         return text
     lines = ["Источники:"]
-    for index, url in enumerate(sources, start=1):
-        lines.append(f"{index}) {url}")
+    for index, source in enumerate(sources, start=1):
+        lines.append(f"{index}) {source.url}")
     return f"{text}\n\n" + "\n".join(lines) if text else "\n".join(lines)
+
+
+def _build_sources_from_citations(citations: list[str]) -> list[Source]:
+    sources: list[Source] = []
+    for url in citations:
+        if isinstance(url, str) and url:
+            sources.append(Source(title=url, url=url, snippet=""))
+    return sources
 
 
 def _coerce_bool(value: object) -> bool:

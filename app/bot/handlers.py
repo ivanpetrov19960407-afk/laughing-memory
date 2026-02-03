@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import sys
 import time
@@ -10,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 import telegram
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 from PIL import Image
 import pytesseract
@@ -19,7 +20,9 @@ from app.bot import menu
 from app.core import calendar_store
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMemory, DialogMessage
-from app.core.orchestrator import Orchestrator, OrchestratorResult
+from app.core.orchestrator import Orchestrator
+from app.core.result import Action, OrchestratorResult, ensure_valid, error, ok, refused
+from app.core.tools_calendar import list_calendar_items, list_reminders
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
 from app.infra.messaging import safe_send_text
@@ -289,6 +292,29 @@ def _log_orchestrator_result(
         len(result.text),
         len(result.sources),
     )
+    if result.debug:
+        LOGGER.info("Orchestrator debug: user_id=%s intent=%s debug=%s", user_id, result.intent, result.debug)
+
+
+def _encode_action_data(action: Action) -> str:
+    payload = {"id": action.id, "payload": action.payload}
+    data = json.dumps(payload, ensure_ascii=False)
+    if len(data) > 60:
+        return f"action:{action.id}"
+    return data
+
+
+def _build_action_keyboard(actions: list[Action]) -> InlineKeyboardMarkup | None:
+    if not actions:
+        return None
+    buttons = [[InlineKeyboardButton(action.label, callback_data=_encode_action_data(action))] for action in actions]
+    return InlineKeyboardMarkup(buttons)
+
+
+async def _send_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result: OrchestratorResult) -> None:
+    public_result = ensure_valid(result)
+    reply_markup = _build_action_keyboard(public_result.actions)
+    await safe_send_text(update, context, public_result.text, reply_markup=reply_markup)
 
 
 @_with_error_handling
@@ -463,20 +489,28 @@ async def task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user_id = update.effective_user.id if update.effective_user else 0
     try:
-        execution = orchestrator.execute_task(user_id, task_name, payload)
+        tool_result = orchestrator.execute_task(user_id, task_name, payload)
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
         return
 
-    await safe_send_text(
-        update,
-        context,
+    status = tool_result.status
+    text = (
         "Результат:\n"
-        f"Задача: {execution.task_name}\n"
-        f"Статус: {execution.status}\n"
-        f"Ответ: {execution.result}",
+        f"Задача: {task_name}\n"
+        f"Статус: {status}\n"
+        f"Ответ: {tool_result.text}"
     )
+    result = (
+        ok(text, intent="command.task", mode="local")
+        if status == "ok"
+        else refused(text, intent="command.task", mode="local")
+        if status == "refused"
+        else error(text, intent="command.task", mode="local")
+    )
+    _log_orchestrator_result(user_id, payload, result)
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -544,7 +578,7 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _handle_exception(update, context, exc)
         return
     _log_orchestrator_result(user_id, prompt, result)
-    await safe_send_text(update, context, result.text)
+    await _send_result(update, context, result)
     if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
         await dialog_memory.add_assistant(user_id, chat_id, result.text)
 
@@ -590,7 +624,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _handle_exception(update, context, exc)
         return
     _log_orchestrator_result(user_id, prompt, result)
-    await safe_send_text(update, context, result.text)
+    await _send_result(update, context, result)
     if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
         await dialog_memory.add_assistant(user_id, chat_id, result.text)
 
@@ -610,7 +644,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _handle_exception(update, context, exc)
         return
     _log_orchestrator_result(user_id, prompt, result)
-    await safe_send_text(update, context, result.text)
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -816,6 +850,24 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
 
+@_with_error_handling
+async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    data = query.data or ""
+    user_id = update.effective_user.id if update.effective_user else 0
+    result = refused(
+        "Действие недоступно.",
+        intent="ui.action",
+        mode="local",
+        debug={"callback_data": data},
+    )
+    _log_orchestrator_result(user_id, data, result)
+    await _send_result(update, context, result)
+
+
 def _extract_text_from_image(image_bytes: bytes) -> str:
     with Image.open(io.BytesIO(image_bytes)) as image:
         return pytesseract.image_to_string(image).strip()
@@ -847,22 +899,6 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_photo(image_url)
 
 
-async def _format_calendar_list(
-    start: datetime | None,
-    end: datetime | None,
-) -> tuple[str, str]:
-    items = await calendar_store.list_items(start, end)
-    if not items:
-        return "Нет событий.", "ok"
-    if len(items) > 20:
-        return "Слишком много, сузь диапазон.", "refused"
-    lines = []
-    for item in items:
-        dt_label = item.dt.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
-        lines.append(f"{item.id} | {dt_label} | {item.title}")
-    return "\n".join(lines), "ok"
-
-
 @_with_error_handling
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
@@ -880,7 +916,7 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
     result = await llm_check(prompt, _build_tool_context(update, context))
     _log_orchestrator_result(user_id, prompt, result)
-    await safe_send_text(update, context, result.text)
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -913,7 +949,7 @@ async def rewrite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
     result = await llm_rewrite(mode, prompt, _build_tool_context(update, context))
     _log_orchestrator_result(user_id, prompt, result)
-    await safe_send_text(update, context, result.text)
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -933,7 +969,7 @@ async def explain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
     result = await llm_explain(prompt, _build_tool_context(update, context))
     _log_orchestrator_result(user_id, prompt, result)
-    await safe_send_text(update, context, result.text)
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -948,46 +984,41 @@ async def calc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         result_value = parse_and_eval(expression)
     except CalcError as exc:
-        result = OrchestratorResult(
-            text=f"Ошибка вычисления: {exc}",
-            status="error",
-            mode="local",
-            intent="utility_calc",
-        )
+        result = error(f"Ошибка вычисления: {exc}", intent="utility_calc", mode="local")
         _log_orchestrator_result(user_id, expression, result)
-        await safe_send_text(update, context, result.text)
+        await _send_result(update, context, result)
         return
-    result = OrchestratorResult(
-        text=f"{expression} = {result_value}",
-        status="ok",
-        mode="local",
-        intent="utility_calc",
-    )
+    result = ok(f"{expression} = {result_value}", intent="utility_calc", mode="local")
     _log_orchestrator_result(user_id, expression, result)
-    await safe_send_text(update, context, result.text)
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
 async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
+    user_id = update.effective_user.id if update.effective_user else 0
     args = context.args
     if not args:
-        await safe_send_text(
-            update,
-            context,
+        result = refused(
             "Использование: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> | list [YYYY-MM-DD YYYY-MM-DD] | "
             "today | week | del <id> | debug_due.",
+            intent="utility_calendar",
+            mode="local",
         )
+        _log_orchestrator_result(user_id, "", result)
+        await _send_result(update, context, result)
         return
     command = args[0].lower()
     if command == "add":
         if len(args) < 4:
-            await safe_send_text(
-                update,
-                context,
+            result = refused(
                 "Использование: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title>.",
+                intent="utility_calendar.add",
+                mode="local",
             )
+            _log_orchestrator_result(user_id, " ".join(args), result)
+            await _send_result(update, context, result)
             return
         date_part = args[1]
         time_part = args[2]
@@ -997,14 +1028,22 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 minutes_before = int(args[4])
             except ValueError:
-                await safe_send_text(
-                    update,
-                    context,
+                result = refused(
                     "Минуты должны быть числом. Пример: /calendar add 2026-02-03 18:30 -m 10 Позвонить маме.",
+                    intent="utility_calendar.add",
+                    mode="local",
                 )
+                _log_orchestrator_result(user_id, " ".join(args), result)
+                await _send_result(update, context, result)
                 return
             if minutes_before < 0:
-                await safe_send_text(update, context, "Минуты не могут быть отрицательными.")
+                result = refused(
+                    "Минуты не могут быть отрицательными.",
+                    intent="utility_calendar.add",
+                    mode="local",
+                )
+                _log_orchestrator_result(user_id, " ".join(args), result)
+                await _send_result(update, context, result)
                 return
             title_start = 5
         settings = context.application.bot_data.get("settings")
@@ -1012,26 +1051,29 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             minutes_before = settings.reminder_default_offset_minutes
         title = " ".join(args[title_start:]).strip()
         if not title:
-            await safe_send_text(
-                update,
-                context,
+            result = refused(
                 "Укажите название события. Пример: /calendar add 2026-02-05 18:30 Врач.",
+                intent="utility_calendar.add",
+                mode="local",
             )
+            _log_orchestrator_result(user_id, " ".join(args), result)
+            await _send_result(update, context, result)
             return
         try:
             dt = calendar_store.parse_local_datetime(f"{date_part} {time_part}")
         except ValueError:
-            await safe_send_text(
-                update,
-                context,
+            result = refused(
                 "Неверный формат даты. Пример: /calendar add 2026-02-05 18:30 Врач.",
+                intent="utility_calendar.add",
+                mode="local",
             )
+            _log_orchestrator_result(user_id, " ".join(args), result)
+            await _send_result(update, context, result)
             return
         remind_at = dt
         if minutes_before:
             remind_at = dt - timedelta(minutes=minutes_before)
         chat_id = update.effective_chat.id if update.effective_chat else 0
-        user_id = update.effective_user.id if update.effective_user else 0
         reminders_enabled = True
         if settings is not None and not settings.reminders_enabled:
             reminders_enabled = False
@@ -1055,15 +1097,9 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 LOGGER.exception("Failed to schedule reminder: reminder_id=%s", reminder.get("reminder_id"))
         dt_label = dt.strftime("%Y-%m-%d %H:%M")
         text = f"Добавлено: {event['event_id']} | {dt_label} | {title}"
-        result = OrchestratorResult(
-            text=text,
-            status="ok",
-            mode="local",
-            intent="utility_calendar",
-        )
-        user_id = update.effective_user.id if update.effective_user else 0
+        result = ok(text, intent="utility_calendar.add", mode="local")
         _log_orchestrator_result(user_id, " ".join(args), result)
-        await safe_send_text(update, context, text)
+        await _send_result(update, context, result)
         return
     if command == "list":
         start = end = None
@@ -1072,67 +1108,59 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 start_date = calendar_store.parse_date(args[1])
                 end_date = calendar_store.parse_date(args[2])
             except ValueError:
-                await safe_send_text(
-                    update,
-                    context,
+                result = refused(
                     "Неверный формат. Пример: /calendar list 2026-02-01 2026-02-28.",
+                    intent="utility_calendar.list",
+                    mode="local",
                 )
+                _log_orchestrator_result(user_id, " ".join(args), result)
+                await _send_result(update, context, result)
                 return
             start, _ = calendar_store.day_bounds(start_date)
             _, end = calendar_store.day_bounds(end_date)
         elif len(args) != 1:
-            await safe_send_text(
-                update,
-                context,
+            result = refused(
                 "Использование: /calendar list [YYYY-MM-DD YYYY-MM-DD].",
+                intent="utility_calendar.list",
+                mode="local",
             )
+            _log_orchestrator_result(user_id, " ".join(args), result)
+            await _send_result(update, context, result)
             return
-        text, status = await _format_calendar_list(start, end)
-        result = OrchestratorResult(
-            text=text,
-            status=status,
-            mode="local",
-            intent="utility_calendar",
-        )
-        user_id = update.effective_user.id if update.effective_user else 0
+        tool_result = await list_calendar_items(start, end, intent="utility_calendar.list")
+        result = tool_result
         _log_orchestrator_result(user_id, " ".join(args), result)
-        await safe_send_text(update, context, text)
+        await _send_result(update, context, result)
         return
     if command == "today":
         today = datetime.now(tz=calendar_store.VIENNA_TZ).date()
         start, end = calendar_store.day_bounds(today)
-        text, status = await _format_calendar_list(start, end)
-        result = OrchestratorResult(
-            text=text,
-            status=status,
-            mode="local",
-            intent="utility_calendar",
-        )
-        user_id = update.effective_user.id if update.effective_user else 0
+        result = await list_calendar_items(start, end, intent="utility_calendar.today")
         _log_orchestrator_result(user_id, " ".join(args), result)
-        await safe_send_text(update, context, text)
+        await _send_result(update, context, result)
         return
     if command == "week":
         today = datetime.now(tz=calendar_store.VIENNA_TZ).date()
         start, end = calendar_store.week_bounds(today)
-        text, status = await _format_calendar_list(start, end)
-        result = OrchestratorResult(
-            text=text,
-            status=status,
-            mode="local",
-            intent="utility_calendar",
-        )
-        user_id = update.effective_user.id if update.effective_user else 0
+        result = await list_calendar_items(start, end, intent="utility_calendar.week")
         _log_orchestrator_result(user_id, " ".join(args), result)
-        await safe_send_text(update, context, text)
+        await _send_result(update, context, result)
         return
     if command == "del":
         if len(args) < 2:
-            await safe_send_text(update, context, "Использование: /calendar del <id>.")
+            result = refused(
+                "Использование: /calendar del <id>.",
+                intent="utility_calendar.del",
+                mode="local",
+            )
+            _log_orchestrator_result(user_id, " ".join(args), result)
+            await _send_result(update, context, result)
             return
         item_id = args[1].strip()
         if not item_id:
-            await safe_send_text(update, context, "Укажите id для удаления.")
+            result = refused("Укажите id для удаления.", intent="utility_calendar.del", mode="local")
+            _log_orchestrator_result(user_id, " ".join(args), result)
+            await _send_result(update, context, result)
             return
         removed, reminder_id = await calendar_store.delete_item(item_id)
         scheduler = _get_reminder_scheduler(context)
@@ -1141,27 +1169,27 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await scheduler.cancel_reminder(reminder_id)
             except Exception:
                 LOGGER.exception("Failed to cancel reminder: reminder_id=%s", reminder_id)
-        user_id = update.effective_user.id if update.effective_user else 0
         if removed:
             text = f"Удалено: {item_id}"
             status = "ok"
         else:
             text = f"Не найдено: {item_id}"
             status = "refused"
-        result = OrchestratorResult(
-            text=text,
-            status=status,
-            mode="local",
-            intent="utility_calendar",
+        result = (
+            ok(text, intent="utility_calendar.del", mode="local")
+            if status == "ok"
+            else refused(text, intent="utility_calendar.del", mode="local")
         )
         _log_orchestrator_result(user_id, " ".join(args), result)
-        await safe_send_text(update, context, text)
+        await _send_result(update, context, result)
         return
     if command == "debug_due":
         now = datetime.now(tz=calendar_store.VIENNA_TZ)
         due_items = await calendar_store.list_due_reminders(now, limit=5)
         if not due_items:
-            await safe_send_text(update, context, "Нет просроченных напоминаний.")
+            result = ok("Нет просроченных напоминаний.", intent="utility_calendar.debug_due", mode="local")
+            _log_orchestrator_result(user_id, " ".join(args), result)
+            await _send_result(update, context, result)
             return
         lines = []
         for item in due_items:
@@ -1169,48 +1197,54 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             lines.append(
                 f"{item.id} | trigger_at={remind_label} | enabled={item.enabled} | {item.text}"
             )
-        await safe_send_text(update, context, "\n".join(lines))
+        result = ok("\n".join(lines), intent="utility_calendar.debug_due", mode="local")
+        _log_orchestrator_result(user_id, " ".join(args), result)
+        await _send_result(update, context, result)
         return
-    await safe_send_text(
-        update,
-        context,
+    result = refused(
         "Неизвестная команда. Использование: /calendar add|list|today|week|del|debug_due.",
+        intent="utility_calendar",
+        mode="local",
     )
+    _log_orchestrator_result(user_id, " ".join(args), result)
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
 async def reminders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
+    user_id = update.effective_user.id if update.effective_user else 0
     limit = 5
     if context.args:
         try:
             limit = max(1, int(context.args[0]))
         except ValueError:
-            await safe_send_text(update, context, "Использование: /reminders [N].")
+            result = refused("Использование: /reminders [N].", intent="utility_reminders.list", mode="local")
+            _log_orchestrator_result(user_id, " ".join(context.args), result)
+            await _send_result(update, context, result)
             return
     now = datetime.now(tz=calendar_store.VIENNA_TZ)
-    items = await calendar_store.list_reminders(now, limit=limit)
-    if not items:
-        await safe_send_text(update, context, "Нет запланированных напоминаний.")
-        return
-    lines = []
-    for item in items:
-        when_label = item.trigger_at.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
-        lines.append(f"{item.id} | {when_label} | {item.text}")
-    await safe_send_text(update, context, "\n".join(lines))
+    result = await list_reminders(now, limit=limit, intent="utility_reminders.list")
+    _log_orchestrator_result(user_id, " ".join(context.args), result)
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
 async def reminder_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
+    user_id = update.effective_user.id if update.effective_user else 0
     if not context.args:
-        await safe_send_text(update, context, "Использование: /reminder_off <id>.")
+        result = refused("Использование: /reminder_off <id>.", intent="utility_reminders.off", mode="local")
+        _log_orchestrator_result(user_id, "", result)
+        await _send_result(update, context, result)
         return
     reminder_id = context.args[0].strip()
     if not reminder_id:
-        await safe_send_text(update, context, "Укажите id напоминания.")
+        result = refused("Укажите id напоминания.", intent="utility_reminders.off", mode="local")
+        _log_orchestrator_result(user_id, " ".join(context.args), result)
+        await _send_result(update, context, result)
         return
     scheduler = _get_reminder_scheduler(context)
     if scheduler:
@@ -1218,27 +1252,54 @@ async def reminder_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await scheduler.cancel_reminder(reminder_id)
         except Exception:
             LOGGER.exception("Failed to cancel reminder: reminder_id=%s", reminder_id)
-            await safe_send_text(update, context, "Не удалось отменить напоминание.")
+            result = error(
+                "Не удалось отменить напоминание.",
+                intent="utility_reminders.off",
+                mode="local",
+            )
+            _log_orchestrator_result(user_id, " ".join(context.args), result)
+            await _send_result(update, context, result)
             return
     else:
         await calendar_store.disable_reminder(reminder_id)
-    await safe_send_text(update, context, f"Напоминание отключено: {reminder_id}")
+    result = ok(
+        f"Напоминание отключено: {reminder_id}",
+        intent="utility_reminders.off",
+        mode="local",
+    )
+    _log_orchestrator_result(user_id, " ".join(context.args), result)
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
 async def reminder_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
+    user_id = update.effective_user.id if update.effective_user else 0
     if not context.args:
-        await safe_send_text(update, context, "Использование: /reminder_on <event_id>.")
+        result = refused(
+            "Использование: /reminder_on <event_id>.",
+            intent="utility_reminders.on",
+            mode="local",
+        )
+        _log_orchestrator_result(user_id, "", result)
+        await _send_result(update, context, result)
         return
     event_id = context.args[0].strip()
     if not event_id:
-        await safe_send_text(update, context, "Укажите event_id.")
+        result = refused("Укажите event_id.", intent="utility_reminders.on", mode="local")
+        _log_orchestrator_result(user_id, " ".join(context.args), result)
+        await _send_result(update, context, result)
         return
     event = await calendar_store.get_event(event_id)
     if event is None:
-        await safe_send_text(update, context, f"Событие не найдено: {event_id}")
+        result = refused(
+            f"Событие не найдено: {event_id}",
+            intent="utility_reminders.on",
+            mode="local",
+        )
+        _log_orchestrator_result(user_id, " ".join(context.args), result)
+        await _send_result(update, context, result)
         return
     settings = context.application.bot_data.get("settings")
     offset_minutes = settings.reminder_default_offset_minutes if settings is not None else 10
@@ -1250,9 +1311,21 @@ async def reminder_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await scheduler.schedule_reminder(reminder)
         except Exception:
             LOGGER.exception("Failed to schedule reminder: reminder_id=%s", reminder.id)
-            await safe_send_text(update, context, "Не удалось включить напоминание.")
+            result = error(
+                "Не удалось включить напоминание.",
+                intent="utility_reminders.on",
+                mode="local",
+            )
+            _log_orchestrator_result(user_id, " ".join(context.args), result)
+            await _send_result(update, context, result)
             return
-    await safe_send_text(update, context, f"Напоминание включено: {reminder.id}")
+    result = ok(
+        f"Напоминание включено: {reminder.id}",
+        intent="utility_reminders.on",
+        mode="local",
+    )
+    _log_orchestrator_result(user_id, " ".join(context.args), result)
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -1332,7 +1405,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _handle_exception(update, context, exc)
         return
     _log_orchestrator_result(user_id, prompt, result)
-    await safe_send_text(update, context, result.text)
+    await _send_result(update, context, result)
     if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
         await dialog_memory.add_assistant(user_id, chat_id, result.text)
 

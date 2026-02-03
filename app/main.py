@@ -5,7 +5,7 @@ import logging
 import time
 from collections import defaultdict, deque
 
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from app.bot import handlers
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
@@ -155,6 +155,7 @@ def main() -> None:
     application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
     application.add_handler(CommandHandler("health", handlers.health))
     application.add_handler(CommandHandler("status", handlers.health))
+    application.add_handler(CallbackQueryHandler(handlers.action_callback))
     application.add_handler(MessageHandler(filters.PHOTO, handlers.photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.menu_button), group=0)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat), group=1)

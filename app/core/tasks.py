@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from app.core.models import TaskDefinition
+from app.core.result import OrchestratorResult, ok
 
 
 class TaskError(Exception):
@@ -13,20 +14,24 @@ class InvalidPayloadError(TaskError):
     """Raised when task payload cannot be processed."""
 
 
-def task_echo(payload: str) -> str:
-    return payload
+def task_echo(payload: str) -> OrchestratorResult:
+    return ok(payload, intent="task.echo", mode="tool")
 
 
-def task_upper(payload: str) -> str:
-    return payload.upper()
+def task_upper(payload: str) -> OrchestratorResult:
+    return ok(payload.upper(), intent="task.upper", mode="tool")
 
 
-def task_json_pretty(payload: str) -> str:
+def task_json_pretty(payload: str) -> OrchestratorResult:
     try:
         parsed = json.loads(payload)
     except json.JSONDecodeError as exc:
         raise InvalidPayloadError("Payload is not valid JSON.") from exc
-    return json.dumps(parsed, ensure_ascii=False, indent=2, sort_keys=True)
+    return ok(
+        json.dumps(parsed, ensure_ascii=False, indent=2, sort_keys=True),
+        intent="task.json_pretty",
+        mode="tool",
+    )
 
 
 def get_task_registry() -> dict[str, TaskDefinition]:
