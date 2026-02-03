@@ -10,6 +10,7 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH = Path("config/orchestrator.json")
 DEFAULT_DB_PATH = Path("data/bot.db")
 DEFAULT_ALLOWLIST_PATH = Path("data/allowlist.json")
+DEFAULT_DIALOG_MEMORY_PATH = Path("data/dialog_memory.json")
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,8 @@ class Settings:
     rate_limit_per_day: int
     history_size: int
     telegram_message_limit: int
+    dialog_memory_path: Path
+    context_max_turns: int
 
 
 def load_settings() -> Settings:
@@ -69,6 +72,8 @@ def load_settings() -> Settings:
     rate_limit_per_day = _parse_int_with_default(os.getenv("RATE_LIMIT_PER_DAY"), 200)
     history_size = _parse_int_with_default(os.getenv("HISTORY_SIZE"), 10)
     telegram_message_limit = _parse_int_with_default(os.getenv("TELEGRAM_MESSAGE_LIMIT"), 4000)
+    dialog_memory_path = Path(os.getenv("DIALOG_MEMORY_PATH", DEFAULT_DIALOG_MEMORY_PATH))
+    context_max_turns = _parse_int_with_default(os.getenv("CONTEXT_MAX_TURNS"), 5)
 
     return Settings(
         bot_token=token,
@@ -93,6 +98,8 @@ def load_settings() -> Settings:
         rate_limit_per_day=rate_limit_per_day,
         history_size=history_size,
         telegram_message_limit=telegram_message_limit,
+        dialog_memory_path=dialog_memory_path,
+        context_max_turns=context_max_turns,
     )
 
 
