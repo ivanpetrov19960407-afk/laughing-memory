@@ -39,6 +39,9 @@ class Settings:
     telegram_message_limit: int
     dialog_memory_path: Path
     context_max_turns: int
+    reminders_enabled: bool
+    reminder_default_offset_minutes: int
+    reminder_max_future_days: int
 
 
 def load_settings() -> Settings:
@@ -74,6 +77,17 @@ def load_settings() -> Settings:
     telegram_message_limit = _parse_int_with_default(os.getenv("TELEGRAM_MESSAGE_LIMIT"), 4000)
     dialog_memory_path = Path(os.getenv("DIALOG_MEMORY_PATH", DEFAULT_DIALOG_MEMORY_PATH))
     context_max_turns = _parse_int_with_default(os.getenv("CONTEXT_MAX_TURNS"), 5)
+    reminders_enabled = _parse_optional_bool(os.getenv("REMINDERS_ENABLED"))
+    if reminders_enabled is None:
+        reminders_enabled = True
+    reminder_default_offset_minutes = _parse_int_with_default(
+        os.getenv("REMINDER_DEFAULT_OFFSET_MINUTES"),
+        10,
+    )
+    reminder_max_future_days = _parse_int_with_default(
+        os.getenv("REMINDER_MAX_FUTURE_DAYS"),
+        365,
+    )
 
     return Settings(
         bot_token=token,
@@ -100,6 +114,9 @@ def load_settings() -> Settings:
         telegram_message_limit=telegram_message_limit,
         dialog_memory_path=dialog_memory_path,
         context_max_turns=context_max_turns,
+        reminders_enabled=reminders_enabled,
+        reminder_default_offset_minutes=reminder_default_offset_minutes,
+        reminder_max_future_days=reminder_max_future_days,
     )
 
 

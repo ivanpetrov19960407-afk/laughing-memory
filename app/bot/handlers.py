@@ -63,6 +63,10 @@ def _get_openai_client(context: ContextTypes.DEFAULT_TYPE) -> OpenAIClient | Non
     return context.application.bot_data.get("openai_client")
 
 
+def _get_reminder_scheduler(context: ContextTypes.DEFAULT_TYPE):
+    return context.application.bot_data.get("reminder_scheduler")
+
+
 def _with_error_handling(
     handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]],
 ) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]:
@@ -303,7 +307,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Привет! Я бот-оркестратор задач.\n"
         f"Конфигурация: {title} (v{version}).\n"
         "Команды: /help, /ping, /tasks, /task, /last, /ask, /search, /summary, /facts_on, /facts_off, /image, "
-        "/check, /rewrite, /explain, /calc, /calendar, /context_on, /context_off, /context_clear, /context_status.\n"
+        "/check, /rewrite, /explain, /calc, /calendar, /reminders, /reminder_off, /reminder_on, /context_on, "
+        "/context_off, /context_clear, /context_status.\n"
         "Можно писать обычные сообщения — верну ответ LLM.\n"
         "Суммаризация: summary: <текст> или /summary <текст>.\n"
         "Режим фактов: /facts_on и /facts_off.\n"
@@ -350,6 +355,9 @@ def _build_help_text(access_note: str) -> str:
         "/explain <текст> — объяснить текст (LLM)\n"
         "/calc <expr> — калькулятор\n"
         "/calendar <cmd> — планер (add/list/today/week/del)\n"
+        "/reminders [N] — ближайшие напоминания\n"
+        "/reminder_off <id> — отключить напоминание\n"
+        "/reminder_on <event_id> — включить напоминание\n"
         "/selfcheck — проверка конфигурации\n"
         "/health — диагностика сервера\n"
         "/allow <user_id> — добавить в whitelist (админ)\n"
@@ -364,6 +372,7 @@ def _build_help_text(access_note: str) -> str:
         "/explain текст\n"
         "/calc 2+2\n"
         "/calendar add 2026-02-05 18:30 -m 10 Врач\n"
+        "/reminders 5\n"
         "search Путин биография\n"
         "summary: большой текст для сжатия\n"
         "echo привет\n"
@@ -998,6 +1007,9 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await safe_send_text(update, context, "Минуты не могут быть отрицательными.")
                 return
             title_start = 5
+        settings = context.application.bot_data.get("settings")
+        if minutes_before is None and settings is not None:
+            minutes_before = settings.reminder_default_offset_minutes
         title = " ".join(args[title_start:]).strip()
         if not title:
             await safe_send_text(
@@ -1016,13 +1028,33 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
         remind_at = dt
-        if minutes_before is not None:
+        if minutes_before:
             remind_at = dt - timedelta(minutes=minutes_before)
         chat_id = update.effective_chat.id if update.effective_chat else 0
         user_id = update.effective_user.id if update.effective_user else 0
-        item = await calendar_store.add_item(dt, title, chat_id=chat_id, remind_at=remind_at, user_id=user_id)
+        reminders_enabled = True
+        if settings is not None and not settings.reminders_enabled:
+            reminders_enabled = False
+        result_item = await calendar_store.add_item(
+            dt,
+            title,
+            chat_id=chat_id,
+            remind_at=remind_at,
+            user_id=user_id,
+            reminders_enabled=reminders_enabled,
+        )
+        event = result_item["event"]
+        reminder = result_item["reminder"]
+        scheduler = _get_reminder_scheduler(context)
+        if scheduler and reminders_enabled:
+            try:
+                reminder_item = await calendar_store.get_reminder(reminder["reminder_id"])
+                if reminder_item:
+                    await scheduler.schedule_reminder(reminder_item)
+            except Exception:
+                LOGGER.exception("Failed to schedule reminder: reminder_id=%s", reminder.get("reminder_id"))
         dt_label = dt.strftime("%Y-%m-%d %H:%M")
-        text = f"Добавлено: {item['id']} | {dt_label} | {title}"
+        text = f"Добавлено: {event['event_id']} | {dt_label} | {title}"
         result = OrchestratorResult(
             text=text,
             status="ok",
@@ -1102,7 +1134,13 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not item_id:
             await safe_send_text(update, context, "Укажите id для удаления.")
             return
-        removed = await calendar_store.delete_item(item_id)
+        removed, reminder_id = await calendar_store.delete_item(item_id)
+        scheduler = _get_reminder_scheduler(context)
+        if reminder_id and scheduler:
+            try:
+                await scheduler.cancel_reminder(reminder_id)
+            except Exception:
+                LOGGER.exception("Failed to cancel reminder: reminder_id=%s", reminder_id)
         user_id = update.effective_user.id if update.effective_user else 0
         if removed:
             text = f"Удалено: {item_id}"
@@ -1127,9 +1165,9 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         lines = []
         for item in due_items:
-            remind_label = item.remind_at.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+            remind_label = item.trigger_at.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
             lines.append(
-                f"{item.id} | remind_at={remind_label} | sent={item.remind_sent} | {item.title}"
+                f"{item.id} | trigger_at={remind_label} | enabled={item.enabled} | {item.text}"
             )
         await safe_send_text(update, context, "\n".join(lines))
         return
@@ -1138,6 +1176,83 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context,
         "Неизвестная команда. Использование: /calendar add|list|today|week|del|debug_due.",
     )
+
+
+@_with_error_handling
+async def reminders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    limit = 5
+    if context.args:
+        try:
+            limit = max(1, int(context.args[0]))
+        except ValueError:
+            await safe_send_text(update, context, "Использование: /reminders [N].")
+            return
+    now = datetime.now(tz=calendar_store.VIENNA_TZ)
+    items = await calendar_store.list_reminders(now, limit=limit)
+    if not items:
+        await safe_send_text(update, context, "Нет запланированных напоминаний.")
+        return
+    lines = []
+    for item in items:
+        when_label = item.trigger_at.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+        lines.append(f"{item.id} | {when_label} | {item.text}")
+    await safe_send_text(update, context, "\n".join(lines))
+
+
+@_with_error_handling
+async def reminder_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    if not context.args:
+        await safe_send_text(update, context, "Использование: /reminder_off <id>.")
+        return
+    reminder_id = context.args[0].strip()
+    if not reminder_id:
+        await safe_send_text(update, context, "Укажите id напоминания.")
+        return
+    scheduler = _get_reminder_scheduler(context)
+    if scheduler:
+        try:
+            await scheduler.cancel_reminder(reminder_id)
+        except Exception:
+            LOGGER.exception("Failed to cancel reminder: reminder_id=%s", reminder_id)
+            await safe_send_text(update, context, "Не удалось отменить напоминание.")
+            return
+    else:
+        await calendar_store.disable_reminder(reminder_id)
+    await safe_send_text(update, context, f"Напоминание отключено: {reminder_id}")
+
+
+@_with_error_handling
+async def reminder_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    if not context.args:
+        await safe_send_text(update, context, "Использование: /reminder_on <event_id>.")
+        return
+    event_id = context.args[0].strip()
+    if not event_id:
+        await safe_send_text(update, context, "Укажите event_id.")
+        return
+    event = await calendar_store.get_event(event_id)
+    if event is None:
+        await safe_send_text(update, context, f"Событие не найдено: {event_id}")
+        return
+    settings = context.application.bot_data.get("settings")
+    offset_minutes = settings.reminder_default_offset_minutes if settings is not None else 10
+    trigger_at = event.dt - timedelta(minutes=offset_minutes) if offset_minutes else event.dt
+    scheduler = _get_reminder_scheduler(context)
+    reminder = await calendar_store.ensure_reminder_for_event(event, trigger_at, enabled=True)
+    if scheduler and settings is not None and settings.reminders_enabled:
+        try:
+            await scheduler.schedule_reminder(reminder)
+        except Exception:
+            LOGGER.exception("Failed to schedule reminder: reminder_id=%s", reminder.id)
+            await safe_send_text(update, context, "Не удалось включить напоминание.")
+            return
+    await safe_send_text(update, context, f"Напоминание включено: {reminder.id}")
 
 
 @_with_error_handling
