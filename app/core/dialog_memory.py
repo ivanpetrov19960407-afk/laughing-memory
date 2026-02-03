@@ -81,13 +81,13 @@ class DialogMemory:
         async with self._lock:
             user = self._get_user(user_id, create=False)
             if not user:
-                return True
+                return False
             return bool(user.get("enabled", True))
 
     async def get_status(self, user_id: int, chat_id: int) -> tuple[bool, int]:
         async with self._lock:
             user = self._get_user(user_id, create=False)
-            enabled = True if not user else bool(user.get("enabled", True))
+            enabled = False if not user else bool(user.get("enabled", True))
             messages = self._get_messages(user_id, chat_id)
             return enabled, len(messages)
 
@@ -119,7 +119,7 @@ class DialogMemory:
         users = self._data.setdefault("users", {})
         key = str(user_id)
         if create:
-            return users.setdefault(key, {"enabled": True, "chats": {}})
+            return users.setdefault(key, {"enabled": False, "chats": {}})
         return users.get(key, {})
 
     def _get_messages(self, user_id: int, chat_id: int) -> list[dict[str, Any]]:

@@ -19,3 +19,15 @@ def test_sanitizer_blocks_sources_section() -> None:
     assert "https://example.com" not in sanitized
     assert sanitized == "Основной ответ."
     assert meta["failed"] is False
+
+
+def test_no_sources_markers() -> None:
+    text = "Ответ со ссылкой https://example.com [1] doi:10.1234/abc arxiv pubmed"
+    sanitized, meta = sanitize_llm_text(text)
+
+    assert "http" not in sanitized
+    assert "[1]" not in sanitized
+    assert "doi" not in sanitized.lower()
+    assert "arxiv" not in sanitized.lower()
+    assert "pubmed" not in sanitized.lower()
+    assert meta["failed"] is False
