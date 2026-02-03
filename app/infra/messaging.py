@@ -71,6 +71,25 @@ async def safe_send_text(
     return len(payload)
 
 
+async def safe_send_bot_text(bot, chat_id: int, text: str | None) -> int:
+    payload = text if text and text.strip() else EMPTY_MESSAGE_PLACEHOLDER
+    chunks = chunk_text(payload, max_len=MAX_CHUNK_SIZE)
+    sent = 0
+    for chunk in chunks:
+        try:
+            await bot.send_message(chat_id=chat_id, text=chunk)
+        except BadRequest as exc:
+            if "Message is too long" in str(exc):
+                LOGGER.warning("Telegram rejected bot message chunk as too long; splitting further.")
+                for subchunk in chunk_text(chunk, max_len=FALLBACK_CHUNK_SIZE):
+                    await bot.send_message(chat_id=chat_id, text=subchunk)
+                continue
+            LOGGER.exception("Failed to send bot message chunk: %s", exc)
+            break
+        sent += len(chunk)
+    return sent
+
+
 def _selftest() -> None:
     assert chunk_text("", max_len=10) == []
     assert chunk_text("hello", max_len=10) == ["hello"]

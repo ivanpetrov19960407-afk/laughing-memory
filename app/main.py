@@ -9,6 +9,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from app.bot import handlers
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
+from app.core import reminder_scheduler
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.config import load_settings
@@ -88,6 +89,8 @@ def main() -> None:
     )
 
     application = Application.builder().token(settings.bot_token).build()
+    application.post_init = reminder_scheduler.post_init
+    application.post_shutdown = reminder_scheduler.post_shutdown
     application.bot_data["orchestrator"] = orchestrator
     application.bot_data["storage"] = storage
     application.bot_data["allowlist_store"] = allowlist_store
