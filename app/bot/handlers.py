@@ -459,6 +459,11 @@ async def send_result(
     reply_markup=None,
 ) -> None:
     public_result = ensure_valid(result)
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            LOGGER.exception("Failed to answer callback query")
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
     request_context = get_request_context(context)
@@ -469,6 +474,7 @@ async def send_result(
             LOGGER.warning("send_result skipped duplicate: request_id=%s intent=%s", request_id, public_result.intent)
             return
         context.chat_data[sent_key] = True
+    _log_orchestrator_result(user_id, public_result, request_id=request_id)
     inline_keyboard = build_inline_keyboard(
         public_result.actions,
         store=_get_action_store(context),
@@ -1154,12 +1160,13 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if not await _guard_access(update, context, bucket="ui"):
         return
-    await query.answer()
     data = query.data or ""
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
-    token = parse_callback_token(data)
-    if token is None:
+    LOGGER.info("Callback: user_id=%s data=%r", user_id, query.data)
+    action_id = parse_callback_token(data)
+    LOGGER.info("Callback parsed: action_id=%s", action_id)
+    if action_id is None:
         result = refused(
             "Действие недоступно.",
             intent="ui.action",
@@ -1169,11 +1176,11 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await send_result(update, context, result)
         return
     store = _get_action_store(context)
-    stored = store.pop_action(user_id=user_id, chat_id=chat_id, token=token)
+    stored = store.get_action(user_id=user_id, chat_id=chat_id, action_id=action_id)
     if stored is None:
         result = refused(
-            "Кнопка устарела, открой меню заново.",
-            intent="ui.action",
+            "Кнопка устарела, открой /menu заново.",
+            intent="callback.expired",
             mode="local",
             debug={"reason": "action_missing"},
         )

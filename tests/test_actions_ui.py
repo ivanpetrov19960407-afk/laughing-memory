@@ -39,16 +39,17 @@ def test_action_store_ttl_and_security(monkeypatch) -> None:
     monkeypatch.setattr(actions.time, "monotonic", fake_monotonic)
     store = actions.ActionStore(ttl_seconds=5, max_items=10)
     action = Action(id="test", label="Test", payload={"op": "menu_open"})
-    token = store.store_action(action=action, user_id=1, chat_id=2)
+    action_id = store.store_action(action=action, user_id=1, chat_id=2)
 
-    assert store.pop_action(user_id=1, chat_id=999, token=token) is None
-    stored = store.pop_action(user_id=1, chat_id=2, token=token)
+    assert store.get_action(user_id=1, chat_id=999, action_id=action_id) is None
+    stored = store.get_action(user_id=1, chat_id=2, action_id=action_id)
     assert stored is not None
     assert stored.payload["op"] == "menu_open"
+    assert stored.intent == "test"
 
-    token_expired = store.store_action(action=action, user_id=1, chat_id=2)
+    action_id_expired = store.store_action(action=action, user_id=1, chat_id=2)
     clock["value"] += 10
-    assert store.pop_action(user_id=1, chat_id=2, token=token_expired) is None
+    assert store.get_action(user_id=1, chat_id=2, action_id=action_id_expired) is None
 
 
 def test_build_inline_keyboard() -> None:

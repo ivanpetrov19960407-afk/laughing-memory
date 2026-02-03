@@ -43,9 +43,9 @@ class ActionStore:
         self._cleanup()
         payload = action.payload or {}
         self._validate_payload(payload)
-        token = self._generate_token()
+        action_id = self._generate_token()
         now = time.monotonic()
-        self._items[token] = StoredAction(
+        self._items[action_id] = StoredAction(
             user_id=user_id,
             chat_id=chat_id,
             intent=action.id,
@@ -53,17 +53,17 @@ class ActionStore:
             created_at=now,
             expires_at=now + self._ttl_seconds,
         )
-        return token
+        return action_id
 
-    def pop_action(self, *, user_id: int, chat_id: int, token: str) -> StoredAction | None:
+    def get_action(self, *, user_id: int, chat_id: int, action_id: str) -> StoredAction | None:
         self._cleanup()
-        item = self._items.get(token)
+        item = self._items.get(action_id)
         if item is None or item.user_id != user_id or item.chat_id != chat_id:
             return None
         if item.expires_at < time.monotonic():
-            self._items.pop(token, None)
+            self._items.pop(action_id, None)
             return None
-        self._items.pop(token, None)
+        self._items.pop(action_id, None)
         return item
 
     def _validate_payload(self, payload: dict[str, Any]) -> None:
@@ -110,13 +110,13 @@ def build_inline_keyboard(
     row: list[InlineKeyboardButton] = []
     for index, action in enumerate(actions, start=1):
         try:
-            token = store.store_action(action=action, user_id=user_id, chat_id=chat_id)
+            action_id = store.store_action(action=action, user_id=user_id, chat_id=chat_id)
         except ValueError:
             LOGGER.warning("Action payload too large: action_id=%s", action.id)
             continue
-        data = f"{CALLBACK_PREFIX}{token}"
+        data = f"{CALLBACK_PREFIX}{action_id}"
         if len(data.encode("utf-8")) > 64:
-            LOGGER.warning("Callback data too long for action_id=%s token=%s", action.id, token)
+            LOGGER.warning("Callback data too long for action_id=%s action_id=%s", action.id, action_id)
             continue
         row.append(InlineKeyboardButton(action.label, callback_data=data))
         if len(row) == columns or index == len(actions):
