@@ -33,6 +33,7 @@ class DummyContext:
                 "action_store": actions.ActionStore(),
                 "ui_rate_limiter": RateLimiter(),
                 "rate_limiter": RateLimiter(),
+                "settings": SimpleNamespace(enable_menu=True, enable_wizards=False, strict_no_pseudo_sources=True),
             }
         )
         self.chat_data: dict[str, object] = {}

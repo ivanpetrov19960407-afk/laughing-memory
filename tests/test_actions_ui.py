@@ -16,6 +16,7 @@ class DummyContext:
                 "action_store": actions.ActionStore(),
                 "ui_rate_limiter": RateLimiter(),
                 "rate_limiter": RateLimiter(),
+                "settings": SimpleNamespace(enable_menu=True, enable_wizards=False, strict_no_pseudo_sources=True),
             }
         )
         self.chat_data: dict[str, object] = {}
@@ -156,7 +157,7 @@ def test_send_result_deduplicates(monkeypatch) -> None:
     context = DummyContext()
     context.application.bot_data["orchestrator"] = SimpleNamespace(is_facts_only=lambda user_id: False)
     start_request(update, context)
-    result = menu.build_menu_actions(facts_enabled=False)
+    result = menu.build_menu_actions(facts_enabled=False, enable_menu=True)
     orchestrator_result = ok("Меню:", intent="command.menu", mode="local", actions=result)
 
     monkeypatch.setattr(handlers, "_send_text", fake_send_text)

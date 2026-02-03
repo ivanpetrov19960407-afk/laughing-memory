@@ -16,7 +16,7 @@ from telegram.ext import ContextTypes
 from PIL import Image
 import pytesseract
 
-from app.bot import menu, routing
+from app.bot import menu, routing, wizard
 from app.bot.actions import ActionStore, StoredAction, build_inline_keyboard, parse_callback_token
 from app.core import calendar_store
 from app.core.calc import CalcError, parse_and_eval
@@ -25,6 +25,7 @@ from app.core.orchestrator import Orchestrator
 from app.core.result import Action, OrchestratorResult, ensure_valid, error, ok, ratelimited, refused
 from app.core.tools_calendar import list_calendar_items, list_reminders
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
+from app.core.text_safety import has_pseudo_source_markers
 from app.infra.allowlist import AllowlistStore
 from app.infra.messaging import safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
@@ -73,6 +74,17 @@ def _get_reminder_scheduler(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data.get("reminder_scheduler")
 
 
+def _get_settings(context: ContextTypes.DEFAULT_TYPE):
+    return context.application.bot_data.get("settings")
+
+
+def _get_wizard_manager(context: ContextTypes.DEFAULT_TYPE) -> wizard.WizardManager | None:
+    manager = context.application.bot_data.get("wizard_manager")
+    if isinstance(manager, wizard.WizardManager):
+        return manager
+    return None
+
+
 def _get_action_store(context: ContextTypes.DEFAULT_TYPE) -> ActionStore:
     store = context.application.bot_data.get("action_store")
     if isinstance(store, ActionStore):
@@ -80,6 +92,21 @@ def _get_action_store(context: ContextTypes.DEFAULT_TYPE) -> ActionStore:
     store = ActionStore()
     context.application.bot_data["action_store"] = store
     return store
+
+
+def _wizards_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    settings = _get_settings(context)
+    return bool(getattr(settings, "enable_wizards", False))
+
+
+def _menu_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    settings = _get_settings(context)
+    return bool(getattr(settings, "enable_menu", False))
+
+
+def _strict_no_pseudo_sources(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    settings = _get_settings(context)
+    return bool(getattr(settings, "strict_no_pseudo_sources", False))
 
 
 async def _get_active_modes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -295,7 +322,7 @@ def _build_user_context(update: Update) -> dict[str, int]:
 def _build_menu_actions(context: ContextTypes.DEFAULT_TYPE, *, user_id: int) -> list[Action]:
     orchestrator = _get_orchestrator(context)
     facts_enabled = bool(user_id) and orchestrator.is_facts_only(user_id)
-    return menu.build_menu_actions(facts_enabled=facts_enabled)
+    return menu.build_menu_actions(facts_enabled=facts_enabled, enable_menu=_menu_enabled(context))
 
 
 def _build_simple_result(
@@ -313,6 +340,10 @@ def _build_simple_result(
     if status == "ratelimited":
         return ratelimited(text, intent=intent, mode=mode, debug=debug)
     return error(text, intent=intent, mode=mode, debug=debug)
+
+
+def _menu_action() -> Action:
+    return Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"})
 
 
 def _build_user_context_with_dialog(
@@ -408,6 +439,23 @@ def _log_orchestrator_result(
         )
 
 
+def _apply_pseudo_source_guard(
+    context: ContextTypes.DEFAULT_TYPE,
+    result: OrchestratorResult,
+) -> OrchestratorResult:
+    if not _strict_no_pseudo_sources(context):
+        return result
+    if result.mode != "llm" or result.sources:
+        return result
+    if not has_pseudo_source_markers(result.text):
+        return result
+    return refused(
+        "Не могу ответить без проверяемых источников в этом режиме.",
+        intent="safety.no_sources",
+        mode=result.mode,
+    )
+
+
 async def _send_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None) -> None:
     await safe_send_text(update, context, text, reply_markup=reply_markup)
 
@@ -459,6 +507,7 @@ async def send_result(
     reply_markup=None,
 ) -> None:
     public_result = ensure_valid(result)
+    public_result = ensure_valid(_apply_pseudo_source_guard(context, public_result))
     if update.callback_query:
         try:
             await update.callback_query.answer()
@@ -557,6 +606,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "Неизвестная команда. /help",
         intent="command.unknown",
         mode="local",
+        actions=_build_menu_actions(context, user_id=update.effective_user.id if update.effective_user else 0),
     )
     await send_result(update, context, result)
 
@@ -567,6 +617,7 @@ def _build_help_text(access_note: str) -> str:
         "/start — приветствие и статус\n"
         "/help — помощь\n"
         "/menu — показать меню\n"
+        "/cancel — отменить активный сценарий\n"
         "/ping — pong + версия/время\n"
         "/tasks — список задач\n"
         "/task <name> <payload> — выполнить задачу\n"
@@ -1163,6 +1214,89 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 @_with_error_handling
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context, bucket="ui"):
+        return
+    if not _wizards_enabled(context):
+        result = refused("Сценарии отключены.", intent="wizard.cancel", mode="local")
+        await send_result(update, context, result)
+        return
+    manager = _get_wizard_manager(context)
+    if manager is None:
+        result = error("Сценарии не настроены.", intent="wizard.cancel", mode="local")
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    result = manager.cancel(user_id=user_id, chat_id=chat_id)
+    await send_result(update, context, result)
+
+
+async def _handle_menu_section(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    section: str,
+    user_id: int,
+    chat_id: int,
+) -> OrchestratorResult:
+    if section == "chat":
+        return ok(
+            "Режим чата: просто напиши сообщение.",
+            intent="menu.chat",
+            mode="local",
+            actions=[_menu_action()],
+        )
+    if section == "search":
+        return refused(
+            "Поиск скоро появится. Пока доступен обычный чат.",
+            intent="menu.search",
+            mode="local",
+            actions=[_menu_action()],
+        )
+    if section == "calendar":
+        return ok(
+            "Календарь: выбери действие.",
+            intent="menu.calendar",
+            mode="local",
+            actions=[
+                Action(
+                    id="calendar.add",
+                    label="➕ Добавить событие",
+                    payload={"op": "wizard_start", "wizard_id": wizard.WIZARD_CALENDAR_ADD},
+                ),
+                _menu_action(),
+            ],
+        )
+    if section == "reminders":
+        return ok(
+            "Напоминания: что сделать?",
+            intent="menu.reminders",
+            mode="local",
+            actions=[
+                Action(
+                    id="reminders.list",
+                    label="📋 Ближайшие",
+                    payload={"op": "reminders_list", "limit": 5},
+                ),
+                _menu_action(),
+            ],
+        )
+    if section == "settings":
+        return ok(
+            "Настройки пока в разработке.",
+            intent="menu.settings",
+            mode="local",
+            actions=[_menu_action()],
+        )
+    return refused(
+        "Раздел меню недоступен.",
+        intent="menu.unknown",
+        mode="local",
+        actions=[_menu_action()],
+    )
+
+
+@_with_error_handling
 async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None:
@@ -1218,6 +1352,50 @@ async def _dispatch_action(
     if op == "menu_open":
         user_id = update.effective_user.id if update.effective_user else 0
         return ok("Меню:", intent="menu.open", mode="local", actions=_build_menu_actions(context, user_id=user_id))
+    if op == "menu_section":
+        section = payload.get("section")
+        if not isinstance(section, str):
+            return error(
+                "Некорректный раздел меню.",
+                intent="menu.section",
+                mode="local",
+                debug={"reason": "invalid_section"},
+            )
+        return await _handle_menu_section(context, section=section, user_id=user_id, chat_id=chat_id)
+    if op in {
+        "wizard_start",
+        "wizard_continue",
+        "wizard_restart",
+        "wizard_cancel",
+        "wizard_confirm",
+        "wizard_edit",
+    }:
+        if not _wizards_enabled(context):
+            return refused(
+                "Сценарии отключены.",
+                intent="wizard.disabled",
+                mode="local",
+            )
+        manager = _get_wizard_manager(context)
+        if manager is None:
+            return error(
+                "Сценарии не настроены.",
+                intent="wizard.missing",
+                mode="local",
+            )
+        result = await manager.handle_action(
+            user_id=user_id,
+            chat_id=chat_id,
+            op=str(op),
+            payload=payload,
+        )
+        if result is None:
+            return refused(
+                "Сценарий не активен.",
+                intent="wizard.inactive",
+                mode="local",
+            )
+        return result
     if op == "run_command":
         command = payload.get("command")
         args = payload.get("args", "")
@@ -1254,6 +1432,49 @@ async def _dispatch_action(
                 debug={"reason": "invalid_event_id"},
             )
         return await _handle_reminder_on(context, user_id=user_id, event_id=event_id)
+    if op == "reminders_list":
+        limit = payload.get("limit", 5)
+        limit_value = limit if isinstance(limit, int) else 5
+        return await _handle_reminders_list(context, limit=max(1, limit_value))
+    if op == "reminder_snooze":
+        reminder_id = payload.get("id")
+        minutes = payload.get("minutes", 10)
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="ui.action",
+                mode="local",
+                debug={"reason": "invalid_reminder_id"},
+            )
+        minutes_value = minutes if isinstance(minutes, int) else 10
+        return await _handle_reminder_snooze(
+            context,
+            user_id=user_id,
+            reminder_id=reminder_id,
+            minutes=minutes_value,
+        )
+    if op == "reminder_delete":
+        reminder_id = payload.get("id")
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="ui.action",
+                mode="local",
+                debug={"reason": "invalid_reminder_id"},
+            )
+        return await _handle_reminder_delete(context, reminder_id=reminder_id)
+    if op == "reminder_add_offset":
+        event_id = payload.get("event_id")
+        minutes = payload.get("minutes", 10)
+        if not isinstance(event_id, str) or not event_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="ui.action",
+                mode="local",
+                debug={"reason": "invalid_event_id"},
+            )
+        minutes_value = minutes if isinstance(minutes, int) else 10
+        return await _handle_reminder_add_offset(context, event_id=event_id, minutes=minutes_value)
     if stored.intent == "task.execute":
         task_name = payload.get("name")
         task_payload = payload.get("payload")
@@ -1331,6 +1552,124 @@ async def _dispatch_command_payload(
         intent="ui.action",
         mode="local",
         debug={"command": command, "args": args},
+    )
+
+
+async def _handle_reminders_list(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    limit: int = 5,
+) -> OrchestratorResult:
+    now = datetime.now(tz=calendar_store.VIENNA_TZ)
+    return await list_reminders(now, limit=limit, intent="menu.reminders")
+
+
+async def _handle_reminder_snooze(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    reminder_id: str,
+    minutes: int,
+) -> OrchestratorResult:
+    reminder = await calendar_store.get_reminder(reminder_id)
+    if reminder is None:
+        return refused(
+            f"Напоминание не найдено: {reminder_id}",
+            intent="utility_reminders.snooze",
+            mode="local",
+        )
+    offset = max(1, minutes)
+    new_trigger = datetime.now(tz=calendar_store.VIENNA_TZ) + timedelta(minutes=offset)
+    updated = await calendar_store.update_reminder_trigger(reminder_id, new_trigger, enabled=True)
+    if updated is None:
+        return error(
+            "Не удалось обновить напоминание.",
+            intent="utility_reminders.snooze",
+            mode="local",
+        )
+    scheduler = _get_reminder_scheduler(context)
+    settings = _get_settings(context)
+    if scheduler and settings is not None and settings.reminders_enabled:
+        try:
+            await scheduler.schedule_reminder(updated)
+        except Exception:
+            LOGGER.exception("Failed to reschedule reminder: reminder_id=%s", reminder_id)
+            return error(
+                "Не удалось отложить напоминание.",
+                intent="utility_reminders.snooze",
+                mode="local",
+            )
+    when_label = new_trigger.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+    return ok(
+        f"Напоминание отложено до {when_label}.",
+        intent="utility_reminders.snooze",
+        mode="local",
+    )
+
+
+async def _handle_reminder_delete(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    reminder_id: str,
+) -> OrchestratorResult:
+    scheduler = _get_reminder_scheduler(context)
+    if scheduler:
+        try:
+            await scheduler.cancel_reminder(reminder_id)
+        except Exception:
+            LOGGER.exception("Failed to cancel reminder: reminder_id=%s", reminder_id)
+            return error(
+                "Не удалось удалить напоминание.",
+                intent="utility_reminders.delete",
+                mode="local",
+            )
+    deleted = await calendar_store.delete_reminder(reminder_id)
+    if not deleted:
+        return refused(
+            f"Напоминание не найдено: {reminder_id}",
+            intent="utility_reminders.delete",
+            mode="local",
+        )
+    return ok(
+        "Напоминание удалено.",
+        intent="utility_reminders.delete",
+        mode="local",
+    )
+
+
+async def _handle_reminder_add_offset(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    event_id: str,
+    minutes: int,
+) -> OrchestratorResult:
+    event = await calendar_store.get_event(event_id)
+    if event is None:
+        return refused(
+            f"Событие не найдено: {event_id}",
+            intent="utility_reminders.add",
+            mode="local",
+        )
+    offset = max(0, minutes)
+    trigger_at = event.dt - timedelta(minutes=offset)
+    reminder = await calendar_store.ensure_reminder_for_event(event, trigger_at, enabled=True)
+    scheduler = _get_reminder_scheduler(context)
+    settings = _get_settings(context)
+    if scheduler and settings is not None and settings.reminders_enabled:
+        try:
+            await scheduler.schedule_reminder(reminder)
+        except Exception:
+            LOGGER.exception("Failed to schedule reminder: reminder_id=%s", reminder.id)
+            return error(
+                "Не удалось добавить напоминание.",
+                intent="utility_reminders.add",
+                mode="local",
+            )
+    when_label = trigger_at.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+    return ok(
+        f"Напоминание добавлено на {when_label}.",
+        intent="utility_reminders.add",
+        mode="local",
     )
 
 
@@ -1872,6 +2211,13 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
+    if _wizards_enabled(context):
+        manager = _get_wizard_manager(context)
+        if manager is not None:
+            wizard_result = await manager.handle_text(user_id=user_id, chat_id=chat_id, text=prompt)
+            if wizard_result is not None:
+                await send_result(update, context, wizard_result)
+                return
     LOGGER.info("chat_ids user_id=%s chat_id=%s has_message=%s", user_id, chat_id, bool(update.message))
     dialog_memory = _get_dialog_memory(context)
     if user_id == 0 or chat_id == 0:

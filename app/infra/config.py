@@ -44,6 +44,11 @@ class Settings:
     reminder_max_future_days: int
     action_ttl_seconds: int
     action_max_size: int
+    enable_wizards: bool
+    enable_menu: bool
+    strict_no_pseudo_sources: bool
+    wizard_store_path: Path
+    wizard_timeout_seconds: int
 
 
 def load_settings() -> Settings:
@@ -92,6 +97,17 @@ def load_settings() -> Settings:
     )
     action_ttl_seconds = _parse_int_with_default(os.getenv("ACTION_TTL_SECONDS"), 600)
     action_max_size = _parse_int_with_default(os.getenv("ACTION_MAX_SIZE"), 2000)
+    enable_wizards = _parse_optional_bool(os.getenv("ENABLE_WIZARDS"))
+    if enable_wizards is None:
+        enable_wizards = True
+    enable_menu = _parse_optional_bool(os.getenv("ENABLE_MENU"))
+    if enable_menu is None:
+        enable_menu = True
+    strict_no_pseudo_sources = _parse_optional_bool(os.getenv("STRICT_NO_PSEUDO_SOURCES"))
+    if strict_no_pseudo_sources is None:
+        strict_no_pseudo_sources = True
+    wizard_store_path = Path(os.getenv("WIZARD_STORE_PATH", "data/wizards"))
+    wizard_timeout_seconds = _parse_int_with_default(os.getenv("WIZARD_TIMEOUT_SECONDS"), 600)
 
     return Settings(
         bot_token=token,
@@ -123,6 +139,11 @@ def load_settings() -> Settings:
         reminder_max_future_days=reminder_max_future_days,
         action_ttl_seconds=action_ttl_seconds,
         action_max_size=action_max_size,
+        enable_wizards=enable_wizards,
+        enable_menu=enable_menu,
+        strict_no_pseudo_sources=strict_no_pseudo_sources,
+        wizard_store_path=wizard_store_path,
+        wizard_timeout_seconds=wizard_timeout_seconds,
     )
 
 

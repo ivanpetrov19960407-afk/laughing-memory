@@ -440,6 +440,55 @@ async def enable_reminder(reminder_id: str) -> bool:
         return True
 
 
+async def update_reminder_trigger(
+    reminder_id: str,
+    trigger_at: datetime,
+    enabled: bool = True,
+) -> ReminderItem | None:
+    async with _STORE_LOCK:
+        store = load_store()
+        reminders = list(store.get("reminders") or [])
+        updated_item: dict[str, object] | None = None
+        for item in reminders:
+            if isinstance(item, dict) and item.get("reminder_id") == reminder_id:
+                item["trigger_at"] = trigger_at.astimezone(VIENNA_TZ).isoformat()
+                item["enabled"] = enabled
+                updated_item = item
+                break
+        if updated_item is None:
+            return None
+        store["reminders"] = reminders
+        store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
+        save_store_atomic(store)
+    event_id = updated_item.get("event_id")
+    text = updated_item.get("text")
+    if not isinstance(event_id, str) or not isinstance(text, str):
+        return None
+    return ReminderItem(
+        id=reminder_id,
+        event_id=event_id,
+        user_id=int(updated_item.get("user_id")) if isinstance(updated_item.get("user_id"), int) else 0,
+        chat_id=int(updated_item.get("chat_id")) if isinstance(updated_item.get("chat_id"), int) else 0,
+        trigger_at=trigger_at.astimezone(VIENNA_TZ),
+        text=text,
+        enabled=enabled,
+        sent_at=updated_item.get("sent_at") if isinstance(updated_item.get("sent_at"), str) else None,
+    )
+
+
+async def delete_reminder(reminder_id: str) -> bool:
+    async with _STORE_LOCK:
+        store = load_store()
+        reminders = list(store.get("reminders") or [])
+        kept = [item for item in reminders if not (isinstance(item, dict) and item.get("reminder_id") == reminder_id)]
+        if len(kept) == len(reminders):
+            return False
+        store["reminders"] = kept
+        store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
+        save_store_atomic(store)
+        return True
+
+
 async def ensure_reminder_for_event(
     event: CalendarItem,
     trigger_at: datetime,

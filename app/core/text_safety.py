@@ -22,6 +22,10 @@ _DOMAIN_RE = re.compile(
     re.IGNORECASE,
 )
 _DOI_RE = re.compile(r"\bdoi:\s*\S+", re.IGNORECASE)
+_PSEUDO_SOURCES_RE = re.compile(
+    r"(?i)\b(источник\w*|sources?|references?|citation|согласно|по данным)\b"
+)
+_SOURCE_LABEL_RE = re.compile(r"(?i)\bsource\s*:")
 _SOURCES_REQUEST_RE = re.compile(
     r"(?i)\b("
     r"ссылк\w*|источник\w*|исследован\w*|доказательств\w*|по данным|согласно|"
@@ -62,6 +66,22 @@ _STATS_MARKER_RE = re.compile(
 
 def is_sources_request(text: str) -> bool:
     return bool(_SOURCES_REQUEST_RE.search(text or ""))
+
+
+def has_pseudo_source_markers(text: str) -> bool:
+    if not text:
+        return False
+    return bool(
+        _BRACKET_CITATION_RE.search(text)
+        or _PAREN_CITATION_RE.search(text)
+        or _SOURCES_HEADER_RE.search(text)
+        or _SOURCE_LABEL_RE.search(text)
+        or _PSEUDO_SOURCES_RE.search(text)
+        or _URL_RE.search(text)
+        or _WWW_RE.search(text)
+        or _DOMAIN_RE.search(text)
+        or _DOI_RE.search(text)
+    )
 
 
 def _normalize_text(text: str) -> str:

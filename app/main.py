@@ -9,7 +9,7 @@ from collections import defaultdict, deque
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from telegram.warnings import PTBUserWarning
 
-from app.bot import actions, handlers
+from app.bot import actions, handlers, wizard
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
 from app.core.reminders import ReminderScheduler
 from app.core.dialog_memory import DialogMemory
@@ -20,6 +20,7 @@ from app.infra.llm import OpenAIClient, PerplexityClient
 from app.infra.rate_limit import RateLimiter as LLMRateLimiter
 from app.infra.rate_limiter import RateLimiter
 from app.infra.storage import TaskStorage
+from app.storage.wizard_store import WizardStore
 
 
 def main() -> None:
@@ -126,6 +127,11 @@ def main() -> None:
         ttl_seconds=settings.action_ttl_seconds,
         max_items=settings.action_max_size,
     )
+    wizard_store = WizardStore(
+        settings.wizard_store_path,
+        timeout_seconds=settings.wizard_timeout_seconds,
+    )
+    application.bot_data["wizard_manager"] = wizard.WizardManager(wizard_store)
     if not application.job_queue:
         logging.getLogger(__name__).warning("JobQueue not configured; reminders will run without it.")
 
@@ -165,6 +171,7 @@ def main() -> None:
     application.add_handler(CommandHandler("deny", handlers.deny))
     application.add_handler(CommandHandler("allowlist", handlers.allowlist))
     application.add_handler(CommandHandler("menu", handlers.menu_command))
+    application.add_handler(CommandHandler("cancel", handlers.cancel_command))
     application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
     application.add_handler(CommandHandler("health", handlers.health))
     application.add_handler(CommandHandler("status", handlers.health))
