@@ -18,6 +18,7 @@ from app.core.result import (
     ok,
     refused,
 )
+from app.core.text_safety import SAFE_FALLBACK_TEXT, sanitize_llm_text
 from app.core.tasks import TaskDefinition, TaskError, get_task_registry
 from app.infra.access import AccessController
 from app.infra.llm import LLMAPIError, LLMClient, LLMGuardError, ensure_plain_text
@@ -27,7 +28,10 @@ from app.infra.storage import TaskStorage
 
 LOGGER = logging.getLogger(__name__)
 _PLAIN_TEXT_SYSTEM_PROMPT = (
-    "Ответь только текстом. Не возвращай JSON, поля, статус, intent, sources, actions."
+    "Ответь только текстом. Не возвращай JSON, поля, статус, intent, sources, actions.\n"
+    "Запрещено использовать ссылки, цитаты, номера источников, квадратные/круглые скобки "
+    "с цифрами (например [1], [2], (1)), фразы \"по данным\", \"согласно\", \"источник:\", "
+    "\"references\". Верни только связный текст без упоминаний источников."
 )
 _UNKNOWN_COMMAND_MESSAGE = "Неизвестная команда. Напиши /help."
 _DESTRUCTIVE_REFUSAL = "Не могу выполнить разрушительное действие."
@@ -343,6 +347,17 @@ class Orchestrator:
                     web_search_options=None,
                 )
                 result = ensure_plain_text(response_text)
+                sanitized, meta = sanitize_llm_text(result)
+                if meta["failed"]:
+                    result = SAFE_FALLBACK_TEXT
+                    LOGGER.warning(
+                        "LLM text sanitization failed: user_id=%s mode=%s meta=%s",
+                        user_id,
+                        mode,
+                        meta,
+                    )
+                else:
+                    result = sanitized
                 status = "success"
             except LLMGuardError as exc:
                 result = "Некорректный ответ LLM. Попробуйте позже."
