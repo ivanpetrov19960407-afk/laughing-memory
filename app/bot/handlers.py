@@ -356,6 +356,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await safe_send_text(update, context, _build_help_text(access_note))
 
 
+@_with_error_handling
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    message = update.message.text if update.message else ""
+    result = refused(
+        "Неизвестная команда. Напиши /help.",
+        intent="command.unknown",
+        mode="local",
+    )
+    _log_orchestrator_result(user_id, message, result)
+    await _send_result(update, context, result)
+
+
 def _build_help_text(access_note: str) -> str:
     return (
         "Доступные команды:\n"

@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from app.core.decision import Decision
 from app.core.models import TaskExecutionResult
 from app.core.result import (
     OrchestratorResult,
@@ -19,12 +20,17 @@ from app.core.result import (
 )
 from app.core.tasks import TaskDefinition, TaskError, get_task_registry
 from app.infra.access import AccessController
-from app.infra.llm import LLMAPIError, LLMClient
+from app.infra.llm import LLMAPIError, LLMClient, LLMGuardError, ensure_plain_text
 from app.infra.rate_limit import RateLimiter
 from app.infra.storage import TaskStorage
 
 
 LOGGER = logging.getLogger(__name__)
+_PLAIN_TEXT_SYSTEM_PROMPT = (
+    "Ответь только текстом. Не возвращай JSON, поля, статус, intent, sources, actions."
+)
+_UNKNOWN_COMMAND_MESSAGE = "Неизвестная команда. Напиши /help."
+_DESTRUCTIVE_REFUSAL = "Не могу выполнить разрушительное действие."
 
 
 def detect_intent(text: str) -> str:
@@ -112,70 +118,48 @@ class Orchestrator:
                 )
             )
         trimmed = text.strip()
-        intent = detect_intent(text)
-        if not trimmed:
-            return ensure_valid(
-                refused(
-                    "Запрос пустой.",
-                    intent=intent,
-                    mode="local",
-                    debug={"reason": "empty_prompt"},
-                )
-            )
+        decision = self._make_decision(trimmed)
+        LOGGER.info(
+            "Decision: user_id=%s intent=%s status=%s reason=%s",
+            user_id,
+            decision.intent,
+            decision.status,
+            decision.reason or "-",
+        )
+        if decision.status != "ok":
+            return ensure_valid(self._result_from_decision(decision))
 
-        if intent == "smalltalk":
+        if decision.intent == "smalltalk":
             response = self._smalltalk_response(trimmed)
             return ensure_valid(
                 ok(
                     response,
-                    intent=intent,
+                    intent=decision.intent,
                     mode="local",
                     debug={"strategy": "smalltalk_local"},
                 )
             )
 
-        if intent == "utility_summary":
+        if decision.intent == "utility_summary":
             return await self._handle_summary(user_id, trimmed)
 
-        if intent == "command":
-            command, payload = _split_command(trimmed)
-            if command in {"/ask", "/search"}:
-                if not payload:
-                    return ensure_valid(
-                        refused(
-                            "Введите текст запроса. Пример: /ask Привет",
-                            intent=intent,
-                            mode="local",
-                            debug={"reason": "missing_payload", "command": command},
-                        )
-                    )
-                mode = "search" if command == "/search" else "ask"
-                execution, citations = await self._request_llm(
-                    user_id,
-                    payload,
-                    mode=mode,
-                    dialog_context=dialog_context if isinstance(dialog_context, str) else None,
-                    dialog_message_count=dialog_message_count if isinstance(dialog_message_count, int) else None,
-                    request_id=request_id if isinstance(request_id, str) else None,
-                )
-                return self._build_llm_result(
-                    execution,
-                    citations,
-                    intent=intent,
-                    facts_only=self.is_facts_only(user_id),
-                )
-            if command == "/summary":
-                return await self._handle_summary(user_id, trimmed)
-            return ensure_valid(
-                refused(
-                    "Команда не поддерживается в этом режиме.",
-                    intent=intent,
-                    mode="local",
-                    debug={"reason": "unsupported_command", "command": command},
-                )
+        if decision.intent == "command.ask":
+            _, payload = _split_command(trimmed)
+            execution, _ = await self._request_llm(
+                user_id,
+                payload,
+                mode="ask",
+                dialog_context=dialog_context if isinstance(dialog_context, str) else None,
+                dialog_message_count=dialog_message_count if isinstance(dialog_message_count, int) else None,
+                request_id=request_id if isinstance(request_id, str) else None,
+            )
+            return self._build_llm_result(
+                execution,
+                intent=decision.intent,
+                facts_only=self.is_facts_only(user_id),
             )
 
-        execution, citations = await self._request_llm(
+        execution, _ = await self._request_llm(
             user_id,
             trimmed,
             mode="ask",
@@ -185,8 +169,7 @@ class Orchestrator:
         )
         return self._build_llm_result(
             execution,
-            citations,
-            intent=intent,
+            intent=decision.intent,
             facts_only=self.is_facts_only(user_id),
         )
 
@@ -307,7 +290,14 @@ class Orchestrator:
                 )
             messages: list[dict[str, Any]] = []
             if effective_system_prompt:
-                messages.append({"role": "system", "content": effective_system_prompt})
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": f"{effective_system_prompt}\n\n{_PLAIN_TEXT_SYSTEM_PROMPT}",
+                    }
+                )
+            else:
+                messages.append({"role": "system", "content": _PLAIN_TEXT_SYSTEM_PROMPT})
             history_turns = self._resolve_history_turns(llm_config)
             if history_turns > 0:
                 recent = self._storage.get_recent_executions(
@@ -346,25 +336,18 @@ class Orchestrator:
                 max(len(messages) - 1, 0),
             )
             start_time = time.monotonic()
-            citations: list[str] = []
             try:
-                web_search_options = None
-                if mode == "search":
-                    web_search_options = {"search_context_size": "medium"}
-                response = await llm_client.create_chat_completion(
+                response_text = await llm_client.generate_text(
                     model=model,
                     messages=messages,
-                    web_search_options=web_search_options,
+                    web_search_options=None,
                 )
-                result = response.get("content", "")
-                citations = response.get("citations") or []
-                if mode == "search":
-                    if citations:
-                        lines = ["Источники:"]
-                        for index, url in enumerate(citations, start=1):
-                            lines.append(f"{index}) {url}")
-                        result = f"{result}\n\n" + "\n".join(lines) if result else "\n".join(lines)
+                result = ensure_plain_text(response_text)
                 status = "success"
+            except LLMGuardError as exc:
+                result = "Некорректный ответ LLM. Попробуйте позже."
+                status = "error"
+                LOGGER.warning("LLM guard error: %s", exc)
             except LLMAPIError as exc:
                 result = self._map_llm_error(exc)
                 status = "error"
@@ -390,7 +373,7 @@ class Orchestrator:
             user_id=user_id,
         )
         self._storage.record_execution(execution)
-        return execution, citations
+        return execution, []
 
     async def search_llm(self, user_id: int, prompt: str) -> TaskExecutionResult:
         return await self.ask_llm(user_id, prompt, mode="search")
@@ -551,9 +534,14 @@ class Orchestrator:
                         debug={"reason": "missing_payload"},
                     )
                 )
-            LOGGER.info("Routing: user_id=%s action=perplexity mode=search", user_id)
-            execution = await self.search_llm(user_id, payload)
-            return self._build_llm_result(execution, [], intent="search", facts_only=False)
+            return ensure_valid(
+                refused(
+                    _UNKNOWN_COMMAND_MESSAGE,
+                    intent="command.search",
+                    mode="local",
+                    debug={"reason": "search_disabled"},
+                )
+            )
 
         if lower.startswith("search ") or lower.startswith("search:"):
             payload = trimmed[7:].strip()
@@ -566,13 +554,18 @@ class Orchestrator:
                         debug={"reason": "missing_payload"},
                     )
                 )
-            LOGGER.info("Routing: user_id=%s action=perplexity mode=search", user_id)
-            execution = await self.search_llm(user_id, payload)
-            return self._build_llm_result(execution, [], intent="search", facts_only=False)
+            return ensure_valid(
+                refused(
+                    _UNKNOWN_COMMAND_MESSAGE,
+                    intent="command.search",
+                    mode="local",
+                    debug={"reason": "search_disabled"},
+                )
+            )
 
         LOGGER.info("Routing: user_id=%s action=perplexity mode=ask", user_id)
         execution = await self.ask_llm(user_id, trimmed, mode="ask")
-        return self._build_llm_result(execution, [], intent="ask", facts_only=False)
+        return self._build_llm_result(execution, intent="ask", facts_only=False)
 
     def is_allowed(self, user_id: int) -> bool:
         return self._ensure_allowed(user_id)[0]
@@ -651,7 +644,7 @@ class Orchestrator:
                 )
             )
         system_prompt = "Кратко, 5-8 пунктов, без выдумок и домыслов."
-        execution, citations = await self._request_llm(
+        execution, _ = await self._request_llm(
             user_id,
             payload,
             mode="summary",
@@ -679,7 +672,6 @@ class Orchestrator:
             return ensure_valid(result)
         return self._build_llm_result(
             execution,
-            citations,
             intent="utility_summary",
             facts_only=self.is_facts_only(user_id),
         )
@@ -687,14 +679,13 @@ class Orchestrator:
     def _build_llm_result(
         self,
         execution: TaskExecutionResult,
-        citations: list[str],
         *,
         intent: str,
         facts_only: bool,
     ) -> OrchestratorResult:
         status = "ok" if execution.status == "success" else "error"
-        sources = _build_sources_from_citations(citations) if citations else _extract_sources_from_text(execution.result)
-        if facts_only and not sources:
+        sources: list[Source] = []
+        if facts_only:
             return ensure_valid(
                 refused(
                     "Не могу подтвердить источниками. Переформулируй или попроси без режима фактов.",
@@ -703,7 +694,7 @@ class Orchestrator:
                     debug={"reason": "facts_only_no_sources"},
                 )
             )
-        final_text = _ensure_sources_in_text(execution.result, sources)
+        final_text = execution.result
         result = (
             ok(
                 final_text,
@@ -722,6 +713,59 @@ class Orchestrator:
             )
         )
         return ensure_valid(result)
+
+    def _make_decision(self, trimmed: str) -> Decision:
+        if not trimmed:
+            return Decision(intent="unknown", status="refused", reason="empty_prompt")
+        if len(trimmed) > self._MAX_INPUT_LENGTH:
+            return Decision(intent="unknown", status="refused", reason="input_too_long")
+        lowered = trimmed.lower()
+        if _is_destructive_request(lowered):
+            return Decision(intent="refused.destructive", status="refused", reason="destructive")
+        if detect_intent(trimmed) == "utility_summary" and not _extract_summary_payload(trimmed):
+            return Decision(intent="utility_summary", status="refused", reason="missing_summary_payload")
+        if trimmed.startswith("/"):
+            command, payload = _split_command(trimmed)
+            if command == "/ask":
+                if not payload:
+                    return Decision(intent="command.ask", status="refused", reason="missing_payload")
+                return Decision(intent="command.ask", status="ok")
+            if command == "/summary":
+                if not payload:
+                    return Decision(intent="utility_summary", status="refused", reason="missing_summary_payload")
+                return Decision(intent="utility_summary", status="ok")
+            if command == "/search":
+                return Decision(intent="command.search", status="refused", reason="search_disabled")
+            return Decision(intent="command.unknown", status="refused", reason="unknown_command")
+        intent = detect_intent(trimmed)
+        return Decision(intent=intent, status="ok")
+
+    def _result_from_decision(self, decision: Decision) -> OrchestratorResult:
+        if decision.reason == "empty_prompt":
+            return refused("Запрос пустой.", intent=decision.intent, mode="local")
+        if decision.reason == "input_too_long":
+            return refused(
+                "Слишком длинный запрос. Попробуйте короче.",
+                intent=decision.intent,
+                mode="local",
+            )
+        if decision.reason == "missing_payload":
+            return refused(
+                "Введите текст запроса. Пример: /ask Привет",
+                intent=decision.intent,
+                mode="local",
+            )
+        if decision.reason == "missing_summary_payload":
+            return refused(
+                "Использование: summary: <текст> или /summary <текст>.",
+                intent=decision.intent,
+                mode="local",
+            )
+        if decision.reason == "destructive":
+            return refused(_DESTRUCTIVE_REFUSAL, intent=decision.intent, mode="local")
+        if decision.reason in {"search_disabled", "unknown_command"}:
+            return refused(_UNKNOWN_COMMAND_MESSAGE, intent=decision.intent, mode="local")
+        return refused("Команда не поддерживается в этом режиме.", intent=decision.intent, mode="local")
 
     def _record_task_result(
         self,
@@ -771,6 +815,15 @@ def _split_command(text: str) -> tuple[str, str]:
     command = parts[0].lower()
     payload = parts[1].strip() if len(parts) > 1 else ""
     return command, payload
+
+
+def _is_destructive_request(lowered: str) -> bool:
+    destructive_markers = (
+        "удали все напоминания",
+        "удалить все напоминания",
+        "delete all reminders",
+    )
+    return any(marker in lowered for marker in destructive_markers)
 
 
 def _extract_sources_from_text(text: str) -> list[Source]:
