@@ -144,7 +144,7 @@ class WizardManager:
                 dt = calendar_store.parse_local_datetime(text)
             except ValueError as exc:
                 return refused(
-                    f"{exc}. Пример: 2026-02-05 18:30",
+                    f"{exc}. Пример: 2026-02-05 18:30 или 05.02.2026 18:30",
                     intent="wizard.calendar.datetime",
                     mode="local",
                     actions=_step_actions(),
@@ -250,7 +250,8 @@ def _touch_state(state: WizardState, *, step: str | None = None, data: dict[str,
 def _render_prompt(state: WizardState) -> OrchestratorResult:
     if state.step == STEP_AWAIT_DATETIME:
         return ok(
-            "Введи дату и время события в формате YYYY-MM-DD HH:MM.\nПример: 2026-02-05 18:30",
+            "Введи дату и время события в формате YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
+            "Пример: 2026-02-05 18:30 или 05.02.2026 18:30",
             intent="wizard.calendar.datetime",
             mode="local",
             actions=_step_actions(),

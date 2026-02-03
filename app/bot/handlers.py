@@ -25,7 +25,7 @@ from app.core.orchestrator import Orchestrator
 from app.core.result import Action, OrchestratorResult, ensure_valid, error, ok, ratelimited, refused
 from app.core.tools_calendar import list_calendar_items, list_reminders
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
-from app.core.text_safety import has_pseudo_source_markers
+from app.core.text_safety import has_pseudo_source_markers, sanitize_llm_text
 from app.infra.allowlist import AllowlistStore
 from app.infra.messaging import safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
@@ -449,10 +449,23 @@ def _apply_pseudo_source_guard(
         return result
     if not has_pseudo_source_markers(result.text):
         return result
-    return refused(
-        "Не могу ответить без проверяемых источников в этом режиме.",
-        intent="safety.no_sources",
+    sanitized, meta = sanitize_llm_text(result.text, sources_requested=False)
+    if meta.get("failed") or not sanitized:
+        return refused(
+            "Не могу ответить без проверяемых источников. Переформулируй запрос или используй поиск (когда появится).",
+            intent="safety.no_sources",
+            mode=result.mode,
+            debug={"reason": "pseudo_sources_filtered"},
+        )
+    return OrchestratorResult(
+        text=sanitized,
+        status=result.status,
         mode=result.mode,
+        intent=result.intent,
+        sources=result.sources,
+        attachments=result.attachments,
+        actions=result.actions,
+        debug=result.debug,
     )
 
 
@@ -508,6 +521,17 @@ async def send_result(
 ) -> None:
     public_result = ensure_valid(result)
     public_result = ensure_valid(_apply_pseudo_source_guard(context, public_result))
+    if not public_result.text.strip():
+        public_result = OrchestratorResult(
+            text="Нет ответа.",
+            status=public_result.status,
+            mode=public_result.mode,
+            intent=public_result.intent,
+            sources=public_result.sources,
+            attachments=public_result.attachments,
+            actions=public_result.actions,
+            debug=public_result.debug,
+        )
     if update.callback_query:
         try:
             await update.callback_query.answer()
@@ -603,7 +627,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await _guard_access(update, context):
         return
     result = refused(
-        "Неизвестная команда. /help",
+        "Неизвестная команда. Используй /help или /menu.",
         intent="command.unknown",
         mode="local",
         actions=_build_menu_actions(context, user_id=update.effective_user.id if update.effective_user else 0),
@@ -653,7 +677,7 @@ def _build_help_text(access_note: str) -> str:
         "/rewrite simple текст\n"
         "/explain текст\n"
         "/calc 2+2\n"
-        "/calendar add 2026-02-05 18:30 -m 10 Врач\n"
+        "/calendar add 2026-02-05 18:30 -m 10 Врач (или /calendar add 05.02.2026 18:30 -m 10 Врач)\n"
         "/reminders 5\n"
         "search Путин биография\n"
         "summary: большой текст для сжатия\n"
@@ -1513,7 +1537,7 @@ async def _dispatch_command_payload(
         return ok("Calc: /calc <выражение>.", intent="menu.calc", mode="local")
     if normalized == "/calendar":
         return ok(
-            "Calendar: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> | list [YYYY-MM-DD YYYY-MM-DD] | today | week | del <id> | debug_due.",
+            "Calendar: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> (или DD.MM.YYYY HH:MM) | list [YYYY-MM-DD YYYY-MM-DD] | today | week | del <id> | debug_due.",
             intent="menu.calendar",
             mode="local",
         )
@@ -1897,7 +1921,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args
     if not args:
         result = refused(
-            "Использование: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> | list [YYYY-MM-DD YYYY-MM-DD] | "
+            "Использование: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> (или DD.MM.YYYY HH:MM) | list [YYYY-MM-DD YYYY-MM-DD] | "
             "today | week | del <id> | debug_due.",
             intent="utility_calendar",
             mode="local",
@@ -1908,7 +1932,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if command == "add":
         if len(args) < 4:
             result = refused(
-                "Использование: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title>.",
+                "Использование: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> (или DD.MM.YYYY HH:MM).",
                 intent="utility_calendar.add",
                 mode="local",
             )
@@ -1923,7 +1947,8 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 minutes_before = int(args[4])
             except ValueError:
                 result = refused(
-                    "Минуты должны быть числом. Пример: /calendar add 2026-02-03 18:30 -m 10 Позвонить маме.",
+                    "Минуты должны быть числом. Пример: /calendar add 2026-02-03 18:30 -m 10 Позвонить маме "
+                    "(или /calendar add 03.02.2026 18:30 -m 10 Позвонить маме).",
                     intent="utility_calendar.add",
                     mode="local",
                 )
@@ -1944,7 +1969,8 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         title = " ".join(args[title_start:]).strip()
         if not title:
             result = refused(
-                "Укажите название события. Пример: /calendar add 2026-02-05 18:30 Врач.",
+                "Укажите название события. Пример: /calendar add 2026-02-05 18:30 Врач "
+                "(или /calendar add 05.02.2026 18:30 Врач).",
                 intent="utility_calendar.add",
                 mode="local",
             )
@@ -1954,7 +1980,8 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             dt = calendar_store.parse_local_datetime(f"{date_part} {time_part}")
         except ValueError:
             result = refused(
-                "Неверный формат даты. Пример: /calendar add 2026-02-05 18:30 Врач.",
+                "Неверный формат даты. Пример: /calendar add 2026-02-05 18:30 Врач "
+                "(или /calendar add 05.02.2026 18:30 Врач).",
                 intent="utility_calendar.add",
                 mode="local",
             )

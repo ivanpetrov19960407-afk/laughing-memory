@@ -22,7 +22,7 @@ class DummyContext:
 
 def test_pseudo_sources_blocked_when_no_sources() -> None:
     context = DummyContext(strict=True)
-    result = ok("Ответ [1]", intent="test", mode="llm")
+    result = ok("[1]", intent="test", mode="llm")
     guarded = handlers._apply_pseudo_source_guard(context, result)
 
     assert guarded.status == "refused"
@@ -36,3 +36,12 @@ def test_pseudo_sources_pass_when_clean() -> None:
 
     assert guarded.status == "ok"
     assert guarded.text == "Обычный ответ без ссылок."
+
+
+def test_pseudo_sources_sanitized_when_possible() -> None:
+    context = DummyContext(strict=True)
+    result = ok("Смотри [текст](https://example.com) для деталей.", intent="test", mode="llm")
+    guarded = handlers._apply_pseudo_source_guard(context, result)
+
+    assert guarded.status == "ok"
+    assert "http" not in guarded.text.lower()
