@@ -115,6 +115,7 @@ def main() -> None:
     application.bot_data["openai_client"] = openai_client
     application.bot_data["start_time"] = time.monotonic()
     application.bot_data["dialog_memory"] = dialog_memory
+    application.bot_data["action_store"] = handlers.ActionPayloadStore()
 
     async def _restore_reminders(app: Application) -> None:
         if not settings.reminders_enabled:

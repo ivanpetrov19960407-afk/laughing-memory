@@ -28,6 +28,22 @@ Telegram-бот-оркестратор с реальными задачами о
 - `upper` — привести текст к UPPERCASE.
 - `json_pretty` — форматировать JSON (ошибка при невалидном JSON).
 
+## Result Contract v1
+Все ответы бота формируются через единый контракт `OrchestratorResult`:
+- `text: str` — текст ответа пользователю.
+- `status: "ok" | "refused" | "error"` — статус результата.
+- `mode: "local" | "llm" | "tool"` — источник ответа.
+- `intent: str` — намерение (маршрут/команда).
+- `sources: list[{title, url, snippet}]` — источники (если есть).
+- `attachments: list[{type, name, path|bytes|url}]` — вложения (файлы/изображения).
+- `actions: list[{id, label, payload}]` — кнопки (inline).
+- `debug: dict` — служебные детали (только в логах).
+
+Правила:
+- Любой tool/handler возвращает `OrchestratorResult`.
+- UI Telegram показывает `text` + `actions` как inline-кнопки; `debug` в пользовательский ответ не попадает.
+- `actions.payload` хранится на стороне бота, в `callback_data` уходит только краткий token (до 64 байт).
+
 ## Установка
 
 ### Linux/macOS

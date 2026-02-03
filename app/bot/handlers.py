@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import logging
+import secrets
 import sys
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from typing import Any
 
 import telegram
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import ContextTypes
 from PIL import Image
 import pytesseract
@@ -32,6 +34,61 @@ from app.infra.request_context import get_request_context, log_request, set_stat
 from app.infra.storage import TaskStorage
 
 LOGGER = logging.getLogger(__name__)
+_CALLBACK_PREFIX = "act:"
+_CALLBACK_TTL_SECONDS = 600
+
+
+@dataclass
+class _StoredAction:
+    user_id: int
+    action_id: str
+    payload: dict[str, Any]
+    expires_at: float
+
+
+class ActionPayloadStore:
+    def __init__(self, *, ttl_seconds: int = _CALLBACK_TTL_SECONDS, max_items: int = 1000) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._max_items = max_items
+        self._items: dict[str, _StoredAction] = {}
+
+    def store(self, *, user_id: int, action_id: str, payload: dict[str, Any]) -> str:
+        self._cleanup()
+        token = self._generate_token()
+        self._items[token] = _StoredAction(
+            user_id=user_id,
+            action_id=action_id,
+            payload=payload,
+            expires_at=time.monotonic() + self._ttl_seconds,
+        )
+        return token
+
+    def pop(self, *, user_id: int, token: str) -> _StoredAction | None:
+        self._cleanup()
+        item = self._items.get(token)
+        if item is None or item.user_id != user_id:
+            return None
+        if item.expires_at < time.monotonic():
+            self._items.pop(token, None)
+            return None
+        self._items.pop(token, None)
+        return item
+
+    def _generate_token(self) -> str:
+        for _ in range(5):
+            token = secrets.token_urlsafe(8)
+            if token not in self._items:
+                return token
+        return secrets.token_urlsafe(12)
+
+    def _cleanup(self) -> None:
+        now = time.monotonic()
+        expired = [token for token, item in self._items.items() if item.expires_at < now]
+        for token in expired:
+            self._items.pop(token, None)
+        if len(self._items) > self._max_items:
+            for token in list(self._items.keys())[: len(self._items) - self._max_items]:
+                self._items.pop(token, None)
 
 
 def _get_orchestrator(context: ContextTypes.DEFAULT_TYPE) -> Orchestrator:
@@ -68,6 +125,15 @@ def _get_openai_client(context: ContextTypes.DEFAULT_TYPE) -> OpenAIClient | Non
 
 def _get_reminder_scheduler(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data.get("reminder_scheduler")
+
+
+def _get_action_store(context: ContextTypes.DEFAULT_TYPE) -> ActionPayloadStore:
+    store = context.application.bot_data.get("action_store")
+    if isinstance(store, ActionPayloadStore):
+        return store
+    store = ActionPayloadStore()
+    context.application.bot_data["action_store"] = store
+    return store
 
 
 async def _get_active_modes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -188,7 +254,14 @@ async def _guard_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
             message = f"Лимит запросов на сегодня. Попробуй через {wait_time}."
         else:
             message = f"Слишком часто. Попробуй через {wait_time}."
-        await safe_send_text(update, context, message)
+        result_message = _build_simple_result(
+            message,
+            intent="rate_limit",
+            status="refused",
+            mode="local",
+            debug={"scope": result.scope, "retry_after": result.retry_after},
+        )
+        await _send_result(update, context, result_message)
         return False
     return True
 
@@ -208,7 +281,13 @@ async def _send_access_denied(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
 ) -> None:
-    await safe_send_text(update, context, f"Доступ запрещён.\nТвой user_id: {user_id}")
+    result = _build_simple_result(
+        f"Доступ запрещён.\nТвой user_id: {user_id}",
+        intent="access_denied",
+        status="refused",
+        mode="local",
+    )
+    await _send_result(update, context, result)
 
 
 async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -216,7 +295,13 @@ async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if _is_admin(context, user_id):
         return True
     set_status(context, "error")
-    await safe_send_text(update, context, "Недостаточно прав.")
+    result = _build_simple_result(
+        "Недостаточно прав.",
+        intent="access_denied.admin",
+        status="refused",
+        mode="local",
+    )
+    await _send_result(update, context, result)
     return False
 
 
@@ -248,12 +333,28 @@ async def _reply_with_history(
     history = _append_history(context, user_id, "user", prompt)
     response = _format_history(history)
     _append_history(context, user_id, "assistant", response)
-    await safe_send_text(update, context, response)
+    result = _build_simple_result(response, intent="history", status="ok", mode="local")
+    await _send_result(update, context, result)
 
 
 def _build_user_context(update: Update) -> dict[str, int]:
     user_id = update.effective_user.id if update.effective_user else 0
     return {"user_id": user_id}
+
+
+def _build_simple_result(
+    text: str,
+    *,
+    intent: str,
+    status: str = "ok",
+    mode: str = "local",
+    debug: dict[str, Any] | None = None,
+) -> OrchestratorResult:
+    if status == "ok":
+        return ok(text, intent=intent, mode=mode, debug=debug)
+    if status == "refused":
+        return refused(text, intent=intent, mode=mode, debug=debug)
+    return error(text, intent=intent, mode=mode, debug=debug)
 
 
 def _build_user_context_with_dialog(
@@ -340,25 +441,92 @@ def _log_orchestrator_result(
         LOGGER.info("Orchestrator debug: user_id=%s intent=%s debug=%s", user_id, result.intent, result.debug)
 
 
-def _encode_action_data(action: Action) -> str:
-    payload = {"id": action.id, "payload": action.payload}
-    data = json.dumps(payload, ensure_ascii=False)
-    if len(data) > 60:
-        return f"action:{action.id}"
+def _encode_action_data(
+    action: Action,
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+) -> str:
+    store = _get_action_store(context)
+    token = store.store(user_id=user_id, action_id=action.id, payload=action.payload)
+    data = f"{_CALLBACK_PREFIX}{token}"
+    if len(data.encode("utf-8")) > 64:
+        LOGGER.warning("Callback data too long for action_id=%s token=%s", action.id, token)
+        data = f"{_CALLBACK_PREFIX}{token[:8]}"
     return data
 
 
-def _build_action_keyboard(actions: list[Action]) -> InlineKeyboardMarkup | None:
+def _build_action_keyboard(
+    actions: list[Action],
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+) -> InlineKeyboardMarkup | None:
     if not actions:
         return None
-    buttons = [[InlineKeyboardButton(action.label, callback_data=_encode_action_data(action))] for action in actions]
+    buttons = [
+        [InlineKeyboardButton(action.label, callback_data=_encode_action_data(action, context=context, user_id=user_id))]
+        for action in actions
+    ]
     return InlineKeyboardMarkup(buttons)
 
 
-async def _send_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result: OrchestratorResult) -> None:
+async def _send_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None) -> None:
+    await safe_send_text(update, context, text, reply_markup=reply_markup)
+
+
+async def _send_attachments(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    attachments: list[Any],
+) -> None:
+    if not attachments:
+        return
+    message = update.effective_message if update else None
+    if message is None:
+        LOGGER.warning("Cannot send attachments: no message context.")
+        return
+    for attachment in attachments:
+        attachment_type = getattr(attachment, "type", None) or attachment.get("type")
+        name = getattr(attachment, "name", None) or attachment.get("name")
+        payload_path = getattr(attachment, "path", None) or attachment.get("path")
+        payload_bytes = getattr(attachment, "bytes", None) or attachment.get("bytes")
+        payload_url = getattr(attachment, "url", None) or attachment.get("url")
+        try:
+            if payload_url:
+                if attachment_type == "image":
+                    await message.reply_photo(payload_url)
+                else:
+                    await message.reply_document(payload_url)
+                continue
+            if payload_bytes:
+                file_obj = InputFile(io.BytesIO(payload_bytes), filename=name or "attachment")
+            elif payload_path:
+                file_obj = InputFile(payload_path, filename=name or "attachment")
+            else:
+                LOGGER.warning("Attachment missing payload: %s", attachment)
+                continue
+            if attachment_type == "image":
+                await message.reply_photo(file_obj)
+            else:
+                await message.reply_document(file_obj)
+        except Exception:
+            LOGGER.exception("Failed to send attachment: %s", attachment)
+
+
+async def _send_result(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    result: OrchestratorResult,
+    *,
+    reply_markup=None,
+) -> None:
     public_result = ensure_valid(result)
-    reply_markup = _build_action_keyboard(public_result.actions)
-    await safe_send_text(update, context, public_result.text, reply_markup=reply_markup)
+    user_id = update.effective_user.id if update.effective_user else 0
+    inline_keyboard = _build_action_keyboard(public_result.actions, context=context, user_id=user_id)
+    effective_reply_markup = reply_markup if reply_markup is not None else inline_keyboard
+    await _send_text(update, context, public_result.text, reply_markup=effective_reply_markup)
+    await _send_attachments(update, context, public_result.attachments)
 
 
 @_with_error_handling
@@ -386,7 +554,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Локальные команды: echo, upper, json_pretty, calc, calendar.\n"
         "Служебные команды: /selfcheck, /health."
     )
-    await menu.show_menu(update, context, message + access_note)
+    menu_text, menu_markup = menu.build_menu_payload(message + access_note)
+    result = _build_simple_result(menu_text, intent="command.start", status="ok", mode="local")
+    await _send_result(update, context, result, reply_markup=menu_markup)
 
 
 @_with_error_handling
@@ -397,7 +567,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     access_note = ""
     if orchestrator.is_access_restricted():
         access_note = "\n\nДоступ ограничен whitelist пользователей."
-    await safe_send_text(update, context, _build_help_text(access_note))
+    result = _build_simple_result(
+        _build_help_text(access_note),
+        intent="command.help",
+        status="ok",
+        mode="local",
+    )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -505,21 +681,19 @@ async def _build_health_message(
 
 @_with_error_handling
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await safe_send_text(
-        update,
-        context,
-        f"user_id={update.effective_user.id} chat_id={update.effective_chat.id}",
-    )
-    return
-
-
     orchestrator = _get_orchestrator(context)
     if not await _guard_access(update, context):
         return
     metadata = orchestrator.config.get("system_metadata", {})
     version = metadata.get("version", "unknown")
     now = datetime.now(timezone.utc).isoformat()
-    await safe_send_text(update, context, f"pong (v{version}) {now}")
+    result = _build_simple_result(
+        f"pong (v{version}) {now}",
+        intent="command.ping",
+        status="ok",
+        mode="local",
+    )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -529,14 +703,22 @@ async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     available = orchestrator.list_tasks()
     if not available:
-        await safe_send_text(update, context, "Нет доступных задач.")
+        result = _build_simple_result(
+            "Нет доступных задач.",
+            intent="command.tasks",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     lines = [f"• {task.name}: {task.description}" for task in available]
-    await safe_send_text(
-        update,
-        context,
+    result = _build_simple_result(
         "Доступные задачи:\n" + "\n".join(lines),
+        intent="command.tasks",
+        status="ok",
+        mode="local",
     )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -546,20 +728,34 @@ async def task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     args = context.args
     if not args:
-        await safe_send_text(update, context, "Укажите имя задачи и payload.")
+        result = _build_simple_result(
+            "Укажите имя задачи и payload.",
+            intent="command.task",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     if len(args) == 1:
-        await safe_send_text(
-            update,
-            context,
+        result = _build_simple_result(
             "Нужно передать payload. Пример: /task upper hello",
+            intent="command.task",
+            status="refused",
+            mode="local",
         )
+        await _send_result(update, context, result)
         return
 
     task_name = args[0]
     payload = " ".join(args[1:]).strip()
     if not payload:
-        await safe_send_text(update, context, "Payload не может быть пустым.")
+        result = _build_simple_result(
+            "Payload не может быть пустым.",
+            intent="command.task",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
 
     user_id = update.effective_user.id if update.effective_user else 0
@@ -597,19 +793,27 @@ async def last(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
     record = storage.get_last_execution(user_id)
     if not record:
-        await safe_send_text(update, context, "История пуста.")
+        result = _build_simple_result(
+            "История пуста.",
+            intent="command.last",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
 
-    await safe_send_text(
-        update,
-        context,
+    result = _build_simple_result(
         "Последняя задача:\n"
         f"Дата: {record['timestamp']}\n"
         f"Задача: {record['task_name']}\n"
         f"Статус: {record['status']}\n"
         f"Payload: {record['payload']}\n"
         f"Ответ: {record['result']}",
+        intent="command.last",
+        status="ok",
+        mode="local",
     )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -619,11 +823,13 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     prompt = " ".join(context.args).strip()
     if not prompt:
-        await safe_send_text(
-            update,
-            context,
+        result = _build_simple_result(
             "Введите текст запроса. Пример: /ask Привет",
+            intent="command.ask",
+            status="refused",
+            mode="local",
         )
+        await _send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
@@ -665,11 +871,13 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     prompt = " ".join(context.args).strip()
     if not prompt:
-        await safe_send_text(
-            update,
-            context,
+        result = _build_simple_result(
             "Введите текст запроса. Пример: /search Новости",
+            intent="command.search",
+            status="refused",
+            mode="local",
         )
+        await _send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
@@ -729,7 +937,13 @@ async def facts_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_id = update.effective_user.id if update.effective_user else 0
     orchestrator.set_facts_only(user_id, True)
-    await safe_send_text(update, context, "Режим фактов включён. Буду отвечать только с источниками.")
+    result = _build_simple_result(
+        "Режим фактов включён. Буду отвечать только с источниками.",
+        intent="command.facts_on",
+        status="ok",
+        mode="local",
+    )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -739,7 +953,13 @@ async def facts_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_id = update.effective_user.id if update.effective_user else 0
     orchestrator.set_facts_only(user_id, False)
-    await safe_send_text(update, context, "Режим фактов выключён. Можно отвечать без источников.")
+    result = _build_simple_result(
+        "Режим фактов выключён. Можно отвечать без источников.",
+        intent="command.facts_off",
+        status="ok",
+        mode="local",
+    )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -748,11 +968,23 @@ async def context_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     dialog_memory = _get_dialog_memory(context)
     if dialog_memory is None:
-        await safe_send_text(update, context, "Контекст диалога не настроен.")
+        result = _build_simple_result(
+            "Контекст диалога не настроен.",
+            intent="command.context_on",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
     await dialog_memory.set_enabled(user_id, True)
-    await safe_send_text(update, context, "Контекст диалога включён.")
+    result = _build_simple_result(
+        "Контекст диалога включён.",
+        intent="command.context_on",
+        status="ok",
+        mode="local",
+    )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -761,11 +993,23 @@ async def context_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     dialog_memory = _get_dialog_memory(context)
     if dialog_memory is None:
-        await safe_send_text(update, context, "Контекст диалога не настроен.")
+        result = _build_simple_result(
+            "Контекст диалога не настроен.",
+            intent="command.context_off",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
     await dialog_memory.set_enabled(user_id, False)
-    await safe_send_text(update, context, "Контекст диалога выключён.")
+    result = _build_simple_result(
+        "Контекст диалога выключён.",
+        intent="command.context_off",
+        status="ok",
+        mode="local",
+    )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -774,12 +1018,24 @@ async def context_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     dialog_memory = _get_dialog_memory(context)
     if dialog_memory is None:
-        await safe_send_text(update, context, "Контекст диалога не настроен.")
+        result = _build_simple_result(
+            "Контекст диалога не настроен.",
+            intent="command.context_clear",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
     await dialog_memory.clear(user_id, chat_id)
-    await safe_send_text(update, context, "История контекста очищена.")
+    result = _build_simple_result(
+        "История контекста очищена.",
+        intent="command.context_clear",
+        status="ok",
+        mode="local",
+    )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -788,17 +1044,25 @@ async def context_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     dialog_memory = _get_dialog_memory(context)
     if dialog_memory is None:
-        await safe_send_text(update, context, "Контекст диалога не настроен.")
+        result = _build_simple_result(
+            "Контекст диалога не настроен.",
+            intent="command.context_status",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
     enabled, count = await dialog_memory.get_status(user_id, chat_id)
     status = "включён" if enabled else "выключён"
-    await safe_send_text(
-        update,
-        context,
+    result = _build_simple_result(
         f"Контекст {status}. user_id={user_id} chat_id={chat_id}. Сообщений в истории: {count}.",
+        intent="command.context_status",
+        status="ok",
+        mode="local",
     )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -806,21 +1070,45 @@ async def allow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_admin(update, context):
         return
     if not context.args:
-        await safe_send_text(update, context, "Укажите user_id. Пример: /allow 123456")
+        result = _build_simple_result(
+            "Укажите user_id. Пример: /allow 123456",
+            intent="command.allow",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     try:
         target_id = int(context.args[0])
     except ValueError:
-        await safe_send_text(update, context, "Некорректный user_id. Пример: /allow 123456")
+        result = _build_simple_result(
+            "Некорректный user_id. Пример: /allow 123456",
+            intent="command.allow",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     allowlist_store = _get_allowlist_store(context)
     added = await allowlist_store.add(target_id)
     admin_id = update.effective_user.id if update.effective_user else 0
     LOGGER.info("Allowlist update: admin_id=%s target_id=%s action=allow", admin_id, target_id)
     if added:
-        await safe_send_text(update, context, f"Пользователь {target_id} добавлен в whitelist.")
+        result = _build_simple_result(
+            f"Пользователь {target_id} добавлен в whitelist.",
+            intent="command.allow",
+            status="ok",
+            mode="local",
+        )
+        await _send_result(update, context, result)
     else:
-        await safe_send_text(update, context, f"Пользователь {target_id} уже в whitelist.")
+        result = _build_simple_result(
+            f"Пользователь {target_id} уже в whitelist.",
+            intent="command.allow",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -828,21 +1116,45 @@ async def deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_admin(update, context):
         return
     if not context.args:
-        await safe_send_text(update, context, "Укажите user_id. Пример: /deny 123456")
+        result = _build_simple_result(
+            "Укажите user_id. Пример: /deny 123456",
+            intent="command.deny",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     try:
         target_id = int(context.args[0])
     except ValueError:
-        await safe_send_text(update, context, "Некорректный user_id. Пример: /deny 123456")
+        result = _build_simple_result(
+            "Некорректный user_id. Пример: /deny 123456",
+            intent="command.deny",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     allowlist_store = _get_allowlist_store(context)
     removed = await allowlist_store.remove(target_id)
     admin_id = update.effective_user.id if update.effective_user else 0
     LOGGER.info("Allowlist update: admin_id=%s target_id=%s action=deny", admin_id, target_id)
     if removed:
-        await safe_send_text(update, context, f"Пользователь {target_id} удалён из whitelist.")
+        result = _build_simple_result(
+            f"Пользователь {target_id} удалён из whitelist.",
+            intent="command.deny",
+            status="ok",
+            mode="local",
+        )
+        await _send_result(update, context, result)
     else:
-        await safe_send_text(update, context, f"Пользователь {target_id} не найден в whitelist.")
+        result = _build_simple_result(
+            f"Пользователь {target_id} не найден в whitelist.",
+            intent="command.deny",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -851,18 +1163,32 @@ async def allowlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     snapshot = _get_allowlist_store(context).snapshot()
     if not snapshot.allowed_user_ids:
-        await safe_send_text(update, context, "Whitelist пуст.")
+        result = _build_simple_result(
+            "Whitelist пуст.",
+            intent="command.allowlist",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     lines = [str(user_id) for user_id in snapshot.allowed_user_ids]
     message = "Whitelist пользователей:\n" + "\n".join(lines) + f"\n\nВсего: {len(lines)}"
-    await safe_send_text(update, context, message)
+    result = _build_simple_result(
+        message,
+        intent="command.allowlist",
+        status="ok",
+        mode="local",
+    )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
-    await menu.show_menu(update, context)
+    menu_text, menu_markup = menu.build_menu_payload()
+    result = _build_simple_result(menu_text, intent="command.menu", status="ok", mode="local")
+    await _send_result(update, context, result, reply_markup=menu_markup)
 
 
 @_with_error_handling
@@ -887,42 +1213,92 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     orchestrator = _get_orchestrator(context)
     if text == menu.STATUS_BUTTON:
         user_id = update.effective_user.id if update.effective_user else 0
-        await safe_send_text(update, context, await _build_health_message(context, user_id=user_id))
+        result = _build_simple_result(
+            await _build_health_message(context, user_id=user_id),
+            intent="menu.status",
+            status="ok",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     if text == menu.SUMMARY_BUTTON:
-        await safe_send_text(update, context, "Суммаризация: summary: <текст> или /summary <текст>.")
+        result = _build_simple_result(
+            "Суммаризация: summary: <текст> или /summary <текст>.",
+            intent="menu.summary",
+            status="ok",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     if text == menu.FACTS_TOGGLE_BUTTON:
         user_id = update.effective_user.id if update.effective_user else 0
         new_value = not orchestrator.is_facts_only(user_id)
         orchestrator.set_facts_only(user_id, new_value)
         status = "включён" if new_value else "выключён"
-        await safe_send_text(update, context, f"Режим фактов {status}.")
+        result = _build_simple_result(
+            f"Режим фактов {status}.",
+            intent="menu.facts_toggle",
+            status="ok",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     if text == menu.HELP_BUTTON:
         access_note = ""
         if orchestrator.is_access_restricted():
             access_note = "\n\nДоступ ограничен whitelist пользователей."
-        await safe_send_text(update, context, _build_help_text(access_note))
+        result = _build_simple_result(
+            _build_help_text(access_note),
+            intent="menu.help",
+            status="ok",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     if text == menu.CHECK_BUTTON:
-        await safe_send_text(update, context, "Проверка: /check <текст> или ответом на сообщение.")
+        result = _build_simple_result(
+            "Проверка: /check <текст> или ответом на сообщение.",
+            intent="menu.check",
+            status="ok",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     if text == menu.REWRITE_BUTTON:
-        await safe_send_text(update, context, "Rewrite: /rewrite <simple|hard|short> <текст>.")
+        result = _build_simple_result(
+            "Rewrite: /rewrite <simple|hard|short> <текст>.",
+            intent="menu.rewrite",
+            status="ok",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     if text == menu.EXPLAIN_BUTTON:
-        await safe_send_text(update, context, "Explain: /explain <текст> или ответом на сообщение.")
+        result = _build_simple_result(
+            "Explain: /explain <текст> или ответом на сообщение.",
+            intent="menu.explain",
+            status="ok",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     if text == menu.CALC_BUTTON:
-        await safe_send_text(update, context, "Calc: /calc <выражение>.")
+        result = _build_simple_result(
+            "Calc: /calc <выражение>.",
+            intent="menu.calc",
+            status="ok",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     if text == menu.CALENDAR_BUTTON:
-        await safe_send_text(
-            update,
-            context,
+        result = _build_simple_result(
             "Calendar: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> | list [YYYY-MM-DD YYYY-MM-DD] | today | week | del <id> | debug_due.",
+            intent="menu.calendar",
+            status="ok",
+            mode="local",
         )
+        await _send_result(update, context, result)
         return
 
 
@@ -934,14 +1310,62 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     data = query.data or ""
     user_id = update.effective_user.id if update.effective_user else 0
-    result = refused(
-        "Действие недоступно.",
-        intent="ui.action",
-        mode="local",
-        debug={"callback_data": data},
-    )
+    if not data.startswith(_CALLBACK_PREFIX):
+        result = refused(
+            "Действие недоступно.",
+            intent="ui.action",
+            mode="local",
+            debug={"reason": "invalid_callback"},
+        )
+        _log_orchestrator_result(user_id, data, result)
+        await _send_result(update, context, result)
+        return
+    token = data[len(_CALLBACK_PREFIX) :]
+    store = _get_action_store(context)
+    stored = store.pop(user_id=user_id, token=token)
+    if stored is None:
+        result = refused(
+            "Действие недоступно или устарело.",
+            intent="ui.action",
+            mode="local",
+            debug={"reason": "action_missing"},
+        )
+        _log_orchestrator_result(user_id, data, result)
+        await _send_result(update, context, result)
+        return
+    result = await _dispatch_action(update, context, stored)
     _log_orchestrator_result(user_id, data, result)
     await _send_result(update, context, result)
+
+
+async def _dispatch_action(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    stored: _StoredAction,
+) -> OrchestratorResult:
+    orchestrator = _get_orchestrator(context)
+    user_id = update.effective_user.id if update.effective_user else 0
+    payload = stored.payload
+    if stored.action_id == "task.execute":
+        task_name = payload.get("name")
+        task_payload = payload.get("payload")
+        if not isinstance(task_name, str) or not isinstance(task_payload, str):
+            return error(
+                "Некорректные данные действия.",
+                intent="ui.action",
+                mode="local",
+                debug={"reason": "invalid_task_payload"},
+            )
+        return orchestrator.execute_task(user_id, task_name, task_payload)
+    text = payload.get("text")
+    if isinstance(text, str) and text.strip():
+        return await orchestrator.handle(text, _build_user_context(update))
+    return refused(
+        "Действие не поддерживается.",
+        intent="ui.action",
+        mode="local",
+        debug={"reason": "unknown_action", "action_id": stored.action_id},
+    )
 
 
 def _extract_text_from_image(image_bytes: bytes) -> str:
@@ -955,24 +1379,43 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     prompt = " ".join(context.args).strip()
     if not prompt:
-        await safe_send_text(
-            update,
-            context,
+        result = _build_simple_result(
             "Укажите описание изображения. Пример: /image Слон в космосе",
+            intent="command.image",
+            status="refused",
+            mode="local",
         )
+        await _send_result(update, context, result)
         return
     openai_client = _get_openai_client(context)
     if openai_client is None or not openai_client.api_key:
-        await safe_send_text(update, context, "Генерация изображений не настроена.")
+        result = _build_simple_result(
+            "Генерация изображений не настроена.",
+            intent="command.image",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     response = await openai_client.create_image(prompt=prompt)
     data = response.get("data") or []
     image_url = data[0].get("url") if data else None
     if not image_url:
-        await safe_send_text(update, context, "Не удалось получить изображение.")
+        result = _build_simple_result(
+            "Не удалось получить изображение.",
+            intent="command.image",
+            status="error",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
-    if update.message:
-        await update.message.reply_photo(image_url)
+    result = ok(
+        "Готово! Сгенерированное изображение ниже.",
+        intent="command.image",
+        mode="tool",
+        attachments=[{"type": "image", "name": "generated", "url": image_url}],
+    )
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -983,11 +1426,13 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not prompt and update.message and update.message.reply_to_message:
         prompt = (update.message.reply_to_message.text or "").strip()
     if not prompt:
-        await safe_send_text(
-            update,
-            context,
+        result = _build_simple_result(
             "Использование: /check <текст> или ответом на сообщение.",
+            intent="command.check",
+            status="refused",
+            mode="local",
         )
+        await _send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
     result = await llm_check(prompt, _build_tool_context(update, context))
@@ -1000,27 +1445,33 @@ async def rewrite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
     if not context.args or len(context.args) < 2:
-        await safe_send_text(
-            update,
-            context,
+        result = _build_simple_result(
             "Использование: /rewrite <simple|hard|short> <текст>.",
+            intent="command.rewrite",
+            status="refused",
+            mode="local",
         )
+        await _send_result(update, context, result)
         return
     mode = context.args[0].lower()
     if mode not in {"simple", "hard", "short"}:
-        await safe_send_text(
-            update,
-            context,
+        result = _build_simple_result(
             "Некорректный режим. Использование: /rewrite <simple|hard|short> <текст>.",
+            intent="command.rewrite",
+            status="refused",
+            mode="local",
         )
+        await _send_result(update, context, result)
         return
     prompt = " ".join(context.args[1:]).strip()
     if not prompt:
-        await safe_send_text(
-            update,
-            context,
+        result = _build_simple_result(
             "Введите текст для переписывания. Пример: /rewrite simple текст.",
+            intent="command.rewrite",
+            status="refused",
+            mode="local",
         )
+        await _send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
     result = await llm_rewrite(mode, prompt, _build_tool_context(update, context))
@@ -1036,11 +1487,13 @@ async def explain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not prompt and update.message and update.message.reply_to_message:
         prompt = (update.message.reply_to_message.text or "").strip()
     if not prompt:
-        await safe_send_text(
-            update,
-            context,
+        result = _build_simple_result(
             "Использование: /explain <текст> или ответом на сообщение.",
+            intent="command.explain",
+            status="refused",
+            mode="local",
         )
+        await _send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
     result = await llm_explain(prompt, _build_tool_context(update, context))
@@ -1054,7 +1507,13 @@ async def calc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     expression = " ".join(context.args).strip()
     if not expression:
-        await safe_send_text(update, context, "Использование: /calc <выражение>.")
+        result = _build_simple_result(
+            "Использование: /calc <выражение>.",
+            intent="utility_calc",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
     try:
@@ -1429,12 +1888,25 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = await loop.run_in_executor(None, _extract_text_from_image, bytes(image_bytes))
     except Exception:
         LOGGER.exception("OCR failed")
-        await safe_send_text(update, context, "Не удалось распознать текст.")
+        result = _build_simple_result(
+            "Не удалось распознать текст.",
+            intent="utility_ocr",
+            status="error",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
     if not text:
-        await safe_send_text(update, context, "Текст не найден.")
+        result = _build_simple_result(
+            "Текст не найден.",
+            intent="utility_ocr",
+            status="refused",
+            mode="local",
+        )
+        await _send_result(update, context, result)
         return
-    await safe_send_text(update, context, text)
+    result = _build_simple_result(text, intent="utility_ocr", status="ok", mode="local")
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -1516,7 +1988,8 @@ async def selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"HISTORY_SIZE: {settings.history_size}\n"
         f"TELEGRAM_MESSAGE_LIMIT: {settings.telegram_message_limit}"
     )
-    await safe_send_text(update, context, message)
+    result = _build_simple_result(message, intent="command.selfcheck", status="ok", mode="local")
+    await _send_result(update, context, result)
 
 
 @_with_error_handling
@@ -1524,11 +1997,23 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    await safe_send_text(update, context, await _build_health_message(context, user_id=user_id))
+    result = _build_simple_result(
+        await _build_health_message(context, user_id=user_id),
+        intent="command.health",
+        status="ok",
+        mode="local",
+    )
+    await _send_result(update, context, result)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     set_status(context, "error")
     LOGGER.exception("Unhandled exception", exc_info=context.error)
     if isinstance(update, Update) and update.message:
-        await safe_send_text(update, context, "Ошибка на сервере. Попробуй ещё раз.")
+        result = _build_simple_result(
+            "Ошибка на сервере. Попробуй ещё раз.",
+            intent="error",
+            status="error",
+            mode="local",
+        )
+        await _send_result(update, context, result)
