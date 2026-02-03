@@ -142,8 +142,8 @@ def main() -> None:
     application.add_handler(CommandHandler("health", handlers.health))
     application.add_handler(CommandHandler("status", handlers.health))
     application.add_handler(MessageHandler(filters.PHOTO, handlers.photo))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.menu_button))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.menu_button), group=0)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat), group=1)
     application.add_error_handler(handlers.error_handler)
 
     logging.getLogger(__name__).info("Bot started")

@@ -676,7 +676,11 @@ async def context_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = update.effective_chat.id if update.effective_chat else 0
     enabled, count = await dialog_memory.get_status(user_id, chat_id)
     status = "включён" if enabled else "выключён"
-    await safe_send_text(update, context, f"Контекст {status}. Сообщений в истории: {count}.")
+    await safe_send_text(
+        update,
+        context,
+        f"Контекст {status}. user_id={user_id} chat_id={chat_id}. Сообщений в истории: {count}.",
+    )
 
 
 @_with_error_handling
@@ -1182,9 +1186,14 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
+    LOGGER.info("chat_ids user_id=%s chat_id=%s has_message=%s", user_id, chat_id, bool(update.message))
     dialog_memory = _get_dialog_memory(context)
-    if dialog_memory and await dialog_memory.is_enabled(user_id):
+    if user_id == 0 or chat_id == 0:
+        LOGGER.warning("memory_skip_missing_ids user_id=%s chat_id=%s", user_id, chat_id)
+        dialog_memory = None
+    elif dialog_memory and await dialog_memory.is_enabled(user_id):
         await dialog_memory.add_user(user_id, chat_id, prompt)
+        LOGGER.info("memory_wrote user_id=%s chat_id=%s", user_id, chat_id)
     dialog_context, dialog_count = await _prepare_dialog_context(
         dialog_memory,
         user_id=user_id,
