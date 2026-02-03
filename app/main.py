@@ -155,6 +155,7 @@ def main() -> None:
     application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
     application.add_handler(CommandHandler("health", handlers.health))
     application.add_handler(CommandHandler("status", handlers.health))
+    application.add_handler(MessageHandler(filters.COMMAND, handlers.unknown_command))
     application.add_handler(CallbackQueryHandler(handlers.action_callback))
     application.add_handler(MessageHandler(filters.PHOTO, handlers.photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.menu_button), group=0)

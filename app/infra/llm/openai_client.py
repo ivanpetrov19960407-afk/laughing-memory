@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from app.infra.llm.base import LLMAPIError
+from app.infra.llm.base import LLMAPIError, ensure_plain_text
 
 
 class OpenAIAPIError(LLMAPIError):
@@ -86,6 +86,22 @@ class OpenAIClient:
             .get("content", "")
         )
         return {"content": content}
+
+    async def generate_text(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        max_tokens: int | None = None,
+        web_search_options: dict[str, Any] | None = None,
+    ) -> str:
+        response = await self.create_chat_completion(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            web_search_options=web_search_options,
+        )
+        return ensure_plain_text(response.get("content", ""))
 
     async def create_image(
         self,

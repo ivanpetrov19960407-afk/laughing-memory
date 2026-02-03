@@ -20,6 +20,9 @@ class FakeLLMClient:
     async def create_chat_completion(self, *, model: str, messages: list[dict], max_tokens=None, web_search_options=None):
         return {"content": "hello from llm"}
 
+    async def generate_text(self, *, model: str, messages: list[dict], max_tokens=None, web_search_options=None):
+        return "hello from llm"
+
 
 def test_result_defaults_empty_lists() -> None:
     result = ok("hi", intent="test", mode="local")
