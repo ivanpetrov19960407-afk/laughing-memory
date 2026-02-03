@@ -1,3 +1,5 @@
+import pytest
+
 from app.core.text_safety import sanitize_llm_text
 
 
@@ -31,3 +33,21 @@ def test_no_sources_markers() -> None:
     assert "arxiv" not in sanitized.lower()
     assert "pubmed" not in sanitized.lower()
     assert meta["failed"] is False
+
+
+@pytest.mark.parametrize(
+    ("text", "unexpected", "failed"),
+    [
+        ("[1]", "[1]", True),
+        ("Согласно Росстату, данные обновлены.", "Согласно", False),
+        ("По данным Википедии это важно.", "По данным", False),
+        ("Source: internal", "Source:", True),
+        ("https://example.com", "http", True),
+        ("Смотри [текст](https://example.com)", "http", False),
+    ],
+)
+def test_sanitizer_strips_pseudo_sources(text: str, unexpected: str, failed: bool) -> None:
+    sanitized, meta = sanitize_llm_text(text)
+
+    assert unexpected.lower() not in sanitized.lower()
+    assert meta["failed"] is failed

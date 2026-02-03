@@ -11,9 +11,9 @@ SOURCES_DISCLAIMER_TEXT = "Это обобщённое объяснение бе
 
 _BRACKET_CITATION_RE = re.compile(r"\[\s*\d{1,3}\s*\]")
 _PAREN_CITATION_RE = re.compile(r"\(\s*\d{1,3}\s*\)")
-_SOURCES_HEADER_RE = re.compile(r"(?im)^(источники|sources|references)\s*:")
+_SOURCES_HEADER_RE = re.compile(r"(?im)^(источники|sources|references|citations)\s*:")
 _FORBIDDEN_PHRASES_RE = re.compile(
-    r"(?i)\b(источники?|согласно|по данным|references|sources|doi|pubmed|arxiv)\b|source:"
+    r"(?i)\b(источники?|согласно|по данным|references|sources|citations|doi|pubmed|arxiv)\b|source:"
 )
 _URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 _WWW_RE = re.compile(r"\bwww\.[^\s<>]+", re.IGNORECASE)
@@ -23,9 +23,12 @@ _DOMAIN_RE = re.compile(
 )
 _DOI_RE = re.compile(r"\bdoi:\s*\S+", re.IGNORECASE)
 _PSEUDO_SOURCES_RE = re.compile(
-    r"(?i)\b(источник\w*|sources?|references?|citation|согласно|по данным)\b"
+    r"(?i)\b(источник\w*|sources?|references?|citation|citations?|согласно|по данным)\b"
 )
 _SOURCE_LABEL_RE = re.compile(r"(?i)\bsource\s*:")
+_SOURCE_LINE_RE = re.compile(r"(?im)^(источник|source|sources|references|citations)\s*:.*$")
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_ATTRIBUTION_LEAD_RE = re.compile(r"(?i)\b(согласно|по данным)\s+[^,.!;:\n]+[,:]?\s*")
 _SOURCES_REQUEST_RE = re.compile(
     r"(?i)\b("
     r"ссылк\w*|источник\w*|исследован\w*|доказательств\w*|по данным|согласно|"
@@ -72,9 +75,11 @@ def has_pseudo_source_markers(text: str) -> bool:
     if not text:
         return False
     return bool(
-        _BRACKET_CITATION_RE.search(text)
+        _MARKDOWN_LINK_RE.search(text)
+        or _BRACKET_CITATION_RE.search(text)
         or _PAREN_CITATION_RE.search(text)
         or _SOURCES_HEADER_RE.search(text)
+        or _SOURCE_LINE_RE.search(text)
         or _SOURCE_LABEL_RE.search(text)
         or _PSEUDO_SOURCES_RE.search(text)
         or _URL_RE.search(text)
@@ -118,12 +123,19 @@ def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[st
     working = original
     removal_counts: dict[str, int] = {}
 
+    def _strip_markdown_link(match: re.Match[str]) -> str:
+        label = match.group(1).strip()
+        return label
+
+    working, removal_counts["markdown_links"] = _MARKDOWN_LINK_RE.subn(_strip_markdown_link, working)
     working, removal_counts["urls"] = _URL_RE.subn("", working)
     working, removal_counts["www"] = _WWW_RE.subn("", working)
     working, removal_counts["domains"] = _DOMAIN_RE.subn("", working)
     working, removal_counts["doi"] = _DOI_RE.subn("", working)
     working, removal_counts["bracket_citations"] = _BRACKET_CITATION_RE.subn("", working)
     working, removal_counts["paren_citations"] = _PAREN_CITATION_RE.subn("", working)
+    working, removal_counts["source_lines"] = _SOURCE_LINE_RE.subn("", working)
+    working, removal_counts["attribution_leads"] = _ATTRIBUTION_LEAD_RE.subn("", working)
 
     header_match = _SOURCES_HEADER_RE.search(working)
     truncated_sources_section = False
@@ -183,9 +195,11 @@ def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[st
             disclaimer_added = True
 
     forbidden_remaining = bool(
-        _BRACKET_CITATION_RE.search(working)
+        _MARKDOWN_LINK_RE.search(working)
+        or _BRACKET_CITATION_RE.search(working)
         or _PAREN_CITATION_RE.search(working)
         or _SOURCES_HEADER_RE.search(working)
+        or _SOURCE_LINE_RE.search(working)
         or _FORBIDDEN_PHRASES_RE.search(working)
         or _URL_RE.search(working)
         or _WWW_RE.search(working)

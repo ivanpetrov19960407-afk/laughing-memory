@@ -548,11 +548,15 @@ async def ensure_reminder_for_event(
 
 
 def parse_local_datetime(value: str) -> datetime:
-    try:
-        parsed = datetime.strptime(value.strip(), "%Y-%m-%d %H:%M")
-    except ValueError as exc:
-        raise ValueError("Формат: YYYY-MM-DD HH:MM") from exc
-    return parsed.replace(tzinfo=VIENNA_TZ)
+    raw = value.strip()
+    formats = ("%Y-%m-%d %H:%M", "%d.%m.%Y %H:%M", "%Y.%m.%d %H:%M", "%d-%m-%Y %H:%M")
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            return parsed.replace(tzinfo=VIENNA_TZ)
+        except ValueError:
+            continue
+    raise ValueError("Формат: YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM")
 
 
 def parse_date(value: str) -> date:
