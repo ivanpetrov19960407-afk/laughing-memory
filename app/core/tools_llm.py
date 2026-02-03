@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from app.core.orchestrator import Orchestrator, OrchestratorResult
+from app.core.orchestrator import Orchestrator
+from app.core.result import OrchestratorResult, ensure_valid, error, ok, refused
 
 BASE_SYSTEM_PROMPT = (
     "Ты аккуратный помощник. Не выдумывай, не добавляй источники без наличия, "
@@ -57,13 +58,13 @@ async def _run_llm_tool(
     orchestrator = ctx.get("orchestrator")
     user_id = ctx.get("user_id")
     if not isinstance(orchestrator, Orchestrator) or not isinstance(user_id, int):
-        return OrchestratorResult(
-            text="Ошибка конфигурации LLM инструмента.",
-            status="error",
-            mode="llm",
-            intent=intent,
-            sources=[],
-            debug={"reason": "invalid_context"},
+        return ensure_valid(
+            error(
+                "Ошибка конфигурации LLM инструмента.",
+                intent=intent,
+                mode="llm",
+                debug={"reason": "invalid_context"},
+            )
         )
     execution = await orchestrator.ask_llm(
         user_id,
@@ -72,22 +73,28 @@ async def _run_llm_tool(
         system_prompt=system_prompt,
     )
     if execution.status != "success":
-        status = "error"
         if "LLM не настроен" in execution.result:
-            status = "refused"
-        return OrchestratorResult(
-            text=execution.result,
-            status=status,
-            mode="llm",
+            return ensure_valid(
+                refused(
+                    execution.result,
+                    intent=intent,
+                    mode="llm",
+                    debug={"task_name": execution.task_name},
+                )
+            )
+        return ensure_valid(
+            error(
+                execution.result,
+                intent=intent,
+                mode="llm",
+                debug={"task_name": execution.task_name},
+            )
+        )
+    return ensure_valid(
+        ok(
+            execution.result,
             intent=intent,
-            sources=[],
+            mode="llm",
             debug={"task_name": execution.task_name},
         )
-    return OrchestratorResult(
-        text=execution.result,
-        status="ok",
-        mode="llm",
-        intent=intent,
-        sources=[],
-        debug={"task_name": execution.task_name},
     )

@@ -4,8 +4,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
 
+from app.core.result import OrchestratorResult
 
-TaskCallable = Callable[[str], str]
+
+TaskCallable = Callable[[str], OrchestratorResult]
 
 
 @dataclass(frozen=True)
