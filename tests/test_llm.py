@@ -23,6 +23,16 @@ class FakeLLMClient:
     ):
         return {"content": "hello from llm"}
 
+    async def generate_text(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        max_tokens=None,
+        web_search_options=None,
+    ) -> str:
+        return "hello from llm"
+
 
 class CaptureLLMClient:
     def __init__(self) -> None:
@@ -39,6 +49,17 @@ class CaptureLLMClient:
     ):
         self.last_messages = messages
         return {"content": "ok"}
+
+    async def generate_text(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        max_tokens=None,
+        web_search_options=None,
+    ) -> str:
+        self.last_messages = messages
+        return "ok"
 
 
 def test_orchestrator_ask_llm_success(tmp_path: Path) -> None:
@@ -137,6 +158,12 @@ def test_orchestrator_context_appends_history(tmp_path: Path) -> None:
     asyncio.run(orchestrator.ask_llm(user_id=1, prompt="new message"))
 
     assert client.last_messages == [
+        {
+            "role": "system",
+            "content": (
+                "Ответь только текстом. Не возвращай JSON, поля, статус, intent, sources, actions."
+            ),
+        },
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": "hello"},
         {"role": "user", "content": "how are you"},
