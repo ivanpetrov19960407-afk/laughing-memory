@@ -63,7 +63,6 @@ class ActionStore:
         if item.expires_at < time.monotonic():
             self._items.pop(action_id, None)
             return None
-        self._items.pop(action_id, None)
         return item
 
     def _validate_payload(self, payload: dict[str, Any]) -> None:
@@ -84,7 +83,9 @@ class ActionStore:
         for token in expired:
             self._items.pop(token, None)
         if len(self._items) > self._max_items:
-            for token in list(self._items.keys())[: len(self._items) - self._max_items]:
+            overage = len(self._items) - self._max_items
+            items_by_age = sorted(self._items.items(), key=lambda entry: entry[1].created_at)
+            for token, _item in items_by_age[:overage]:
                 self._items.pop(token, None)
 
 

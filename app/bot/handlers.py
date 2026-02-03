@@ -29,7 +29,7 @@ from app.infra.allowlist import AllowlistStore
 from app.infra.messaging import safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limiter import RateLimiter
-from app.infra.request_context import get_request_context, log_request, set_status, start_request
+from app.infra.request_context import get_request_context, log_request, set_input_text, set_status, start_request
 from app.infra.storage import TaskStorage
 
 LOGGER = logging.getLogger(__name__)
@@ -475,6 +475,9 @@ async def send_result(
             return
         context.chat_data[sent_key] = True
     _log_orchestrator_result(user_id, public_result, request_id=request_id)
+    output_preview = public_result.text.replace("\n", " ").strip()
+    if len(output_preview) > 80:
+        output_preview = f"{output_preview[:80].rstrip()}…"
     inline_keyboard = build_inline_keyboard(
         public_result.actions,
         store=_get_action_store(context),
@@ -484,6 +487,14 @@ async def send_result(
     effective_reply_markup = reply_markup if reply_markup is not None else inline_keyboard
     await _send_text(update, context, public_result.text, reply_markup=effective_reply_markup)
     await _send_attachments(update, context, public_result.attachments)
+    if request_id:
+        LOGGER.info(
+            "Response: request_id=%s intent=%s status=%s output_preview=%r",
+            request_id,
+            public_result.intent,
+            public_result.status,
+            output_preview,
+        )
 
 
 @_with_error_handling
@@ -542,10 +553,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
-    user_id = update.effective_user.id if update.effective_user else 0
-    message = update.message.text if update.message else ""
     result = refused(
-        "Неизвестная команда. Напиши /help.",
+        "Неизвестная команда. /help",
         intent="command.unknown",
         mode="local",
     )
@@ -1158,14 +1167,18 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     if query is None:
         return
+    try:
+        await query.answer()
+    except Exception:
+        LOGGER.exception("Failed to answer callback query")
     if not await _guard_access(update, context, bucket="ui"):
         return
     data = query.data or ""
+    set_input_text(context, data)
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
-    LOGGER.info("Callback: user_id=%s data=%r", user_id, query.data)
     action_id = parse_callback_token(data)
-    LOGGER.info("Callback parsed: action_id=%s", action_id)
+    LOGGER.info("Callback: user_id=%s data=%r action_id=%s", user_id, data, action_id)
     if action_id is None:
         result = refused(
             "Действие недоступно.",
@@ -1178,6 +1191,7 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     store = _get_action_store(context)
     stored = store.get_action(user_id=user_id, chat_id=chat_id, action_id=action_id)
     if stored is None:
+        LOGGER.info("Callback dispatch: action_id=%s intent=%s", action_id, "-")
         result = refused(
             "Кнопка устарела, открой /menu заново.",
             intent="callback.expired",
@@ -1186,6 +1200,8 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         await send_result(update, context, result)
         return
+    LOGGER.info("Callback dispatch: action_id=%s intent=%s", action_id, stored.intent)
+    set_input_text(context, f"<callback:{stored.intent}>")
     result = await _dispatch_action(update, context, stored)
     await send_result(update, context, result)
 
