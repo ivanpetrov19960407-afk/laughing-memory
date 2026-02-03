@@ -359,8 +359,8 @@ class Orchestrator:
                 sanitized, meta = sanitize_llm_text(result, sources_requested=sources_requested)
                 if sources_requested and meta.get("needs_regeneration"):
                     regen_instruction = (
-                        "Ответь простым языком, без цифр, без упоминаний исследований/методов/нейровизуализации, "
-                        "2–6 предложений."
+                        "Объясни простыми словами, без чисел, без терминов, без науки, "
+                        "как для человека без медицинских знаний."
                     )
                     regen_prompt = f"{trimmed}\n\n{regen_instruction}"
                     regen_messages = _build_messages(regen_prompt)
@@ -859,6 +859,9 @@ def _split_command(text: str) -> tuple[str, str]:
 
 
 def _is_destructive_request(lowered: str) -> bool:
+    question_markers = ("как", "что", "где", "можно ли", "?")
+    if any(marker in lowered for marker in question_markers):
+        return False
     destructive_markers = (
         "удали все напоминания",
         "удалить все напоминания",

@@ -32,15 +32,32 @@ _SOURCES_REQUEST_RE = re.compile(
 _STRICT_BLOCK_RE = re.compile(
     r"(?i)\b("
     r"исследован\w*|исследовани\w*|доказательств\w*|подтвержден\w*|по данным|согласно|"
+    r"исследования показывают|подтверждено|механизм|процесс|активаци\w*|систем\w*|выработк\w*|"
     r"мета-?анализ|рандомизирован\w*|двойн\w* слеп\w*|контрольн\w* групп\w*|"
     r"уч[её]н\w* выяснил\w*|в исследовани\w*|"
     r"study|studies|research|peer[-\s]?reviewed|randomized|double[-\s]?blind|"
     r"control group|meta-?analysis|statistically значим\w*|statistically significant|"
-    r"p-?value|fMRI|MRI|МРТ|антидот|эндорфин\w*|n\s*=\s*\d+|"
-    r"percent|процент\w*"
+    r"p-?value|fMRI|MRI|МРТ|антидот|эндорфин\w*|дофамин\w*|опиоид\w*|каннабиноид\w*|"
+    r"таламус\w*|кор\w*|извилин\w*|нейр\w*|холецистокинин\w*|регресси\w*|статистик\w*|"
+    r"n\s*=\s*\d+|percent|процент\w*"
     r")\b"
 )
 _HAS_DIGIT_RE = re.compile(r"\d")
+_NUMBER_WORD_RE = re.compile(
+    r"(?i)\b("
+    r"ноль|один|одна|одно|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|"
+    r"одиннадцать|двенадцать|тринадцать|четырнадцать|пятнадцать|шестнадцать|"
+    r"семнадцать|восемнадцать|девятнадцать|двадцать|тридцать|сорок|пятьдесят|"
+    r"шестьдесят|семьдесят|восемьдесят|девяносто|сто|тысяча|тысяч|миллион\w*|"
+    r"миллиард\w*|половин\w*|треть\w*|четверт\w*"
+    r")\b"
+)
+_STATS_MARKER_RE = re.compile(
+    r"(?i)\b("
+    r"процент\w*|статистик\w*|по данным|в среднем|вероятност\w*|частот\w*|"
+    r"каждый второй|каждая вторая|половин\w*|треть\w*|четверт\w*"
+    r")\b|%"
+)
 
 
 def is_sources_request(text: str) -> bool:
@@ -58,6 +75,22 @@ def _split_sentences(text: str) -> list[str]:
     if not text:
         return []
     return [segment.strip() for segment in re.split(r"(?<=[.!?])\s+", text) if segment.strip()]
+
+
+def _rewrite_stats_sentence(sentence: str) -> str:
+    if not _STATS_MARKER_RE.search(sentence):
+        return sentence
+    normalized = sentence
+    normalized = re.sub(r"\bу\s+\d+[.,]?\d*\s*%(\s+\w+)?", "у некоторых людей", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\b\d+[.,]?\d*\s*%", "часто", normalized)
+    normalized = re.sub(r"\bв\s+\d+\s+случа(ев|ях|я)\b", "иногда", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bкажд(ый|ая)\s+втор(ой|ая)\b", "у некоторых людей", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bполовин\w*\b", "часто", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bтреть\w*\b", "иногда", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bчетверт\w*\b", "иногда", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\b\d+[.,]?\d*\b", "", normalized)
+    normalized = _normalize_text(normalized)
+    return normalized
 
 
 def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[str, dict[str, Any]]:
@@ -85,13 +118,25 @@ def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[st
         sentences = _split_sentences(working)
         kept: list[str] = []
         for sentence in sentences:
-            if _STRICT_BLOCK_RE.search(sentence) or _HAS_DIGIT_RE.search(sentence):
+            if (
+                _STRICT_BLOCK_RE.search(sentence)
+                or _HAS_DIGIT_RE.search(sentence)
+                or _NUMBER_WORD_RE.search(sentence)
+            ):
                 strict_removed_sentences += 1
                 continue
             if not sentence.strip():
                 continue
             kept.append(sentence.strip())
         working = " ".join(kept)
+    else:
+        sentences = _split_sentences(working)
+        rewritten: list[str] = []
+        for sentence in sentences:
+            rewritten_sentence = _rewrite_stats_sentence(sentence)
+            if rewritten_sentence:
+                rewritten.append(rewritten_sentence)
+        working = " ".join(rewritten)
 
     working = _normalize_text(working)
 
@@ -126,7 +171,14 @@ def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[st
         or _WWW_RE.search(working)
         or _DOMAIN_RE.search(working)
         or _DOI_RE.search(working)
-        or (sources_requested and (_STRICT_BLOCK_RE.search(content) or _HAS_DIGIT_RE.search(content)))
+        or (
+            sources_requested
+            and (
+                _STRICT_BLOCK_RE.search(content)
+                or _HAS_DIGIT_RE.search(content)
+                or _NUMBER_WORD_RE.search(content)
+            )
+        )
     )
 
     failed = (
