@@ -9,7 +9,15 @@ import pytest
 from app.bot import actions, handlers
 from app.core import calendar_store
 from app.core.orchestrator import Orchestrator
-from app.core.result import Action, OrchestratorResult, ensure_valid, ok, ratelimited
+from app.core.result import (
+    Action,
+    OrchestratorResult,
+    STRICT_REFUSAL_TEXT,
+    ensure_safe_text_strict,
+    ensure_valid,
+    ok,
+    ratelimited,
+)
 from app.core.tools_calendar import list_calendar_items, list_reminders
 from app.infra.rate_limiter import RateLimiter
 from app.infra.storage import TaskStorage
@@ -190,6 +198,15 @@ def test_ensure_valid_dict_result_defaults() -> None:
     assert result.actions == []
     assert result.attachments == []
     assert result.debug == {}
+
+
+def test_strict_guard_replaces_text_and_clears_sources() -> None:
+    result = ok("Sources: [1]", intent="test", mode="llm", sources=[{"title": "x", "url": "y", "snippet": "z"}])
+    guarded = ensure_safe_text_strict(result, facts_enabled=False, allow_sources_in_text=False)
+
+    assert guarded.status == "refused"
+    assert guarded.text == STRICT_REFUSAL_TEXT
+    assert guarded.sources == []
 
 
 def test_ensure_valid_normalizes_none_actions() -> None:

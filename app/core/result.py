@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -10,6 +11,21 @@ ResultStatus = Literal["ok", "refused", "error", "ratelimited"]
 ResultMode = Literal["local", "llm", "tool"]
 
 LOGGER = logging.getLogger(__name__)
+
+
+STRICT_REFUSAL_TEXT = "Не могу приводить источники/ссылки без поиска. Открой /menu → Поиск."
+
+_PSEUDO_SOURCE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("bracket_citation", re.compile(r"\[\s*\d+\s*\]")),
+    ("paren_citation", re.compile(r"\(\s*\d+\s*\)")),
+    (
+        "sources_keywords",
+        re.compile(r"(?i)\b(источник|источники|ссылки|sources|references|bibliography)\b"),
+    ),
+    ("attribution_phrases", re.compile(r"(?i)\b(согласно|по данным|according to|as reported by)\b")),
+    ("url", re.compile(r"https?://\S+", re.IGNORECASE)),
+    ("domain", re.compile(r"\b\w+\.(?:com|ru|net|org|io|dev|app|ai)\b", re.IGNORECASE)),
+]
 
 
 @dataclass(frozen=True)
@@ -272,6 +288,40 @@ def ensure_valid(
         actions=actions,
         attachments=attachments,
         debug=debug,
+    )
+
+
+def ensure_safe_text_strict(
+    result: OrchestratorResult,
+    facts_enabled: bool,
+    *,
+    allow_sources_in_text: bool = False,
+) -> OrchestratorResult:
+    if allow_sources_in_text:
+        return result
+    text = result.text or ""
+    if not text.strip():
+        return result
+    matched_patterns = [label for label, pattern in _PSEUDO_SOURCE_PATTERNS if pattern.search(text)]
+    if not matched_patterns:
+        return result
+    LOGGER.warning(
+        "Text safety (strict): blocked pseudo-sources patterns=%s intent=%s request_id=%s facts_enabled=%s",
+        matched_patterns,
+        result.intent,
+        result.request_id or "-",
+        facts_enabled,
+    )
+    return OrchestratorResult(
+        text=STRICT_REFUSAL_TEXT,
+        status="refused",
+        mode=result.mode,
+        intent=result.intent,
+        request_id=result.request_id,
+        sources=[],
+        attachments=[],
+        actions=result.actions,
+        debug=result.debug,
     )
 
 
