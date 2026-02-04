@@ -474,10 +474,18 @@ def _apply_pseudo_source_guard(
 
 
 async def _send_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None) -> None:
-    if update.callback_query:
+    if update.callback_query and not isinstance(reply_markup, telegram.ReplyKeyboardRemove):
         await safe_edit_text(update, context, text, reply_markup=reply_markup)
         return
     await safe_send_text(update, context, text, reply_markup=reply_markup)
+
+
+async def _send_reply_keyboard_remove(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str = "Открываю меню…",
+) -> None:
+    await safe_send_text(update, context, text, reply_markup=telegram.ReplyKeyboardRemove())
 
 
 async def _send_attachments(
@@ -1197,6 +1205,7 @@ async def allowlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context, bucket="ui"):
         return
+    await _send_reply_keyboard_remove(update, context)
     user_id = update.effective_user.id if update.effective_user else 0
     result = ok(
         "Меню:",
@@ -1361,8 +1370,12 @@ async def _dispatch_action(
     payload = stored.payload
     op = payload.get("op")
     if op == "menu_open":
+        await _send_reply_keyboard_remove(update, context)
         user_id = update.effective_user.id if update.effective_user else 0
         return ok("Меню:", intent="menu.open", mode="local", actions=_build_menu_actions(context, user_id=user_id))
+    if op == "menu_cancel":
+        await _send_reply_keyboard_remove(update, context, text="Ок")
+        return ok("Ок", intent="menu.cancel", mode="local")
     if op == "menu_section":
         section = payload.get("section")
         if not isinstance(section, str):
@@ -1518,6 +1531,7 @@ async def _dispatch_command_payload(
     normalized = routing.normalize_command(command)
     orchestrator = _get_orchestrator(context)
     if normalized in {"/menu", "/start"}:
+        await _send_reply_keyboard_remove(update, context)
         user_id = update.effective_user.id if update.effective_user else 0
         return ok("Меню:", intent="menu.open", mode="local", actions=_build_menu_actions(context, user_id=user_id))
     if normalized == "/calc":

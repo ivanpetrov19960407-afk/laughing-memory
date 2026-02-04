@@ -34,7 +34,7 @@ def build_menu_actions(*, facts_enabled: bool, enable_menu: bool) -> list[Action
         Action(id="menu.calendar", label="📅 Календарь", payload={"op": "menu_section", "section": "calendar"}),
         Action(id="menu.reminders", label="⏰ Напоминания", payload={"op": "menu_section", "section": "reminders"}),
         Action(id="menu.settings", label="⚙️ Настройки", payload={"op": "menu_section", "section": "settings"}),
-        Action(id="menu.cancel", label="❌ Отмена", payload={"op": "wizard_cancel"}),
+        Action(id="menu.cancel", label="❌ Отмена", payload={"op": "menu_cancel"}),
     ]
 
 
