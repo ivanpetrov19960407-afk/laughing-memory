@@ -1,50 +1,42 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+# Secretary Bot — Constitution (UX-first)
 
-## Core Principles
+## Mission
+Build a “secretary” Telegram bot that is usable by non-technical people: clear menu, guided scenarios (wizard), fast actions, and predictable behavior.
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+## Non-negotiables
+- No silence: every user input must produce a response (text and/or actions).
+- No dead ends: every response must provide a next step (at least “🏠 Menu”).
+- Actions over instructions: prefer buttons (actions) to “type command …”.
+- Refusal is a UX state: refused must be polite, short, and offer alternatives.
+- Confirmation before side effects: calendar writes, reminders create/update/delete must require explicit confirmation.
+- Consistent tone: short, direct, human, no internal jargon (intent, TTL, tool, orchestrator, etc.) in user text.
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+## UX Contract (Response)
+- text: human-readable, 1–4 short lines; no debug; no citations markers like [1].
+- actions: present whenever it makes sense (menu navigation, retry, confirm/cancel, back).
+- attachments: only when explicitly requested (image generation etc.).
+- status:
+  - ok: successful result
+  - refused: cannot/should not do it; provide next actions
+  - error: unexpected failure; provide retry + menu
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+## Wizard (Scenarios)
+- Wizard state is per (user_id, chat_id).
+- Must support: cancel, timeout, resume entry point, and “Back”.
+- Timeout must reset state and return to Menu.
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+## Menus
+- Main menu is the default home screen.
+- Sections: Chat, Search, Images, Calculator, Calendar, Reminders, Settings.
+- Every section entry point must explain what it does in one sentence and offer the top 3 actions.
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+## Safety / Data Integrity
+- Never fabricate sources or links.
+- Never perform side-effect operations without confirmation.
+- Logs may contain technical details; user-facing text must not.
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
-
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
-
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
-
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
-
-## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
-
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
-
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+## Definition of Done for Stage 4
+- All primary flows reachable from main menu.
+- Unknown commands/messages get a friendly fallback + menu action.
+- Every flow has: confirm/cancel, back, timeout handling.
+- Manual UX walkthrough passes: user always knows what to do next.
