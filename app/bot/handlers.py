@@ -11,7 +11,7 @@ from functools import wraps
 from typing import Any
 
 import telegram
-from telegram import InputFile, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import ContextTypes
 from PIL import Image
 import pytesseract
@@ -99,6 +99,12 @@ def _get_wizard_runtime(context: ContextTypes.DEFAULT_TYPE) -> WizardRuntime | N
     if isinstance(runtime, WizardRuntime):
         return runtime
     return None
+
+
+def _build_wizard_cancel_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⛔ Отмена", callback_data="wiz:cancel")]],
+    )
 
 
 def _get_action_store(context: ContextTypes.DEFAULT_TYPE) -> ActionStore:
@@ -640,7 +646,7 @@ async def wtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
     view = runtime.start(user_id, chat_id, "echo", "ask")
-    await message.reply_text(view.text)
+    await message.reply_text(view.text, reply_markup=_build_wizard_cancel_markup())
 
 
 @_with_error_handling
@@ -1324,6 +1330,26 @@ async def _handle_menu_section(
         mode="local",
         actions=[_menu_action()],
     )
+
+
+@_with_error_handling
+async def wiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    if query.data != "wiz:cancel":
+        await query.answer()
+        return
+    runtime = _get_wizard_runtime(context)
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    if runtime is None or not runtime.has_active(user_id, chat_id):
+        await query.answer()
+        await query.edit_message_text("Нет активного сценария.")
+        return
+    runtime.cancel(user_id, chat_id)
+    await query.answer()
+    await query.edit_message_text("Сценарий отменён.")
 
 
 @_with_error_handling
@@ -2261,7 +2287,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     runtime = _get_wizard_runtime(context)
     if runtime is not None and runtime.has_active(user_id, chat_id):
         view = runtime.handle_text(user_id, chat_id, prompt)
-        await update.message.reply_text(view.text)
+        await update.message.reply_text(view.text, reply_markup=_build_wizard_cancel_markup())
         return
     if menu.is_menu_label(prompt):
         result = refused(
