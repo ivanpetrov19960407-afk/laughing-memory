@@ -386,7 +386,7 @@ def _build_simple_result(
 
 
 def _menu_action() -> Action:
-    return Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"})
+    return Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_section", "section": "home"})
 
 
 def _build_user_context_with_dialog(
@@ -1337,6 +1337,24 @@ async def _handle_menu_section(
     user_id: int,
     chat_id: int,
 ) -> OrchestratorResult:
+    if context is None:
+        text_map = {
+            "home": "Выбери раздел:",
+            "chat": "Пиши сообщением — отвечу. Можно вернуться в меню.",
+            "search": "Ищу в интернете и даю ссылки на источники.",
+            "images": "Опиши картинку — сгенерирую.",
+            "calc": "Введи выражение (например: 12*(5+3)).",
+            "calendar": "Календарь: добавить/посмотреть/удалить события.",
+            "reminders": "Напоминания: создать/список/удалить.",
+            "settings": "Настройки режимов и поведения.",
+        }
+        text = text_map.get(section, "Выбери раздел:")
+        actions = (
+            menu.build_menu_actions(facts_enabled=False, enable_menu=True)
+            if section == "home"
+            else [_menu_action()]
+        )
+        return ok(text, intent=f"menu.section.{section}", mode="local", actions=actions)
     orchestrator = _get_orchestrator(context)
     facts_enabled = bool(user_id) and orchestrator.is_facts_only(user_id)
     facts_command = "/facts_off" if facts_enabled else "/facts_on"
@@ -1367,6 +1385,13 @@ async def _handle_menu_section(
             intent="menu.chat",
             mode="local",
             actions=actions,
+        )
+    if section == "home":
+        return ok(
+            "Выбери раздел:",
+            intent="menu.home",
+            mode="local",
+            actions=_build_menu_actions(context, user_id=user_id),
         )
     if section == "search":
         return ok(
