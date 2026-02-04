@@ -1885,6 +1885,7 @@ async def _dispatch_action_payload(
     if op_value == "reminder_snooze":
         reminder_id = payload.get("id")
         minutes = payload.get("minutes", 10)
+        base_trigger_at = payload.get("base_trigger_at")
         if not isinstance(reminder_id, str) or not reminder_id:
             return error(
                 "Некорректные данные действия.",
@@ -1893,11 +1894,28 @@ async def _dispatch_action_payload(
                 debug={"reason": "invalid_reminder_id"},
             )
         minutes_value = minutes if isinstance(minutes, int) else 10
+        base_value = base_trigger_at if isinstance(base_trigger_at, str) else None
         return await _handle_reminder_snooze(
             context,
             user_id=user_id,
             reminder_id=reminder_id,
             minutes=minutes_value,
+            base_trigger_at=base_value,
+        )
+    if op_value == "reminder_reschedule":
+        reminder_id = payload.get("id")
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="ui.action",
+                mode="local",
+                debug={"reason": "invalid_reminder_id"},
+            )
+        return await _handle_reminder_reschedule_start(
+            context,
+            user_id=user_id,
+            chat_id=chat_id,
+            reminder_id=reminder_id,
         )
     if op_value == "reminder_delete":
         reminder_id = payload.get("id")
@@ -2043,6 +2061,7 @@ async def _handle_reminder_snooze(
     user_id: int,
     reminder_id: str,
     minutes: int,
+    base_trigger_at: str | None = None,
 ) -> OrchestratorResult:
     reminder = await calendar_store.get_reminder(reminder_id)
     if reminder is None:
@@ -2052,8 +2071,17 @@ async def _handle_reminder_snooze(
             mode="local",
         )
     offset = max(1, minutes)
-    new_trigger = datetime.now(tz=calendar_store.VIENNA_TZ) + timedelta(minutes=offset)
-    updated = await calendar_store.update_reminder_trigger(reminder_id, new_trigger, enabled=True)
+    base_dt = None
+    if base_trigger_at:
+        try:
+            base_dt = datetime.fromisoformat(base_trigger_at)
+        except ValueError:
+            base_dt = None
+        if base_dt and base_dt.tzinfo is None:
+            base_dt = base_dt.replace(tzinfo=calendar_store.VIENNA_TZ)
+        if base_dt and base_dt.tzinfo is not None:
+            base_dt = base_dt.astimezone(calendar_store.VIENNA_TZ)
+    updated = await calendar_store.apply_snooze(reminder_id, minutes=offset, base_trigger_at=base_dt)
     if updated is None:
         return error(
             "Не удалось обновить напоминание.",
@@ -2072,7 +2100,14 @@ async def _handle_reminder_snooze(
                 intent="utility_reminders.snooze",
                 mode="local",
             )
-    when_label = new_trigger.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+    LOGGER.info(
+        "Reminder snoozed: reminder_id=%s user_id=%s old_trigger_at=%s new_trigger_at=%s",
+        reminder_id,
+        user_id,
+        reminder.trigger_at.isoformat(),
+        updated.trigger_at.isoformat(),
+    )
+    when_label = updated.trigger_at.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
     return ok(
         f"Напоминание отложено до {when_label}.",
         intent="utility_reminders.snooze",
@@ -2096,18 +2131,60 @@ async def _handle_reminder_delete(
                 intent="utility_reminders.delete",
                 mode="local",
             )
-    deleted = await calendar_store.delete_reminder(reminder_id)
-    if not deleted:
+    reminder = await calendar_store.get_reminder(reminder_id)
+    if reminder is None:
         return refused(
             f"Напоминание не найдено: {reminder_id}",
             intent="utility_reminders.delete",
             mode="local",
         )
+    if reminder.status == "disabled":
+        return ok(
+            "Напоминание уже отключено.",
+            intent="utility_reminders.delete",
+            mode="local",
+        )
+    updated = await calendar_store.disable_reminder(reminder_id)
+    if not updated:
+        return error(
+            "Не удалось отключить напоминание.",
+            intent="utility_reminders.delete",
+            mode="local",
+        )
+    LOGGER.info(
+        "Reminder disabled: reminder_id=%s user_id=%s trigger_at=%s",
+        reminder_id,
+        reminder.user_id,
+        reminder.trigger_at.isoformat(),
+    )
     return ok(
-        "Напоминание удалено.",
+        "Напоминание отключено.",
         intent="utility_reminders.delete",
         mode="local",
     )
+
+
+async def _handle_reminder_reschedule_start(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    reminder_id: str,
+) -> OrchestratorResult:
+    if not _wizards_enabled(context):
+        return refused(
+            "Сценарии отключены.",
+            intent="utility_reminders.reschedule",
+            mode="local",
+        )
+    manager = _get_wizard_manager(context)
+    if manager is None:
+        return error(
+            "Сценарий переноса не настроен.",
+            intent="utility_reminders.reschedule",
+            mode="local",
+        )
+    return await manager.start_reminder_reschedule(user_id=user_id, chat_id=chat_id, reminder_id=reminder_id)
 
 
 async def _handle_reminder_add_offset(

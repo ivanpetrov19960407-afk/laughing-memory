@@ -40,9 +40,21 @@ async def list_reminders(
         lines.append(f"{item.id} | {when_label} | {item.text}")
         actions.append(
             Action(
-                id=f"reminder_snooze:{item.id}",
+                id=f"reminder_snooze:{item.id}:10",
                 label="⏸ Отложить на 10 минут",
-                payload={"op": "reminder_snooze", "id": item.id, "minutes": 10},
+                payload={
+                    "op": "reminder_snooze",
+                    "id": item.id,
+                    "minutes": 10,
+                    "base_trigger_at": item.trigger_at.isoformat(),
+                },
+            )
+        )
+        actions.append(
+            Action(
+                id=f"reminder_reschedule:{item.id}",
+                label="✏ Перенести",
+                payload={"op": "reminder_reschedule", "id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
             )
         )
         actions.append(
