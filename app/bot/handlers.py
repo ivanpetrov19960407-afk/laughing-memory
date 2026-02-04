@@ -466,6 +466,7 @@ def _apply_pseudo_source_guard(
         status=result.status,
         mode=result.mode,
         intent=result.intent,
+        request_id=result.request_id,
         sources=result.sources,
         attachments=result.attachments,
         actions=result.actions,
@@ -530,7 +531,7 @@ async def _send_attachments(
 async def send_result(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-    result: OrchestratorResult,
+    result: OrchestratorResult | dict[str, Any] | None,
     *,
     reply_markup=None,
 ) -> None:
@@ -542,6 +543,7 @@ async def send_result(
             status=public_result.status,
             mode=public_result.mode,
             intent=public_result.intent,
+            request_id=public_result.request_id,
             sources=public_result.sources,
             attachments=public_result.attachments,
             actions=public_result.actions,

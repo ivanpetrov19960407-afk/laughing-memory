@@ -41,6 +41,7 @@ class OrchestratorResult:
     status: ResultStatus
     mode: ResultMode
     intent: str
+    request_id: str = ""
     sources: list[Source] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)
     actions: list[Action] = field(default_factory=list)
@@ -52,6 +53,7 @@ class OrchestratorResult:
             "status": self.status,
             "mode": self.mode,
             "intent": self.intent,
+            "request_id": self.request_id,
             "sources": [_source_to_dict(source) for source in self.sources],
             "attachments": [_attachment_to_dict(attachment) for attachment in self.attachments],
             "actions": [_action_to_dict(action) for action in self.actions],
@@ -78,6 +80,8 @@ class OrchestratorResult:
             errors.append("mode must be local/llm/tool")
         if not isinstance(self.intent, str) or not self.intent.strip():
             errors.append("intent must be non-empty str")
+        if not isinstance(self.request_id, str):
+            errors.append("request_id must be str")
         if not isinstance(self.sources, list) or any(not _is_valid_source(item) for item in self.sources):
             errors.append("sources must be list of valid Source entries")
         if not isinstance(self.attachments, list) or any(
@@ -189,24 +193,86 @@ def ratelimited(
 
 
 def ensure_valid(
-    result: OrchestratorResult,
+    result: OrchestratorResult | dict[str, Any] | None,
     *,
     logger: logging.Logger | None = None,
     fallback_intent: str | None = None,
 ) -> OrchestratorResult:
     logger = logger or LOGGER
-    try:
-        result.validate()
-        return result
-    except Exception as exc:
-        logger.exception("Result validation failed: %s", exc)
+    if result is None:
         return OrchestratorResult(
             text="Internal error",
             status="error",
-            mode=result.mode if isinstance(result.mode, str) else "local",
-            intent=fallback_intent or result.intent or "unknown",
-            debug={"validation_error": str(exc)},
+            mode="local",
+            intent="internal.error",
         )
+    if isinstance(result, OrchestratorResult):
+        payload: dict[str, Any] = {
+            "text": result.text,
+            "status": result.status,
+            "mode": result.mode,
+            "intent": result.intent,
+            "request_id": result.request_id,
+            "sources": result.sources,
+            "actions": result.actions,
+            "attachments": result.attachments,
+            "debug": result.debug,
+        }
+    elif isinstance(result, dict):
+        payload = result
+    else:
+        logger.warning("Result validation: unexpected payload type %s", type(result).__name__)
+        payload = {}
+
+    status = payload.get("status")
+    if status not in {"ok", "refused", "error"}:
+        status = "error"
+
+    text = payload.get("text")
+    if text is None:
+        text = ""
+    elif not isinstance(text, str):
+        text = str(text)
+
+    intent_value = payload.get("intent")
+    if not isinstance(intent_value, str) or not intent_value:
+        intent_value = fallback_intent or "unknown"
+
+    mode_value = payload.get("mode")
+    if not isinstance(mode_value, str):
+        mode_value = "local"
+
+    request_id_value = payload.get("request_id")
+    if not isinstance(request_id_value, str):
+        request_id_value = ""
+
+    sources = payload.get("sources")
+    if not isinstance(sources, list):
+        sources = []
+
+    actions = payload.get("actions")
+    if not isinstance(actions, list):
+        actions = []
+
+    attachments = payload.get("attachments")
+    if not isinstance(attachments, list):
+        attachments = []
+
+    debug = payload.get("debug")
+    if not isinstance(debug, dict):
+        debug = {}
+
+    return OrchestratorResult(
+        text=text,
+        status=status,
+        mode=mode_value,
+        intent=intent_value,
+        request_id=request_id_value,
+        sources=sources,
+        actions=actions,
+        attachments=attachments,
+        debug=debug,
+    )
 
 
 def _action_payload_contains_debug(action: Action | dict[str, Any]) -> bool:
