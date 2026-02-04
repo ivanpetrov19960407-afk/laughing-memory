@@ -1391,61 +1391,88 @@ async def wiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query = update.callback_query
     if query is None:
         return
-    if query.data not in {"wiz:cancel", "wiz:confirm"}:
-        await query.answer()
-        return
-    runtime = _get_wizard_runtime(context)
+    data = query.data or ""
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
-    if query.data == "wiz:confirm":
-        if runtime is None or not runtime.has_active(user_id, chat_id):
-            await query.answer("Нет активного сценария.")
+    LOGGER.info("wiz_callback: data=%s user_id=%s chat_id=%s", data, user_id, chat_id)
+
+    answered = False
+
+    async def _answer(text: str | None = None) -> None:
+        nonlocal answered
+        if answered:
             return
-        state = runtime.get_active(user_id, chat_id)
-        if state is None:
-            await query.answer("Нет активного сценария.")
+        answered = True
+        try:
+            await query.answer(text)
+        except Exception:
+            LOGGER.exception("Failed to answer wizard callback")
+
+    async def _send_response(text: str) -> None:
+        try:
+            await query.edit_message_text(text)
+        except telegram.error.TelegramError:
+            message = update.effective_message
+            if message is not None:
+                await message.reply_text(text)
+            elif chat_id:
+                await context.bot.send_message(chat_id=chat_id, text=text)
+
+    try:
+        if data not in {"wiz:cancel", "wiz:confirm"}:
+            await _answer()
             return
-        if state.wizard_id == "calendar_add":
-            title = state.data.get("title")
-            date_value = state.data.get("date")
-            if not isinstance(title, str) or not isinstance(date_value, str):
-                await query.answer()
-                await query.edit_message_text("Не удалось добавить событие.")
-                runtime.cancel(user_id, chat_id)
+        runtime = _get_wizard_runtime(context)
+        if data == "wiz:confirm":
+            if runtime is None or not runtime.has_active(user_id, chat_id):
+                await _send_response("Нет активного сценария.")
                 return
-            try:
-                event_date = date.fromisoformat(date_value)
-                event_dt = datetime.combine(event_date, dt_time.min, tzinfo=calendar_store.VIENNA_TZ)
-                await calendar_store.add_item(
-                    dt=event_dt,
-                    title=title,
-                    chat_id=chat_id,
-                    remind_at=None,
-                    user_id=user_id,
-                    reminders_enabled=False,
-                )
-            except Exception:
-                LOGGER.exception("Failed to add calendar event from wizard")
-                await query.answer()
-                await query.edit_message_text("Не удалось добавить событие.")
-                runtime.cancel(user_id, chat_id)
+            state = runtime.get_active(user_id, chat_id)
+            if state is None:
+                await _send_response("Нет активного сценария.")
                 return
+            if state.wizard_id == "calendar_add":
+                title = state.data.get("title")
+                date_value = state.data.get("date")
+                if not isinstance(title, str) or not isinstance(date_value, str):
+                    runtime.cancel(user_id, chat_id)
+                    await _send_response("Не удалось добавить событие.")
+                    LOGGER.info("wiz_callback: CONFIRM handled; wizard ended")
+                    return
+                try:
+                    event_date = date.fromisoformat(date_value)
+                    event_dt = datetime.combine(event_date, dt_time.min, tzinfo=calendar_store.VIENNA_TZ)
+                    await calendar_store.add_item(
+                        dt=event_dt,
+                        title=title,
+                        chat_id=chat_id,
+                        remind_at=None,
+                        user_id=user_id,
+                        reminders_enabled=False,
+                    )
+                except Exception:
+                    LOGGER.exception("Failed to add calendar event from wizard")
+                    runtime.cancel(user_id, chat_id)
+                    await _send_response("Не удалось добавить событие.")
+                    LOGGER.info("wiz_callback: CONFIRM handled; wizard ended")
+                    return
+                runtime.cancel(user_id, chat_id)
+                await _send_response("Событие добавлено.")
+                LOGGER.info("wiz_callback: CONFIRM handled; wizard ended")
+                return
+            state.data["confirmed"] = True
             runtime.cancel(user_id, chat_id)
-            await query.answer()
-            await query.edit_message_text("Событие добавлено.")
+            await _send_response("Подтверждено.")
+            LOGGER.info("wiz_callback: CONFIRM handled; wizard ended")
             return
-        state.data["confirmed"] = True
+        if runtime is None or not runtime.has_active(user_id, chat_id):
+            await _send_response("Нет активного сценария.")
+            return
         runtime.cancel(user_id, chat_id)
-        await query.answer()
-        await query.edit_message_text("Подтверждено.")
-        return
-    if runtime is None or not runtime.has_active(user_id, chat_id):
-        await query.answer()
-        await query.edit_message_text("Нет активного сценария.")
-        return
-    runtime.cancel(user_id, chat_id)
-    await query.answer()
-    await query.edit_message_text("Сценарий отменён.")
+        await _send_response("Сценарий отменён.")
+        LOGGER.info("wiz_callback: CANCEL handled; wizard ended")
+    finally:
+        await _answer()
 
 
 @_with_error_handling
