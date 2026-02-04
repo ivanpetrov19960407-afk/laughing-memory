@@ -71,6 +71,15 @@ def test_build_inline_keyboard() -> None:
     assert buttons[0][0].callback_data.startswith(actions.CALLBACK_PREFIX)
 
 
+def test_menu_actions_use_static_callbacks() -> None:
+    store = actions.ActionStore()
+    action_list = menu.build_menu_actions(facts_enabled=False, enable_menu=True)
+    keyboard = actions.build_inline_keyboard(action_list, store=store, user_id=1, chat_id=2)
+    assert keyboard is not None
+    callback_values = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+    assert all(value.startswith(actions.STATIC_CALLBACK_PREFIX) for value in callback_values)
+
+
 def test_menu_command_returns_actions(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -215,3 +224,37 @@ def test_menu_cancel_removes_reply_keyboard(monkeypatch) -> None:
     result = asyncio.run(handlers._dispatch_action(update, context, stored))
     assert calls["text"] == "Ок"
     assert result.text == "Ок"
+
+
+def test_static_callback_routes_menu_open(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_dispatch(update, context, op, payload, intent):
+        captured["op"] = op
+        captured["payload"] = payload
+        captured["intent"] = intent
+        return ok("Меню:", intent="menu.open", mode="local")
+
+    async def fake_send_result(update, context, result, reply_markup=None):
+        captured["result"] = result
+
+    async def fake_guard_access(update, context, bucket="default"):
+        return True
+
+    async def fake_answer():
+        return None
+
+    update = DummyUpdate()
+    update.callback_query = SimpleNamespace(data="cb:menu:open", answer=fake_answer)
+    context = DummyContext()
+
+    monkeypatch.setattr(handlers, "_dispatch_action_payload", fake_dispatch)
+    monkeypatch.setattr(handlers, "send_result", fake_send_result)
+    monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
+
+    asyncio.run(handlers.static_callback(update, context))
+    assert captured["op"] == "menu_open"
+    assert captured["payload"] == {}
+    assert captured["intent"] == "callback.menu.open"
+    result = captured["result"]
+    assert result.status == "ok"
