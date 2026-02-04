@@ -16,6 +16,7 @@ from app.core.dialog_memory import DialogMemory
 from app.core.wizard_manager import WizardManager
 from app.core.wizard_runtime import WizardRuntime
 from app.core.wizards import echo as wizard_echo
+from app.core.wizards import echo_confirm as wizard_echo_confirm
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.config import load_settings
@@ -105,6 +106,7 @@ def main() -> None:
     wizard_manager = WizardManager(timeout_seconds=900)
     wizard_runtime = WizardRuntime(wizard_manager)
     wizard_echo.register(wizard_runtime)
+    wizard_echo_confirm.register(wizard_runtime)
     application.bot_data["wizard_runtime"] = wizard_runtime
     reminder_scheduler = ReminderScheduler(
         application=application,
@@ -157,6 +159,7 @@ def main() -> None:
     application.add_handler(CommandHandler("task", handlers.task))
     application.add_handler(CommandHandler("reminders", handlers.reminders))
     application.add_handler(CommandHandler("wtest", handlers.wtest))
+    application.add_handler(CommandHandler("wtest2", handlers.wtest2))
     application.add_handler(CommandHandler("cancel_wizard", handlers.cancel_wizard))
     application.add_handler(CommandHandler("menu", handlers.menu_command))
     application.add_handler(CallbackQueryHandler(handlers.wiz_callback, pattern="^wiz:"))

@@ -43,6 +43,9 @@ class WizardRuntime:
     def cancel(self, user_id: int, chat_id: int) -> Optional[WizardState]:
         return self._manager.cancel(user_id, chat_id)
 
+    def get_active(self, user_id: int, chat_id: int) -> Optional[WizardState]:
+        return self._manager.get_active(user_id, chat_id)
+
     def _render(self, state: WizardState) -> WizardView:
         renderer = self._renderers.get(state.wizard_id, {}).get(state.step_id)
         if renderer is None:
