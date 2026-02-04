@@ -9,7 +9,7 @@ import pytest
 from app.bot import actions, handlers
 from app.core import calendar_store
 from app.core.orchestrator import Orchestrator
-from app.core.result import Action, OrchestratorResult, ok, ratelimited
+from app.core.result import Action, OrchestratorResult, ensure_valid, ok, ratelimited
 from app.core.tools_calendar import list_calendar_items, list_reminders
 from app.infra.rate_limiter import RateLimiter
 from app.infra.storage import TaskStorage
@@ -167,3 +167,38 @@ def test_attachment_validation() -> None:
         attachments=[{"type": "image", "name": "sample", "url": "https://example.com"}],
     )
     result.validate()
+
+
+def test_ensure_valid_none_result() -> None:
+    result = ensure_valid(None)
+    assert result.status == "error"
+    assert result.text is not None
+    assert result.sources is not None
+    assert result.actions is not None
+    assert result.attachments is not None
+    assert result.debug is not None
+
+
+def test_ensure_valid_dict_result_defaults() -> None:
+    result = ensure_valid({"status": "ok", "text": "x"})
+    assert isinstance(result, OrchestratorResult)
+    assert result.status == "ok"
+    assert result.text == "x"
+    assert result.intent == "unknown"
+    assert result.mode == "local"
+    assert result.sources == []
+    assert result.actions == []
+    assert result.attachments == []
+    assert result.debug == {}
+
+
+def test_ensure_valid_normalizes_none_actions() -> None:
+    result = OrchestratorResult(
+        text="Hello",
+        status="ok",
+        mode="local",
+        intent="test",
+        actions=None,
+    )
+    normalized = ensure_valid(result)
+    assert normalized.actions == []
