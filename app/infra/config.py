@@ -95,7 +95,7 @@ def load_settings() -> Settings:
         os.getenv("REMINDER_MAX_FUTURE_DAYS"),
         365,
     )
-    action_ttl_seconds = _parse_int_with_default(os.getenv("ACTION_TTL_SECONDS"), 600)
+    action_ttl_seconds = _parse_int_with_default(os.getenv("ACTION_TTL_SECONDS"), 900)
     action_max_size = _parse_int_with_default(os.getenv("ACTION_MAX_SIZE"), 2000)
     enable_wizards = _parse_optional_bool(os.getenv("ENABLE_WIZARDS"))
     if enable_wizards is None:
