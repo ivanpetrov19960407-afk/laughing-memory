@@ -9,9 +9,8 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-VIENNA_TZ = ZoneInfo("Europe/Vienna")
-
-
+BOT_TZ = ZoneInfo(os.getenv("BOT_TIMEZONE", "Europe/Moscow"))
+VIENNA_TZ = BOT_TZ  # backward compatible alias
 @dataclass(frozen=True)
 class CalendarItem:
     id: str
