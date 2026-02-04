@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import telegram
+
 from app.bot import actions, handlers, menu
 from app.core.result import Action, ok
 from app.infra.request_context import start_request
@@ -78,8 +80,12 @@ def test_menu_command_returns_actions(monkeypatch) -> None:
     async def fake_guard_access(update, context, bucket="default"):
         return True
 
+    async def fake_remove(update, context, text="Открываю меню…"):
+        return None
+
     monkeypatch.setattr(handlers, "send_result", fake_send_result)
     monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
+    monkeypatch.setattr(handlers, "_send_reply_keyboard_remove", fake_remove)
 
     update = DummyUpdate()
     context = DummyContext()
@@ -164,3 +170,48 @@ def test_send_result_deduplicates(monkeypatch) -> None:
     asyncio.run(handlers.send_result(update, context, orchestrator_result))
     asyncio.run(handlers.send_result(update, context, orchestrator_result))
     assert len(calls) == 1
+
+
+def test_menu_open_sends_inline_keyboard(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_send_text(update, context, text, reply_markup=None):
+        captured["reply_markup"] = reply_markup
+
+    update = DummyUpdate()
+    context = DummyContext()
+    context.application.bot_data["orchestrator"] = SimpleNamespace(is_facts_only=lambda user_id: False)
+    actions_list = menu.build_menu_actions(facts_enabled=False, enable_menu=True)
+    result = ok("Меню:", intent="menu.open", mode="local", actions=actions_list)
+
+    monkeypatch.setattr(handlers, "_send_text", fake_send_text)
+
+    asyncio.run(handlers.send_result(update, context, result))
+
+    reply_markup = captured["reply_markup"]
+    assert isinstance(reply_markup, telegram.InlineKeyboardMarkup)
+
+
+def test_menu_cancel_removes_reply_keyboard(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_remove(update, context, text="Открываю меню…"):
+        calls["text"] = text
+
+    update = DummyUpdate()
+    context = DummyContext()
+    context.application.bot_data["orchestrator"] = SimpleNamespace(is_facts_only=lambda user_id: False)
+    stored = actions.StoredAction(
+        user_id=1,
+        chat_id=10,
+        intent="menu.cancel",
+        payload={"op": "menu_cancel"},
+        created_at=0.0,
+        expires_at=100.0,
+    )
+
+    monkeypatch.setattr(handlers, "_send_reply_keyboard_remove", fake_remove)
+
+    result = asyncio.run(handlers._dispatch_action(update, context, stored))
+    assert calls["text"] == "Ок"
+    assert result.text == "Ок"
