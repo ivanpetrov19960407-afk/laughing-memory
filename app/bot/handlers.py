@@ -176,8 +176,12 @@ def _with_error_handling(
 
 
 async def _handle_exception(update: Update, context: ContextTypes.DEFAULT_TYPE, error: Exception) -> None:
+    process_error = getattr(context.application, "process_error", None)
+    if not callable(process_error):
+        LOGGER.exception("Unhandled exception", exc_info=error)
+        return
     try:
-        await context.application.process_error(update, error)
+        await process_error(update, error)
     except Exception:
         LOGGER.exception("Failed to forward exception to error handler")
 
@@ -1300,7 +1304,16 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data or ""
     set_input_text(context, data)
     user_id = update.effective_user.id if update.effective_user else 0
-    chat_id = update.effective_chat.id if update.effective_chat else 0
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        LOGGER.warning("Callback missing chat_id: user_id=%s data=%r", user_id, data)
+        result = refused(
+            "Не удалось обработать кнопку. Открой /menu.",
+            intent="callback.missing_chat",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
     action_id = parse_callback_token(data)
     LOGGER.info("Callback: user_id=%s data=%r action_id=%s", user_id, data, action_id)
     if action_id is None:
@@ -1337,6 +1350,14 @@ async def _dispatch_action(
 ) -> OrchestratorResult:
     orchestrator = _get_orchestrator(context)
     user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        LOGGER.warning("Dispatch action missing chat_id: user_id=%s intent=%s", user_id, stored.intent)
+        return refused(
+            "Не удалось обработать кнопку. Открой /menu.",
+            intent="callback.missing_chat",
+            mode="local",
+        )
     payload = stored.payload
     op = payload.get("op")
     if op == "menu_open":
