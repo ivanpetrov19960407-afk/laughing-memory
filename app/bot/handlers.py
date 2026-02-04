@@ -1586,8 +1586,23 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await send_result(update, context, result)
         return
     store = _get_action_store(context)
-    stored = store.get_action(user_id=user_id, chat_id=chat_id, action_id=action_id)
-    if stored is None:
+    lookup = store.lookup_action(user_id=user_id, chat_id=chat_id, action_id=action_id)
+    if lookup.action is None:
+        if lookup.status == "expired":
+            LOGGER.warning(
+                "Action expired: user_id=%s action_id=%s age=%.1fs ttl=%.1fs",
+                user_id,
+                action_id,
+                lookup.age_seconds or 0.0,
+                lookup.ttl_seconds or 0.0,
+            )
+        else:
+            LOGGER.warning(
+                "Action not found/expired: user_id=%s action_id=%s status=%s",
+                user_id,
+                action_id,
+                lookup.status,
+            )
         LOGGER.info("Callback dispatch: action_id=%s intent=%s", action_id, "-")
         result = refused(
             "Кнопка устарела, открой /menu заново.",
@@ -1597,6 +1612,7 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         await send_result(update, context, result)
         return
+    stored = lookup.action
     LOGGER.info("Callback dispatch: action_id=%s intent=%s", action_id, stored.intent)
     set_input_text(context, f"<callback:{stored.intent}>")
     result = await _dispatch_action(update, context, stored)
@@ -1726,7 +1742,7 @@ async def _dispatch_action_payload(
     if op_value == "reminders_list":
         limit = payload.get("limit", 5)
         limit_value = limit if isinstance(limit, int) else 5
-        return await _handle_reminders_list(context, limit=max(1, limit_value))
+        return await _handle_reminders_list(context, limit=max(1, limit_value), intent=intent)
     if op_value == "reminder_snooze":
         reminder_id = payload.get("id")
         minutes = payload.get("minutes", 10)
@@ -1851,9 +1867,10 @@ async def _handle_reminders_list(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     limit: int = 5,
+    intent: str = "menu.reminders",
 ) -> OrchestratorResult:
     now = datetime.now(tz=calendar_store.VIENNA_TZ)
-    return await list_reminders(now, limit=limit, intent="menu.reminders")
+    return await list_reminders(now, limit=limit, intent=intent)
 
 
 async def _handle_reminder_snooze(

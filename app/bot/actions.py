@@ -15,6 +15,7 @@ LOGGER = logging.getLogger(__name__)
 
 CALLBACK_PREFIX = "a:"
 STATIC_CALLBACK_PREFIX = "cb:"
+DEFAULT_TTL_SECONDS = 900
 
 
 @dataclass
@@ -27,11 +28,19 @@ class StoredAction:
     expires_at: float
 
 
+@dataclass
+class ActionLookup:
+    action: StoredAction | None
+    status: str
+    age_seconds: float | None
+    ttl_seconds: float | None
+
+
 class ActionStore:
     def __init__(
         self,
         *,
-        ttl_seconds: int = 600,
+        ttl_seconds: int = DEFAULT_TTL_SECONDS,
         max_items: int = 2000,
         max_payload_bytes: int = 2048,
     ) -> None:
@@ -65,6 +74,21 @@ class ActionStore:
             self._items.pop(action_id, None)
             return None
         return item
+
+    def lookup_action(self, *, user_id: int, chat_id: int, action_id: str) -> ActionLookup:
+        self._cleanup()
+        now = time.monotonic()
+        item = self._items.get(action_id)
+        if item is None:
+            return ActionLookup(action=None, status="missing", age_seconds=None, ttl_seconds=self._ttl_seconds)
+        if item.user_id != user_id or item.chat_id != chat_id:
+            return ActionLookup(action=None, status="mismatch", age_seconds=None, ttl_seconds=self._ttl_seconds)
+        age = now - item.created_at
+        ttl = item.expires_at - item.created_at
+        if item.expires_at < now:
+            self._items.pop(action_id, None)
+            return ActionLookup(action=None, status="expired", age_seconds=age, ttl_seconds=ttl)
+        return ActionLookup(action=item, status="ok", age_seconds=age, ttl_seconds=ttl)
 
     def _validate_payload(self, payload: dict[str, Any]) -> None:
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
