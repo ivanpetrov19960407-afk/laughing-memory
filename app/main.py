@@ -13,6 +13,9 @@ from app.bot import actions, handlers, wizard
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
 from app.core.reminders import ReminderScheduler
 from app.core.dialog_memory import DialogMemory
+from app.core.wizard_manager import WizardManager
+from app.core.wizard_runtime import WizardRuntime
+from app.core.wizards import echo as wizard_echo
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.config import load_settings
@@ -99,6 +102,10 @@ def main() -> None:
 
     warnings.filterwarnings("ignore", message="No JobQueue set up", category=PTBUserWarning)
     application = Application.builder().token(settings.bot_token).build()
+    wizard_manager = WizardManager(timeout_seconds=900)
+    wizard_runtime = WizardRuntime(wizard_manager)
+    wizard_echo.register(wizard_runtime)
+    application.bot_data["wizard_runtime"] = wizard_runtime
     reminder_scheduler = ReminderScheduler(
         application=application,
         max_future_days=settings.reminder_max_future_days,
@@ -149,6 +156,8 @@ def main() -> None:
     application.add_handler(CommandHandler("tasks", handlers.tasks))
     application.add_handler(CommandHandler("task", handlers.task))
     application.add_handler(CommandHandler("reminders", handlers.reminders))
+    application.add_handler(CommandHandler("wtest", handlers.wtest))
+    application.add_handler(CommandHandler("cancel_wizard", handlers.cancel_wizard))
     application.add_handler(CommandHandler("menu", handlers.menu_command))
     application.add_handler(CallbackQueryHandler(handlers.action_callback))
     application.add_handler(MessageHandler(filters.PHOTO, handlers.photo))

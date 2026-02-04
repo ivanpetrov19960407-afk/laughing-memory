@@ -32,6 +32,7 @@ from app.core.result import (
     ratelimited,
     refused,
 )
+from app.core.wizard_runtime import WizardRuntime
 from app.core.tools_calendar import list_calendar_items, list_reminders
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
@@ -90,6 +91,13 @@ def _get_wizard_manager(context: ContextTypes.DEFAULT_TYPE) -> wizard.WizardMana
     manager = context.application.bot_data.get("wizard_manager")
     if isinstance(manager, wizard.WizardManager):
         return manager
+    return None
+
+
+def _get_wizard_runtime(context: ContextTypes.DEFAULT_TYPE) -> WizardRuntime | None:
+    runtime = context.application.bot_data.get("wizard_runtime")
+    if isinstance(runtime, WizardRuntime):
+        return runtime
     return None
 
 
@@ -616,6 +624,43 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         mode="local",
     )
     await send_result(update, context, result)
+
+
+@_with_error_handling
+async def wtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    message = update.effective_message
+    if message is None:
+        return
+    runtime = _get_wizard_runtime(context)
+    if runtime is None:
+        await message.reply_text("Wizard runtime не настроен.")
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    view = runtime.start(user_id, chat_id, "echo", "ask")
+    await message.reply_text(view.text)
+
+
+@_with_error_handling
+async def cancel_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    message = update.effective_message
+    if message is None:
+        return
+    runtime = _get_wizard_runtime(context)
+    if runtime is None:
+        await message.reply_text("Wizard runtime не настроен.")
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    state = runtime.cancel(user_id, chat_id)
+    if state is None:
+        await message.reply_text("Активный wizard не найден.")
+        return
+    await message.reply_text("Wizard отменён.")
 
 
 @_with_error_handling
@@ -2211,6 +2256,13 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     prompt = message.strip()
     if not prompt:
         return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    runtime = _get_wizard_runtime(context)
+    if runtime is not None and runtime.has_active(user_id, chat_id):
+        view = runtime.handle_text(user_id, chat_id, prompt)
+        await update.message.reply_text(view.text)
+        return
     if menu.is_menu_label(prompt):
         result = refused(
             "Используй /menu и нажимай кнопки, или введи команду /calc ...",
@@ -2219,8 +2271,6 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         await send_result(update, context, result)
         return
-    user_id = update.effective_user.id if update.effective_user else 0
-    chat_id = update.effective_chat.id if update.effective_chat else 0
     if _wizards_enabled(context):
         manager = _get_wizard_manager(context)
         if manager is not None:
