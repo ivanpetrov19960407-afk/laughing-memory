@@ -593,17 +593,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         access_note = "\nДоступ ограничен whitelist пользователей."
 
     message = (
-        "Привет! Я бот-оркестратор задач.\n"
+        "Привет! Я бот-оркестратор задач и напоминаний.\n"
         f"Конфигурация: {title} (v{version}).\n"
-        "Команды: /help, /ping, /tasks, /task, /last, /ask, /search, /summary, /facts_on, /facts_off, /image, "
-        "/check, /rewrite, /explain, /calc, /calendar, /reminders, /reminder_off, /reminder_on, /context_on, "
-        "/context_off, /context_clear, /context_status.\n"
-        "Можно писать обычные сообщения — верну ответ LLM.\n"
-        "Суммаризация: summary: <текст> или /summary <текст>.\n"
-        "Режим фактов: /facts_on и /facts_off.\n"
-        "Отправьте фото, чтобы распознать текст.\n"
-        "Локальные команды: echo, upper, json_pretty, calc, calendar.\n"
-        "Служебные команды: /selfcheck, /health."
+        "Основной вход — /menu.\n"
+        "Можно писать обычные сообщения — подскажу дальше."
     )
     result = ok(
         message + access_note,
@@ -636,7 +629,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await _guard_access(update, context):
         return
     result = refused(
-        "Неизвестная команда. Используй /help или /menu.",
+        "Неизвестная команда. Открой /menu",
         intent="command.unknown",
         mode="local",
         actions=_build_menu_actions(context, user_id=update.effective_user.id if update.effective_user else 0),
@@ -646,55 +639,19 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 def _build_help_text(access_note: str) -> str:
     return (
-        "Доступные команды:\n"
-        "/start — приветствие и статус\n"
+        "Команды:\n"
+        "/start — приветствие\n"
         "/help — помощь\n"
-        "/menu — показать меню\n"
-        "/cancel — отменить активный сценарий\n"
-        "/ping — pong + версия/время\n"
+        "/menu — открыть меню\n"
+        "/ping — проверка связи\n"
+        "/reminders — ближайшие напоминания\n"
         "/tasks — список задач\n"
-        "/task <name> <payload> — выполнить задачу\n"
-        "/last — последняя задача\n"
-        "/ask <текст> — ответ LLM\n"
-        "/search <текст> — ответ LLM с поиском\n"
-        "/summary <текст> — краткое резюме (LLM)\n"
-        "/facts_on — включить режим фактов\n"
-        "/facts_off — выключить режим фактов\n"
-        "/context_on — включить контекст диалога\n"
-        "/context_off — выключить контекст диалога\n"
-        "/context_clear — очистить историю контекста\n"
-        "/context_status — статус контекста\n"
-        "/image <описание> — генерация изображения\n"
-        "/check <текст> — проверка текста (LLM)\n"
-        "/rewrite <mode> <текст> — переписать текст (LLM)\n"
-        "/explain <текст> — объяснить текст (LLM)\n"
-        "/calc <expr> — калькулятор\n"
-        "/calendar <cmd> — планер (add/list/today/week/del)\n"
-        "/reminders [N] — ближайшие напоминания\n"
-        "/reminder_off <id> — отключить напоминание\n"
-        "/reminder_on <event_id> — включить напоминание\n"
-        "/selfcheck — проверка конфигурации\n"
-        "/health — диагностика сервера\n"
-        "/allow <user_id> — добавить в whitelist (админ)\n"
-        "/deny <user_id> — удалить из whitelist (админ)\n"
-        "/allowlist — список whitelist (админ)\n\n"
-        "Примеры:\n"
-        "/task upper hello\n"
-        "/task json_pretty {\"a\": 1}\n"
-        "/ask Привет!\n"
-        "/check текст\n"
-        "/rewrite simple текст\n"
-        "/explain текст\n"
-        "/calc 2+2\n"
-        "/calendar add 2026-02-05 18:30 -m 10 Врач (или /calendar add 05.02.2026 18:30 -m 10 Врач)\n"
-        "/reminders 5\n"
-        "search Путин биография\n"
-        "summary: большой текст для сжатия\n"
-        "echo привет\n"
-        "upper привет\n"
-        "json_pretty {\"a\":1}\n"
-        "Или просто напишите сообщение без команды.\n"
-        "Отправьте фото, чтобы распознать текст."
+        "/task <name> <payload> — выполнить задачу\n\n"
+        "Как пользоваться:\n"
+        "1) Открой /menu.\n"
+        "2) Нажимай кнопки — они ведут к сценариям.\n"
+        "3) Можно писать текстом, если знаешь, что нужно.\n"
+        "4) Для задач используй /tasks и /task.\n"
         + access_note
     )
 
