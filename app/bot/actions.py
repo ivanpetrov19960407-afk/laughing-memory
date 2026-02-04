@@ -14,6 +14,7 @@ from app.core.result import Action
 LOGGER = logging.getLogger(__name__)
 
 CALLBACK_PREFIX = "a:"
+STATIC_CALLBACK_PREFIX = "cb:"
 
 
 @dataclass
@@ -97,6 +98,42 @@ def parse_callback_token(data: str | None) -> str | None:
     return data[len(CALLBACK_PREFIX) :]
 
 
+def build_static_callback_data(action: Action) -> str | None:
+    payload = action.payload or {}
+    op = payload.get("op")
+    if not isinstance(op, str):
+        return None
+    if op == "menu_open":
+        return f"{STATIC_CALLBACK_PREFIX}menu:open"
+    if op == "menu_cancel":
+        return f"{STATIC_CALLBACK_PREFIX}menu:cancel"
+    if op == "menu_section":
+        section = payload.get("section")
+        if isinstance(section, str) and section:
+            return f"{STATIC_CALLBACK_PREFIX}menu:section:{section}"
+        return None
+    wizard_ops = {
+        "wizard_confirm": "confirm",
+        "wizard_cancel": "cancel",
+        "wizard_edit": "edit",
+        "wizard_continue": "continue",
+        "wizard_restart": "restart",
+        "wizard_start": "start",
+    }
+    if op in wizard_ops:
+        suffix = wizard_ops[op]
+        callback = f"{STATIC_CALLBACK_PREFIX}wiz:{suffix}"
+        wizard_id = payload.get("wizard_id")
+        if suffix in {"start", "continue", "restart"}:
+            if not isinstance(wizard_id, str) or not wizard_id:
+                return None
+            return f"{callback}:{wizard_id}"
+        if isinstance(wizard_id, str) and wizard_id:
+            return f"{callback}:{wizard_id}"
+        return callback
+    return None
+
+
 def build_inline_keyboard(
     actions: list[Action],
     *,
@@ -110,14 +147,16 @@ def build_inline_keyboard(
     buttons: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     for index, action in enumerate(actions, start=1):
-        try:
-            action_id = store.store_action(action=action, user_id=user_id, chat_id=chat_id)
-        except ValueError:
-            LOGGER.warning("Action payload too large: action_id=%s", action.id)
-            continue
-        data = f"{CALLBACK_PREFIX}{action_id}"
+        data = build_static_callback_data(action)
+        if data is None:
+            try:
+                action_id = store.store_action(action=action, user_id=user_id, chat_id=chat_id)
+            except ValueError:
+                LOGGER.warning("Action payload too large: action_id=%s", action.id)
+                continue
+            data = f"{CALLBACK_PREFIX}{action_id}"
         if len(data.encode("utf-8")) > 64:
-            LOGGER.warning("Callback data too long for action_id=%s action_id=%s", action.id, action_id)
+            LOGGER.warning("Callback data too long for action_id=%s data=%s", action.id, data)
             continue
         row.append(InlineKeyboardButton(action.label, callback_data=data))
         if len(row) == columns or index == len(actions):

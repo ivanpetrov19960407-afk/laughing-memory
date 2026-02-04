@@ -497,6 +497,19 @@ async def _send_reply_keyboard_remove(
     await safe_send_text(update, context, text, reply_markup=telegram.ReplyKeyboardRemove())
 
 
+async def _safe_answer_callback(query: telegram.CallbackQuery, text: str | None = None) -> None:
+    try:
+        await query.answer(text)
+    except telegram.error.BadRequest as exc:
+        message = str(exc)
+        if "Query is too old" in message or "response timeout expired" in message or "query id is invalid" in message:
+            LOGGER.debug("Callback query expired: %s", message)
+            return
+        LOGGER.warning("Failed to answer callback query: %s", message)
+    except Exception:
+        LOGGER.exception("Failed to answer callback query")
+
+
 async def _send_attachments(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -562,11 +575,6 @@ async def send_result(
             actions=public_result.actions,
             debug=public_result.debug,
         )
-    if update.callback_query:
-        try:
-            await update.callback_query.answer()
-        except Exception:
-            LOGGER.exception("Failed to answer callback query")
     chat_id = update.effective_chat.id if update.effective_chat else 0
     request_context = get_request_context(context)
     request_id = request_context.request_id if request_context else None
@@ -1386,27 +1394,98 @@ async def _handle_menu_section(
     )
 
 
+def _parse_static_callback(data: str) -> tuple[str, dict[str, object], str] | None:
+    if not data.startswith("cb:"):
+        return None
+    parts = data.split(":")
+    if len(parts) < 3:
+        return None
+    _prefix, domain, action, *rest = parts
+    if domain == "menu":
+        if action == "open":
+            return "menu_open", {}, "callback.menu.open"
+        if action == "cancel":
+            return "menu_cancel", {}, "callback.menu.cancel"
+        if action == "section" and rest:
+            section = rest[0]
+            return "menu_section", {"section": section}, f"callback.menu.section.{section}"
+        return None
+    if domain == "wiz":
+        wizard_ops = {
+            "confirm": "wizard_confirm",
+            "cancel": "wizard_cancel",
+            "edit": "wizard_edit",
+            "continue": "wizard_continue",
+            "restart": "wizard_restart",
+            "start": "wizard_start",
+        }
+        op = wizard_ops.get(action)
+        if op is None:
+            return None
+        payload: dict[str, object] = {}
+        if action in {"continue", "restart", "start"}:
+            if not rest or not rest[0]:
+                return None
+            payload["wizard_id"] = rest[0]
+        elif rest and rest[0]:
+            payload["wizard_id"] = rest[0]
+        return op, payload, f"callback.wiz.{action}"
+    return None
+
+
+@_with_error_handling
+async def static_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await _safe_answer_callback(query)
+    if not await _guard_access(update, context, bucket="ui"):
+        return
+    data = query.data or ""
+    set_input_text(context, data)
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        LOGGER.warning("Callback missing chat_id: user_id=%s data=%r", user_id, data)
+        result = refused(
+            "Не удалось обработать кнопку. Открой /menu.",
+            intent="callback.missing_chat",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    parsed = _parse_static_callback(data)
+    if parsed is None:
+        result = refused(
+            "Действие недоступно.",
+            intent="callback.invalid",
+            mode="local",
+            debug={"reason": "invalid_static_callback"},
+        )
+        await send_result(update, context, result)
+        return
+    op, payload, intent = parsed
+    set_input_text(context, f"<callback:{intent}>")
+    result = await _dispatch_action_payload(
+        update,
+        context,
+        op=op,
+        payload=payload,
+        intent=intent,
+    )
+    await send_result(update, context, result)
+
+
 @_with_error_handling
 async def wiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None:
         return
+    await _safe_answer_callback(query)
     data = query.data or ""
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
     LOGGER.info("wiz_callback: data=%s user_id=%s chat_id=%s", data, user_id, chat_id)
-
-    answered = False
-
-    async def _answer(text: str | None = None) -> None:
-        nonlocal answered
-        if answered:
-            return
-        answered = True
-        try:
-            await query.answer(text)
-        except Exception:
-            LOGGER.exception("Failed to answer wizard callback")
 
     async def _send_response(text: str) -> None:
         try:
@@ -1420,7 +1499,6 @@ async def wiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     try:
         if data not in {"wiz:cancel", "wiz:confirm"}:
-            await _answer()
             return
         runtime = _get_wizard_runtime(context)
         if data == "wiz:confirm":
@@ -1472,7 +1550,7 @@ async def wiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _send_response("Сценарий отменён.")
         LOGGER.info("wiz_callback: CANCEL handled; wizard ended")
     finally:
-        await _answer()
+        return
 
 
 @_with_error_handling
@@ -1480,10 +1558,7 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     if query is None:
         return
-    try:
-        await query.answer()
-    except Exception:
-        LOGGER.exception("Failed to answer callback query")
+    await _safe_answer_callback(query)
     if not await _guard_access(update, context, bucket="ui"):
         return
     data = query.data or ""
@@ -1533,26 +1608,42 @@ async def _dispatch_action(
     context: ContextTypes.DEFAULT_TYPE,
     stored: StoredAction,
 ) -> OrchestratorResult:
+    return await _dispatch_action_payload(
+        update,
+        context,
+        op=stored.payload.get("op"),
+        payload=stored.payload,
+        intent=stored.intent,
+    )
+
+
+async def _dispatch_action_payload(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    op: object,
+    payload: dict[str, object],
+    intent: str,
+) -> OrchestratorResult:
     orchestrator = _get_orchestrator(context)
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else None
     if chat_id is None:
-        LOGGER.warning("Dispatch action missing chat_id: user_id=%s intent=%s", user_id, stored.intent)
+        LOGGER.warning("Dispatch action missing chat_id: user_id=%s intent=%s", user_id, intent)
         return refused(
             "Не удалось обработать кнопку. Открой /menu.",
             intent="callback.missing_chat",
             mode="local",
         )
-    payload = stored.payload
-    op = payload.get("op")
-    if op == "menu_open":
+    op_value = op if isinstance(op, str) else ""
+    if op_value == "menu_open":
         await _send_reply_keyboard_remove(update, context)
         user_id = update.effective_user.id if update.effective_user else 0
         return ok("Меню:", intent="menu.open", mode="local", actions=_build_menu_actions(context, user_id=user_id))
-    if op == "menu_cancel":
+    if op_value == "menu_cancel":
         await _send_reply_keyboard_remove(update, context, text="Ок")
         return ok("Ок", intent="menu.cancel", mode="local")
-    if op == "menu_section":
+    if op_value == "menu_section":
         section = payload.get("section")
         if not isinstance(section, str):
             return error(
@@ -1562,7 +1653,7 @@ async def _dispatch_action(
                 debug={"reason": "invalid_section"},
             )
         return await _handle_menu_section(context, section=section, user_id=user_id, chat_id=chat_id)
-    if op in {
+    if op_value in {
         "wizard_start",
         "wizard_continue",
         "wizard_restart",
@@ -1586,7 +1677,7 @@ async def _dispatch_action(
         result = await manager.handle_action(
             user_id=user_id,
             chat_id=chat_id,
-            op=str(op),
+            op=op_value,
             payload=payload,
         )
         if result is None:
@@ -1596,7 +1687,7 @@ async def _dispatch_action(
                 mode="local",
             )
         return result
-    if op == "run_command":
+    if op_value == "run_command":
         command = payload.get("command")
         args = payload.get("args", "")
         if not isinstance(command, str):
@@ -1612,7 +1703,7 @@ async def _dispatch_action(
             command=command,
             args=args if isinstance(args, str) else "",
         )
-    if op == "reminder_off":
+    if op_value == "reminder_off":
         reminder_id = payload.get("id")
         if not isinstance(reminder_id, str) or not reminder_id:
             return error(
@@ -1622,7 +1713,7 @@ async def _dispatch_action(
                 debug={"reason": "invalid_reminder_id"},
             )
         return await _handle_reminder_off(context, user_id=user_id, reminder_id=reminder_id)
-    if op == "reminder_on":
+    if op_value == "reminder_on":
         event_id = payload.get("event_id")
         if not isinstance(event_id, str) or not event_id:
             return error(
@@ -1632,11 +1723,11 @@ async def _dispatch_action(
                 debug={"reason": "invalid_event_id"},
             )
         return await _handle_reminder_on(context, user_id=user_id, event_id=event_id)
-    if op == "reminders_list":
+    if op_value == "reminders_list":
         limit = payload.get("limit", 5)
         limit_value = limit if isinstance(limit, int) else 5
         return await _handle_reminders_list(context, limit=max(1, limit_value))
-    if op == "reminder_snooze":
+    if op_value == "reminder_snooze":
         reminder_id = payload.get("id")
         minutes = payload.get("minutes", 10)
         if not isinstance(reminder_id, str) or not reminder_id:
@@ -1653,7 +1744,7 @@ async def _dispatch_action(
             reminder_id=reminder_id,
             minutes=minutes_value,
         )
-    if op == "reminder_delete":
+    if op_value == "reminder_delete":
         reminder_id = payload.get("id")
         if not isinstance(reminder_id, str) or not reminder_id:
             return error(
@@ -1663,7 +1754,7 @@ async def _dispatch_action(
                 debug={"reason": "invalid_reminder_id"},
             )
         return await _handle_reminder_delete(context, reminder_id=reminder_id)
-    if op == "reminder_add_offset":
+    if op_value == "reminder_add_offset":
         event_id = payload.get("event_id")
         minutes = payload.get("minutes", 10)
         if not isinstance(event_id, str) or not event_id:
@@ -1675,7 +1766,7 @@ async def _dispatch_action(
             )
         minutes_value = minutes if isinstance(minutes, int) else 10
         return await _handle_reminder_add_offset(context, event_id=event_id, minutes=minutes_value)
-    if stored.intent == "task.execute":
+    if intent == "task.execute":
         task_name = payload.get("name")
         task_payload = payload.get("payload")
         if not isinstance(task_name, str) or not isinstance(task_payload, str):
@@ -1693,7 +1784,7 @@ async def _dispatch_action(
         "Действие не поддерживается.",
         intent="ui.action",
         mode="local",
-        debug={"reason": "unknown_action", "action_id": stored.intent},
+        debug={"reason": "unknown_action", "action_id": intent},
     )
 
 

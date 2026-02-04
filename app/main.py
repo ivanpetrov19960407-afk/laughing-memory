@@ -165,6 +165,7 @@ def main() -> None:
     application.add_handler(CommandHandler("calendar_add", handlers.calendar_add_command))
     application.add_handler(CommandHandler("cancel_wizard", handlers.cancel_wizard))
     application.add_handler(CommandHandler("menu", handlers.menu_command))
+    application.add_handler(CallbackQueryHandler(handlers.static_callback, pattern="^cb:"))
     application.add_handler(CallbackQueryHandler(handlers.wiz_callback, pattern="^wiz:"))
     application.add_handler(CallbackQueryHandler(handlers.action_callback))
     application.add_handler(MessageHandler(filters.PHOTO, handlers.photo))
