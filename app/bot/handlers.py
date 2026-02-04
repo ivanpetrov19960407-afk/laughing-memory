@@ -576,10 +576,9 @@ async def send_result(
     )
     effective_reply_markup = inline_keyboard if inline_keyboard is not None else reply_markup
     LOGGER.info(
-        "UI send: status=%s actions=%s reply_markup=%s",
-        public_result.status,
-        len(public_result.actions),
-        effective_reply_markup is not None,
+        f"UI send: status={public_result.status} "
+        f"actions={len(public_result.actions)} "
+        f"reply_markup={effective_reply_markup is not None}",
     )
     await _send_text(update, context, public_result.text, reply_markup=effective_reply_markup)
     await _send_attachments(update, context, public_result.attachments)
@@ -1252,8 +1251,8 @@ async def _handle_menu_section(
             actions=[_menu_action()],
         )
     if section == "search":
-        return refused(
-            "Поиск скоро появится. Пока доступен обычный чат.",
+        return ok(
+            "Функция в разработке. Пока доступен обычный чат.",
             intent="menu.search",
             mode="local",
             actions=[_menu_action()],
