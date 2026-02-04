@@ -22,10 +22,18 @@ from app.core import calendar_store
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMemory, DialogMessage
 from app.core.orchestrator import Orchestrator
-from app.core.result import Action, OrchestratorResult, ensure_valid, error, ok, ratelimited, refused
+from app.core.result import (
+    Action,
+    OrchestratorResult,
+    ensure_safe_text_strict,
+    ensure_valid,
+    error,
+    ok,
+    ratelimited,
+    refused,
+)
 from app.core.tools_calendar import list_calendar_items, list_reminders
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
-from app.core.text_safety import has_pseudo_source_markers, sanitize_llm_text
 from app.infra.allowlist import AllowlistStore
 from app.infra.messaging import safe_edit_text, safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
@@ -443,37 +451,6 @@ def _log_orchestrator_result(
         )
 
 
-def _apply_pseudo_source_guard(
-    context: ContextTypes.DEFAULT_TYPE,
-    result: OrchestratorResult,
-) -> OrchestratorResult:
-    if not _strict_no_pseudo_sources(context):
-        return result
-    if result.mode != "llm" or result.sources:
-        return result
-    if not has_pseudo_source_markers(result.text):
-        return result
-    sanitized, meta = sanitize_llm_text(result.text, sources_requested=False)
-    if meta.get("failed") or not sanitized:
-        return refused(
-            "Не могу ответить без проверяемых источников. Переформулируй запрос или используй поиск (когда появится).",
-            intent="safety.no_sources",
-            mode=result.mode,
-            debug={"reason": "pseudo_sources_filtered"},
-        )
-    return OrchestratorResult(
-        text=sanitized,
-        status=result.status,
-        mode=result.mode,
-        intent=result.intent,
-        request_id=result.request_id,
-        sources=result.sources,
-        attachments=result.attachments,
-        actions=result.actions,
-        debug=result.debug,
-    )
-
-
 async def _send_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None) -> None:
     if update.callback_query and not isinstance(reply_markup, telegram.ReplyKeyboardRemove):
         await safe_edit_text(update, context, text, reply_markup=reply_markup)
@@ -536,7 +513,12 @@ async def send_result(
     reply_markup=None,
 ) -> None:
     public_result = ensure_valid(result)
-    public_result = ensure_valid(_apply_pseudo_source_guard(context, public_result))
+    user_id = update.effective_user.id if update.effective_user else 0
+    facts_enabled = False
+    orchestrator = context.application.bot_data.get("orchestrator")
+    if isinstance(orchestrator, Orchestrator) and user_id:
+        facts_enabled = orchestrator.is_facts_only(user_id)
+    public_result = ensure_valid(ensure_safe_text_strict(public_result, facts_enabled, allow_sources_in_text=False))
     if not public_result.text.strip():
         public_result = OrchestratorResult(
             text="Нет ответа.",
@@ -554,7 +536,6 @@ async def send_result(
             await update.callback_query.answer()
         except Exception:
             LOGGER.exception("Failed to answer callback query")
-    user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
     request_context = get_request_context(context)
     request_id = request_context.request_id if request_context else None
