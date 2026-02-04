@@ -87,14 +87,24 @@ async def safe_edit_text(
         return 0
     try:
         await callback_query.edit_message_text(chunks[0], reply_markup=reply_markup)
+
     except BadRequest as exc:
-        if "Message is too long" in str(exc):
+        msg = str(exc)
+        # Нормально для устаревших кнопок (callback уже протух).
+        if "Query is too old" in msg or "response timeout expired" in msg or "query id is invalid" in msg:
+            LOGGER.info("Telegram rejected callback edit (expired): %s", msg)
+        elif "Message is too long" in msg:
             LOGGER.warning("Telegram rejected edit as too long; falling back to reply_text.")
+        else:
+            LOGGER.exception("Failed to edit message text: %s", exc)
+        # Fallback: ответить реплаем (или, если реплай не выйдет — обычным send_message).
+        try:
             await _send_chunks(message, chunks, reply_markup=reply_markup)
-            add_response_size(context, len(payload))
-            return len(payload)
-        LOGGER.exception("Failed to edit message text: %s", exc)
-        await _send_chunks(message, chunks, reply_markup=reply_markup)
+        except Exception:
+            LOGGER.exception("Fallback reply_text failed; trying bot.send_message")
+            if update is not None and context is not None and getattr(update, "effective_chat", None):
+                chat_id = update.effective_chat.id
+                await safe_send_bot_text(context.bot, chat_id, payload)
         add_response_size(context, len(payload))
         return len(payload)
     if len(chunks) > 1:
