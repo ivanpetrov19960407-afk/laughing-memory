@@ -6,7 +6,7 @@ import logging
 import sys
 import time
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from functools import wraps
 from typing import Any
 
@@ -681,6 +681,24 @@ async def wtest2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
     view = runtime.start(user_id, chat_id, "echo_confirm", "ask")
+    state = runtime.get_active(user_id, chat_id)
+    await message.reply_text(view.text, reply_markup=_wizard_markup_for_step(state.step_id if state else None))
+
+
+@_with_error_handling
+async def calendar_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context, bucket="ui"):
+        return
+    message = update.effective_message
+    if message is None:
+        return
+    runtime = _get_wizard_runtime(context)
+    if runtime is None:
+        await message.reply_text("Wizard runtime не настроен.")
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    view = runtime.start(user_id, chat_id, "calendar_add", "ask")
     state = runtime.get_active(user_id, chat_id)
     await message.reply_text(view.text, reply_markup=_wizard_markup_for_step(state.step_id if state else None))
 
@@ -1384,8 +1402,39 @@ async def wiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await query.answer("Нет активного сценария.")
             return
         state = runtime.get_active(user_id, chat_id)
-        if state is not None:
-            state.data["confirmed"] = True
+        if state is None:
+            await query.answer("Нет активного сценария.")
+            return
+        if state.wizard_id == "calendar_add":
+            title = state.data.get("title")
+            date_value = state.data.get("date")
+            if not isinstance(title, str) or not isinstance(date_value, str):
+                await query.answer()
+                await query.edit_message_text("Не удалось добавить событие.")
+                runtime.cancel(user_id, chat_id)
+                return
+            try:
+                event_date = date.fromisoformat(date_value)
+                event_dt = datetime.combine(event_date, dt_time.min, tzinfo=calendar_store.VIENNA_TZ)
+                await calendar_store.add_item(
+                    dt=event_dt,
+                    title=title,
+                    chat_id=chat_id,
+                    remind_at=None,
+                    user_id=user_id,
+                    reminders_enabled=False,
+                )
+            except Exception:
+                LOGGER.exception("Failed to add calendar event from wizard")
+                await query.answer()
+                await query.edit_message_text("Не удалось добавить событие.")
+                runtime.cancel(user_id, chat_id)
+                return
+            runtime.cancel(user_id, chat_id)
+            await query.answer()
+            await query.edit_message_text("Событие добавлено.")
+            return
+        state.data["confirmed"] = True
         runtime.cancel(user_id, chat_id)
         await query.answer()
         await query.edit_message_text("Подтверждено.")
