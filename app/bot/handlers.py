@@ -1252,8 +1252,8 @@ async def _handle_menu_section(
             actions=[_menu_action()],
         )
     if section == "search":
-        return refused(
-            "Поиск скоро появится. Пока доступен обычный чат.",
+        return ok(
+            "Функция в разработке. Пока доступен обычный чат.",
             intent="menu.search",
             mode="local",
             actions=[_menu_action()],
