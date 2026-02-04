@@ -7,6 +7,9 @@ from zoneinfo import ZoneInfo
 
 from telegram.ext import Application, ContextTypes
 
+from app.bot.actions import ActionStore, build_inline_keyboard
+from app.core.result import Action
+
 from app.core import calendar_store
 
 LOGGER = logging.getLogger(__name__)
@@ -141,9 +144,20 @@ class ReminderScheduler:
         event = await self._store.get_event(reminder.event_id)
         event_dt = event.dt if event else reminder.trigger_at
         event_label = event_dt.astimezone(self._timezone).strftime("%Y-%m-%d %H:%M")
-        text = f"⏰ Напоминание: {reminder.text}\nКогда: {event_label} (Europe/Vienna)"
+        text = f"⏰ Напоминание: {reminder.text}\nКогда: {event_label} (Europe/Vilnius)"
+        actions = _build_reminder_actions(reminder)
+        action_store = self._application.bot_data.get("action_store")
+        reply_markup = None
+        if isinstance(action_store, ActionStore):
+            reply_markup = build_inline_keyboard(
+                actions,
+                store=action_store,
+                user_id=reminder.user_id,
+                chat_id=reminder.chat_id,
+                columns=2,
+            )
         try:
-            await self._application.bot.send_message(chat_id=reminder.chat_id, text=text)
+            await self._application.bot.send_message(chat_id=reminder.chat_id, text=text, reply_markup=reply_markup)
         except Exception:
             LOGGER.exception(
                 "Reminder send failed: reminder_id=%s event_id=%s chat_id=%s trigger_at=%s",
@@ -153,7 +167,15 @@ class ReminderScheduler:
                 reminder.trigger_at.isoformat(),
             )
             return
-        await self._store.mark_reminder_sent(reminder.id, datetime.now(tz=self._timezone), missed=False)
+        fired_at = datetime.now(tz=self._timezone)
+        next_reminder = await self._store.mark_reminder_sent(reminder.id, fired_at, missed=False)
+        if next_reminder is not None:
+            await self.schedule_reminder(next_reminder)
+            LOGGER.info(
+                "Reminder recurrence scheduled: reminder_id=%s next_trigger_at=%s",
+                reminder.id,
+                next_reminder.trigger_at.isoformat(),
+            )
         LOGGER.info(
             "Reminder sent: reminder_id=%s event_id=%s chat_id=%s trigger_at=%s",
             reminder.id,
@@ -165,6 +187,45 @@ class ReminderScheduler:
     @staticmethod
     def _job_name(reminder_id: str) -> str:
         return f"reminder:{reminder_id}"
+
+
+def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Action]:
+    base_trigger = reminder.trigger_at.isoformat()
+    snooze_options = [
+        (10, "⏸ Отложить 10 мин"),
+        (30, "⏸ Отложить 30 мин"),
+        (120, "⏸ Отложить 2 часа"),
+        (1440, "⏸ Отложить 1 день"),
+    ]
+    actions: list[Action] = []
+    for minutes, label in snooze_options:
+        actions.append(
+            Action(
+                id=f"reminder_snooze:{reminder.id}:{minutes}",
+                label=label,
+                payload={
+                    "op": "reminder_snooze",
+                    "id": reminder.id,
+                    "minutes": minutes,
+                    "base_trigger_at": base_trigger,
+                },
+            )
+        )
+    actions.append(
+        Action(
+            id=f"reminder_reschedule:{reminder.id}",
+            label="✏ Перенести",
+            payload={"op": "reminder_reschedule", "id": reminder.id, "base_trigger_at": base_trigger},
+        )
+    )
+    actions.append(
+        Action(
+            id=f"reminder_delete:{reminder.id}",
+            label="🗑 Удалить",
+            payload={"op": "reminder_delete", "id": reminder.id},
+        )
+    )
+    return actions
 
 
 def get_default_offset_minutes() -> int:

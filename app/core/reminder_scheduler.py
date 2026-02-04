@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from telegram.ext import Application, ContextTypes
 
 from app.core import calendar_store
+from app.bot.actions import ActionStore, build_inline_keyboard
+from app.core.result import Action
 from app.infra.messaging import safe_send_bot_text
 
 LOGGER = logging.getLogger(__name__)
@@ -57,9 +59,20 @@ async def _process_due_reminders(application: Application) -> None:
         event = await calendar_store.get_event(item.event_id)
         event_dt = event.dt if event else item.trigger_at
         message_time = event_dt.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
-        text = f"⏰ Напоминание: {item.text}\nКогда: {message_time} (Europe/Vienna)"
+        text = f"⏰ Напоминание: {item.text}\nКогда: {message_time} (Europe/Vilnius)"
+        actions = _build_reminder_actions(item)
+        action_store = application.bot_data.get("action_store")
+        reply_markup = None
+        if isinstance(action_store, ActionStore):
+            reply_markup = build_inline_keyboard(
+                actions,
+                store=action_store,
+                user_id=item.user_id,
+                chat_id=item.chat_id,
+                columns=2,
+            )
         try:
-            await safe_send_bot_text(application.bot, item.chat_id, text)
+            await safe_send_bot_text(application.bot, item.chat_id, text, reply_markup=reply_markup)
         except Exception:
             LOGGER.exception(
                 "Reminder send failed: reminder_id=%s user_id=%s chat_id=%s trigger_at=%s",
@@ -116,3 +129,42 @@ async def post_shutdown(application: Application) -> None:
         await task
     except asyncio.CancelledError:
         LOGGER.info("Reminder scheduler task shutdown complete")
+
+
+def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Action]:
+    base_trigger = reminder.trigger_at.isoformat()
+    snooze_options = [
+        (10, "⏸ Отложить 10 мин"),
+        (30, "⏸ Отложить 30 мин"),
+        (120, "⏸ Отложить 2 часа"),
+        (1440, "⏸ Отложить 1 день"),
+    ]
+    actions: list[Action] = []
+    for minutes, label in snooze_options:
+        actions.append(
+            Action(
+                id=f"reminder_snooze:{reminder.id}:{minutes}",
+                label=label,
+                payload={
+                    "op": "reminder_snooze",
+                    "id": reminder.id,
+                    "minutes": minutes,
+                    "base_trigger_at": base_trigger,
+                },
+            )
+        )
+    actions.append(
+        Action(
+            id=f"reminder_reschedule:{reminder.id}",
+            label="✏ Перенести",
+            payload={"op": "reminder_reschedule", "id": reminder.id, "base_trigger_at": base_trigger},
+        )
+    )
+    actions.append(
+        Action(
+            id=f"reminder_delete:{reminder.id}",
+            label="🗑 Удалить",
+            payload={"op": "reminder_delete", "id": reminder.id},
+        )
+    )
+    return actions

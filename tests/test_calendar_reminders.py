@@ -147,6 +147,82 @@ def test_del_cancels_reminder(calendar_path) -> None:
     assert all(rem.get("reminder_id") != reminder_id for rem in store.get("reminders") or [])
 
 
+def test_snooze_shifts_trigger(calendar_path) -> None:
+    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.VIENNA_TZ)
+    item = asyncio_run(
+        calendar_store.add_item(
+            dt=now + timedelta(hours=2),
+            title="Standup",
+            chat_id=1,
+            remind_at=now + timedelta(minutes=15),
+            user_id=1,
+        )
+    )
+    reminder_id = item["reminder"]["reminder_id"]
+    reminder = asyncio_run(calendar_store.get_reminder(reminder_id))
+    updated = asyncio_run(
+        calendar_store.apply_snooze(reminder_id, minutes=30, base_trigger_at=reminder.trigger_at)
+    )
+    assert updated is not None
+    assert updated.trigger_at == reminder.trigger_at + timedelta(minutes=30)
+
+
+def test_recurrence_creates_next_trigger(calendar_path) -> None:
+    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.VIENNA_TZ)
+    store = {
+        "events": [
+            {
+                "event_id": "event1",
+                "dt_start": now.isoformat(),
+                "text": "Daily",
+                "created_at": now.isoformat(),
+                "chat_id": 1,
+                "user_id": 1,
+            }
+        ],
+        "reminders": [
+            {
+                "reminder_id": "rem1",
+                "event_id": "event1",
+                "user_id": 1,
+                "chat_id": 1,
+                "trigger_at": now.isoformat(),
+                "text": "Daily",
+                "enabled": True,
+                "sent_at": None,
+                "status": "active",
+                "recurrence": {"freq": "daily"},
+                "last_triggered_at": None,
+            }
+        ],
+        "updated_at": now.isoformat(),
+    }
+    _write_store(store)
+    next_item = asyncio_run(calendar_store.mark_reminder_sent("rem1", now, missed=False))
+    assert next_item is not None
+    expected = now + timedelta(days=1)
+    assert next_item.trigger_at == expected
+
+
+def test_disable_reminder_updates_status(calendar_path) -> None:
+    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.VIENNA_TZ)
+    item = asyncio_run(
+        calendar_store.add_item(
+            dt=now + timedelta(hours=1),
+            title="Cleanup",
+            chat_id=1,
+            remind_at=now + timedelta(minutes=20),
+            user_id=1,
+        )
+    )
+    reminder_id = item["reminder"]["reminder_id"]
+    updated = asyncio_run(calendar_store.disable_reminder(reminder_id))
+    assert updated is True
+    reminder = asyncio_run(calendar_store.get_reminder(reminder_id))
+    assert reminder is not None
+    assert reminder.status == "disabled"
+
+
 def asyncio_run(coro):
     import asyncio
 

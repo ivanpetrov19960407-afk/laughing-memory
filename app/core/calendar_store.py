@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import json
 import os
 import uuid
@@ -9,7 +10,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-BOT_TZ = ZoneInfo(os.getenv("BOT_TIMEZONE", "Europe/Moscow"))
+BOT_TZ = ZoneInfo(os.getenv("BOT_TIMEZONE", "Europe/Vilnius"))
 VIENNA_TZ = BOT_TZ  # backward compatible alias
 @dataclass(frozen=True)
 class CalendarItem:
@@ -32,6 +33,9 @@ class ReminderItem:
     text: str
     enabled: bool
     sent_at: str | None
+    status: str
+    recurrence: dict[str, object] | None
+    last_triggered_at: datetime | None
 
 
 def _calendar_path() -> Path:
@@ -104,10 +108,14 @@ def _normalize_store(store: dict[str, object]) -> dict[str, object]:
                 "text": title,
                 "enabled": not bool(item.get("remind_sent", False)),
                 "sent_at": item.get("sent_at"),
+                "status": "active" if not bool(item.get("remind_sent", False)) else "done",
+                "recurrence": None,
+                "last_triggered_at": item.get("sent_at"),
             }
         )
     timestamp = store.get("updated_at") or datetime.now(tz=VIENNA_TZ).isoformat()
     return {"events": events, "reminders": reminders, "updated_at": timestamp}
+
 
 def _parse_datetime(value: str | None, fallback: datetime) -> datetime:
     if not value:
@@ -119,6 +127,61 @@ def _parse_datetime(value: str | None, fallback: datetime) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=VIENNA_TZ)
     return parsed.astimezone(VIENNA_TZ)
+
+
+def _normalize_status(item: dict[str, object]) -> str:
+    status = item.get("status")
+    if isinstance(status, str) and status in {"active", "disabled", "done"}:
+        return status
+    enabled = bool(item.get("enabled", True))
+    return "active" if enabled else "disabled"
+
+
+def _parse_recurrence(value: object) -> dict[str, object] | None:
+    if isinstance(value, dict) and value.get("freq"):
+        return dict(value)
+    return None
+
+
+def _parse_triggered_at(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=VIENNA_TZ)
+    return parsed.astimezone(VIENNA_TZ)
+
+
+def _build_reminder_item(
+    *,
+    reminder_id: str,
+    event_id: str,
+    user_id: int,
+    chat_id: int,
+    trigger_at: datetime,
+    text: str,
+    enabled: bool,
+    sent_at: str | None,
+    status: str,
+    recurrence: dict[str, object] | None,
+    last_triggered_at: datetime | None,
+) -> ReminderItem:
+    return ReminderItem(
+        id=reminder_id,
+        event_id=event_id,
+        user_id=user_id,
+        chat_id=chat_id,
+        trigger_at=trigger_at,
+        text=text,
+        enabled=enabled,
+        sent_at=sent_at,
+        status=status,
+        recurrence=recurrence,
+        last_triggered_at=last_triggered_at,
+    )
 
 
 async def add_item(
@@ -158,6 +221,9 @@ async def add_item(
             "text": title,
             "enabled": reminders_enabled,
             "sent_at": None,
+            "status": "active" if reminders_enabled else "disabled",
+            "recurrence": None,
+            "last_triggered_at": None,
         }
         events.append(event)
         reminders.append(reminder)
@@ -255,12 +321,15 @@ async def list_due_reminders(now: datetime, limit: int | None = None) -> list[Re
             or not isinstance(text, str)
         ):
             continue
+        status = _normalize_status(item)
         remind_at = _parse_datetime(trigger_at, now)
-        if not enabled or remind_at > now:
+        if not enabled or status != "active" or remind_at > now:
             continue
+        recurrence = _parse_recurrence(item.get("recurrence"))
+        last_triggered_at = _parse_triggered_at(item.get("last_triggered_at"))
         result.append(
-            ReminderItem(
-                id=reminder_id,
+            _build_reminder_item(
+                reminder_id=reminder_id,
                 event_id=event_id,
                 user_id=int(item.get("user_id")) if isinstance(item.get("user_id"), int) else 0,
                 chat_id=int(item.get("chat_id")) if isinstance(item.get("chat_id"), int) else 0,
@@ -268,6 +337,9 @@ async def list_due_reminders(now: datetime, limit: int | None = None) -> list[Re
                 text=text,
                 enabled=enabled,
                 sent_at=item.get("sent_at") if isinstance(item.get("sent_at"), str) else None,
+                status=status,
+                recurrence=recurrence,
+                last_triggered_at=last_triggered_at,
             )
         )
     result.sort(key=lambda item: item.trigger_at)
@@ -276,26 +348,60 @@ async def list_due_reminders(now: datetime, limit: int | None = None) -> list[Re
     return result
 
 
-async def mark_reminder_sent(reminder_id: str, sent_at: datetime, missed: bool = False) -> bool:
+async def mark_reminder_sent(reminder_id: str, sent_at: datetime, missed: bool = False) -> ReminderItem | None:
     async with _STORE_LOCK:
         store = load_store()
         reminders = list(store.get("reminders") or [])
-        updated = False
+        updated_item: dict[str, object] | None = None
+        next_trigger: datetime | None = None
         for item in reminders:
             if isinstance(item, dict) and item.get("reminder_id") == reminder_id:
-                item["enabled"] = False
+                trigger_value = item.get("trigger_at")
+                if not isinstance(trigger_value, str):
+                    break
+                current_trigger = _parse_datetime(trigger_value, sent_at)
+                recurrence = _parse_recurrence(item.get("recurrence"))
+                if recurrence:
+                    next_trigger = _next_recurrence_trigger(current_trigger, recurrence)
+                if recurrence and next_trigger is not None:
+                    item["trigger_at"] = next_trigger.astimezone(VIENNA_TZ).isoformat()
+                    item["enabled"] = True
+                    item["status"] = "active"
+                else:
+                    item["enabled"] = False
+                    item["status"] = "done"
                 if not missed:
                     item["sent_at"] = sent_at.astimezone(VIENNA_TZ).isoformat()
                 elif "sent_at" not in item:
                     item["sent_at"] = sent_at.astimezone(VIENNA_TZ).isoformat()
-                updated = True
+                item["last_triggered_at"] = sent_at.astimezone(VIENNA_TZ).isoformat()
+                updated_item = item
                 break
-        if not updated:
-            return False
+        if updated_item is None:
+            return None
         store["reminders"] = reminders
         store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
         save_store_atomic(store)
-        return True
+    event_id = updated_item.get("event_id")
+    text = updated_item.get("text")
+    trigger_at_value = updated_item.get("trigger_at")
+    if not isinstance(event_id, str) or not isinstance(text, str) or not isinstance(trigger_at_value, str):
+        return None
+    if updated_item.get("enabled") and updated_item.get("status") == "active" and next_trigger is not None:
+        return _build_reminder_item(
+            reminder_id=reminder_id,
+            event_id=event_id,
+            user_id=int(updated_item.get("user_id")) if isinstance(updated_item.get("user_id"), int) else 0,
+            chat_id=int(updated_item.get("chat_id")) if isinstance(updated_item.get("chat_id"), int) else 0,
+            trigger_at=_parse_datetime(trigger_at_value, sent_at),
+            text=text,
+            enabled=True,
+            sent_at=updated_item.get("sent_at") if isinstance(updated_item.get("sent_at"), str) else None,
+            status="active",
+            recurrence=_parse_recurrence(updated_item.get("recurrence")),
+            last_triggered_at=_parse_triggered_at(updated_item.get("last_triggered_at")),
+        )
+    return None
 
 
 async def list_reminders(
@@ -322,14 +428,17 @@ async def list_reminders(
             or not isinstance(text, str)
         ):
             continue
-        if not include_disabled and not enabled:
+        status = _normalize_status(item)
+        if not include_disabled and (not enabled or status != "active"):
             continue
         trigger_dt = _parse_datetime(trigger_at, now)
         if trigger_dt < now:
             continue
+        recurrence = _parse_recurrence(item.get("recurrence"))
+        last_triggered_at = _parse_triggered_at(item.get("last_triggered_at"))
         result.append(
-            ReminderItem(
-                id=reminder_id,
+            _build_reminder_item(
+                reminder_id=reminder_id,
                 event_id=event_id,
                 user_id=int(item.get("user_id")) if isinstance(item.get("user_id"), int) else 0,
                 chat_id=int(item.get("chat_id")) if isinstance(item.get("chat_id"), int) else 0,
@@ -337,6 +446,9 @@ async def list_reminders(
                 text=text,
                 enabled=enabled,
                 sent_at=item.get("sent_at") if isinstance(item.get("sent_at"), str) else None,
+                status=status,
+                recurrence=recurrence,
+                last_triggered_at=last_triggered_at,
             )
         )
     result.sort(key=lambda item: item.trigger_at)
@@ -358,8 +470,11 @@ async def get_reminder(reminder_id: str) -> ReminderItem | None:
         if not isinstance(trigger_at, str) or not isinstance(text, str) or not isinstance(event_id, str):
             return None
         trigger_dt = _parse_datetime(trigger_at, datetime.now(tz=VIENNA_TZ))
-        return ReminderItem(
-            id=reminder_id,
+        status = _normalize_status(item)
+        recurrence = _parse_recurrence(item.get("recurrence"))
+        last_triggered_at = _parse_triggered_at(item.get("last_triggered_at"))
+        return _build_reminder_item(
+            reminder_id=reminder_id,
             event_id=event_id,
             user_id=int(item.get("user_id")) if isinstance(item.get("user_id"), int) else 0,
             chat_id=int(item.get("chat_id")) if isinstance(item.get("chat_id"), int) else 0,
@@ -367,6 +482,9 @@ async def get_reminder(reminder_id: str) -> ReminderItem | None:
             text=text,
             enabled=bool(item.get("enabled", True)),
             sent_at=item.get("sent_at") if isinstance(item.get("sent_at"), str) else None,
+            status=status,
+            recurrence=recurrence,
+            last_triggered_at=last_triggered_at,
         )
     return None
 
@@ -411,6 +529,7 @@ async def disable_reminder(reminder_id: str) -> bool:
         for item in reminders:
             if isinstance(item, dict) and item.get("reminder_id") == reminder_id:
                 item["enabled"] = False
+                item["status"] = "disabled"
                 updated = True
                 break
         if not updated:
@@ -429,6 +548,7 @@ async def enable_reminder(reminder_id: str) -> bool:
         for item in reminders:
             if isinstance(item, dict) and item.get("reminder_id") == reminder_id:
                 item["enabled"] = True
+                item["status"] = "active"
                 updated = True
                 break
         if not updated:
@@ -437,6 +557,63 @@ async def enable_reminder(reminder_id: str) -> bool:
         store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
         save_store_atomic(store)
         return True
+
+
+async def apply_snooze(
+    reminder_id: str,
+    *,
+    minutes: int,
+    base_trigger_at: datetime | None = None,
+) -> ReminderItem | None:
+    offset = max(1, minutes)
+    async with _STORE_LOCK:
+        store = load_store()
+        reminders = list(store.get("reminders") or [])
+        updated_item: dict[str, object] | None = None
+        new_trigger: datetime | None = None
+        for item in reminders:
+            if not isinstance(item, dict) or item.get("reminder_id") != reminder_id:
+                continue
+            status = _normalize_status(item)
+            if status != "active":
+                return None
+            trigger_value = item.get("trigger_at")
+            if not isinstance(trigger_value, str):
+                return None
+            current_trigger = _parse_datetime(trigger_value, datetime.now(tz=VIENNA_TZ))
+            base = base_trigger_at or current_trigger
+            desired = base + timedelta(minutes=offset)
+            if current_trigger >= desired:
+                new_trigger = current_trigger
+            else:
+                new_trigger = desired
+                item["trigger_at"] = new_trigger.astimezone(VIENNA_TZ).isoformat()
+            item["enabled"] = True
+            item["status"] = "active"
+            updated_item = item
+            break
+        if updated_item is None or new_trigger is None:
+            return None
+        store["reminders"] = reminders
+        store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
+        save_store_atomic(store)
+    event_id = updated_item.get("event_id")
+    text = updated_item.get("text")
+    if not isinstance(event_id, str) or not isinstance(text, str):
+        return None
+    return _build_reminder_item(
+        reminder_id=reminder_id,
+        event_id=event_id,
+        user_id=int(updated_item.get("user_id")) if isinstance(updated_item.get("user_id"), int) else 0,
+        chat_id=int(updated_item.get("chat_id")) if isinstance(updated_item.get("chat_id"), int) else 0,
+        trigger_at=new_trigger.astimezone(VIENNA_TZ),
+        text=text,
+        enabled=True,
+        sent_at=updated_item.get("sent_at") if isinstance(updated_item.get("sent_at"), str) else None,
+        status=_normalize_status(updated_item),
+        recurrence=_parse_recurrence(updated_item.get("recurrence")),
+        last_triggered_at=_parse_triggered_at(updated_item.get("last_triggered_at")),
+    )
 
 
 async def update_reminder_trigger(
@@ -452,6 +629,7 @@ async def update_reminder_trigger(
             if isinstance(item, dict) and item.get("reminder_id") == reminder_id:
                 item["trigger_at"] = trigger_at.astimezone(VIENNA_TZ).isoformat()
                 item["enabled"] = enabled
+                item["status"] = "active" if enabled else "disabled"
                 updated_item = item
                 break
         if updated_item is None:
@@ -463,8 +641,8 @@ async def update_reminder_trigger(
     text = updated_item.get("text")
     if not isinstance(event_id, str) or not isinstance(text, str):
         return None
-    return ReminderItem(
-        id=reminder_id,
+    return _build_reminder_item(
+        reminder_id=reminder_id,
         event_id=event_id,
         user_id=int(updated_item.get("user_id")) if isinstance(updated_item.get("user_id"), int) else 0,
         chat_id=int(updated_item.get("chat_id")) if isinstance(updated_item.get("chat_id"), int) else 0,
@@ -472,6 +650,9 @@ async def update_reminder_trigger(
         text=text,
         enabled=enabled,
         sent_at=updated_item.get("sent_at") if isinstance(updated_item.get("sent_at"), str) else None,
+        status=_normalize_status(updated_item),
+        recurrence=_parse_recurrence(updated_item.get("recurrence")),
+        last_triggered_at=_parse_triggered_at(updated_item.get("last_triggered_at")),
     )
 
 
@@ -500,11 +681,12 @@ async def ensure_reminder_for_event(
             if isinstance(item, dict) and item.get("event_id") == event.id:
                 item["enabled"] = enabled
                 item["trigger_at"] = trigger_at.astimezone(VIENNA_TZ).isoformat()
+                item["status"] = "active" if enabled else "disabled"
                 store["reminders"] = reminders
                 store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
                 save_store_atomic(store)
-                return ReminderItem(
-                    id=str(item.get("reminder_id")),
+                return _build_reminder_item(
+                    reminder_id=str(item.get("reminder_id")),
                     event_id=event.id,
                     user_id=event.user_id,
                     chat_id=event.chat_id,
@@ -512,6 +694,9 @@ async def ensure_reminder_for_event(
                     text=event.title,
                     enabled=enabled,
                     sent_at=item.get("sent_at") if isinstance(item.get("sent_at"), str) else None,
+                    status=_normalize_status(item),
+                    recurrence=_parse_recurrence(item.get("recurrence")),
+                    last_triggered_at=_parse_triggered_at(item.get("last_triggered_at")),
                 )
         reminder_id = _generate_id(
             {
@@ -529,13 +714,16 @@ async def ensure_reminder_for_event(
             "text": event.title,
             "enabled": enabled,
             "sent_at": None,
+            "status": "active" if enabled else "disabled",
+            "recurrence": None,
+            "last_triggered_at": None,
         }
         reminders.append(reminder)
         store["reminders"] = reminders
         store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
         save_store_atomic(store)
-        return ReminderItem(
-            id=reminder_id,
+        return _build_reminder_item(
+            reminder_id=reminder_id,
             event_id=event.id,
             user_id=event.user_id,
             chat_id=event.chat_id,
@@ -543,6 +731,9 @@ async def ensure_reminder_for_event(
             text=event.title,
             enabled=enabled,
             sent_at=None,
+            status="active" if enabled else "disabled",
+            recurrence=None,
+            last_triggered_at=None,
         )
 
 
@@ -556,6 +747,25 @@ def parse_local_datetime(value: str) -> datetime:
         except ValueError:
             continue
     raise ValueError("Формат: YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM")
+
+
+def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
+    raw = value.strip()
+    lowered = raw.lower()
+    if lowered.startswith(("сегодня", "today", "завтра", "tomorrow")):
+        parts = raw.split(maxsplit=1)
+        if len(parts) < 2:
+            raise ValueError("Добавь время, например: сегодня 18:30")
+        time_part = parts[1].strip()
+        try:
+            parsed_time = datetime.strptime(time_part, "%H:%M").time()
+        except ValueError as exc:
+            raise ValueError("Формат времени: HH:MM") from exc
+        base = (now or datetime.now(tz=VIENNA_TZ)).date()
+        if lowered.startswith(("завтра", "tomorrow")):
+            base = base + timedelta(days=1)
+        return _combine_local(base, parsed_time)
+    return parse_local_datetime(raw)
 
 
 def parse_date(value: str) -> date:
@@ -575,6 +785,58 @@ def week_bounds(today: date) -> tuple[datetime, datetime]:
     start = datetime.combine(today, time.min).replace(tzinfo=VIENNA_TZ)
     end = (start + timedelta(days=7)) - timedelta(seconds=1)
     return start, end
+
+
+def _combine_local(target_date: date, target_time: time) -> datetime:
+    return datetime.combine(target_date, target_time).replace(tzinfo=VIENNA_TZ)
+
+
+def _next_recurrence_trigger(trigger_at: datetime, recurrence: dict[str, object]) -> datetime | None:
+    freq = recurrence.get("freq")
+    local_trigger = trigger_at.astimezone(VIENNA_TZ)
+    target_time = local_trigger.time()
+    if freq == "daily":
+        return _combine_local(local_trigger.date() + timedelta(days=1), target_time)
+    if freq == "weekdays":
+        weekdays = {0, 1, 2, 3, 4}
+    elif freq == "weekly":
+        byweekday = recurrence.get("byweekday")
+        if isinstance(byweekday, list):
+            weekdays = {day for day in byweekday if isinstance(day, int)}
+        else:
+            weekdays = set()
+        if not weekdays:
+            weekdays = {local_trigger.weekday()}
+    else:
+        weekdays = set()
+    if freq in {"weekly", "weekdays"}:
+        current_weekday = local_trigger.weekday()
+        candidates = []
+        for day in weekdays:
+            if 0 <= day <= 6:
+                delta = (day - current_weekday) % 7
+                if delta == 0:
+                    delta = 7
+                candidates.append(delta)
+        if not candidates:
+            return None
+        next_date = local_trigger.date() + timedelta(days=min(candidates))
+        return _combine_local(next_date, target_time)
+    if freq == "monthly":
+        bymonthday = recurrence.get("bymonthday")
+        if isinstance(bymonthday, int) and bymonthday > 0:
+            target_day = bymonthday
+        else:
+            target_day = local_trigger.day
+        year = local_trigger.year
+        month = local_trigger.month + 1
+        if month > 12:
+            month = 1
+            year += 1
+        last_day = calendar.monthrange(year, month)[1]
+        target_day = min(target_day, last_day)
+        return _combine_local(date(year, month, target_day), target_time)
+    return None
 
 
 def _generate_id(existing_ids: set[str]) -> str:

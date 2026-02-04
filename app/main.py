@@ -142,7 +142,11 @@ def main() -> None:
         settings.wizard_store_path,
         timeout_seconds=settings.wizard_timeout_seconds,
     )
-    application.bot_data["wizard_manager"] = wizard.WizardManager(wizard_store)
+    application.bot_data["wizard_manager"] = wizard.WizardManager(
+        wizard_store,
+        reminder_scheduler=reminder_scheduler,
+        settings=settings,
+    )
     if not application.job_queue:
         logging.getLogger(__name__).warning("JobQueue not configured; reminders will run without it.")
 
