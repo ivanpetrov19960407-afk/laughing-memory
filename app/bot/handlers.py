@@ -386,7 +386,7 @@ def _build_simple_result(
 
 
 def _menu_action() -> Action:
-    return Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"})
+    return Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_section", "section": "home"})
 
 
 def _build_user_context_with_dialog(
@@ -736,10 +736,10 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await _guard_access(update, context):
         return
     result = refused(
-        "Неизвестная команда. Открой /menu",
+        "Неизвестная команда.",
         intent="command.unknown",
         mode="local",
-        actions=_build_menu_actions(context, user_id=update.effective_user.id if update.effective_user else 0),
+        actions=[_menu_action()],
     )
     await send_result(update, context, result)
 
@@ -1303,7 +1303,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _send_reply_keyboard_remove(update, context)
     user_id = update.effective_user.id if update.effective_user else 0
     result = ok(
-        "Меню:",
+        "Выбери раздел:",
         intent="command.menu",
         mode="local",
         actions=_build_menu_actions(context, user_id=user_id),
@@ -1337,43 +1337,166 @@ async def _handle_menu_section(
     user_id: int,
     chat_id: int,
 ) -> OrchestratorResult:
+    if context is None:
+        text_map = {
+            "home": "Выбери раздел:",
+            "chat": "Пиши сообщением — отвечу. Можно вернуться в меню.",
+            "search": "Ищу в интернете и даю ссылки на источники.",
+            "images": "Опиши картинку — сгенерирую.",
+            "calc": "Введи выражение (например: 12*(5+3)).",
+            "calendar": "Календарь: добавить/посмотреть/удалить события.",
+            "reminders": "Напоминания: создать/список/удалить.",
+            "settings": "Настройки режимов и поведения.",
+        }
+        text = text_map.get(section, "Выбери раздел:")
+        actions = (
+            menu.build_menu_actions(facts_enabled=False, enable_menu=True)
+            if section == "home"
+            else [_menu_action()]
+        )
+        return ok(text, intent=f"menu.section.{section}", mode="local", actions=actions)
+    orchestrator = _get_orchestrator(context)
+    facts_enabled = bool(user_id) and orchestrator.is_facts_only(user_id)
+    facts_command = "/facts_off" if facts_enabled else "/facts_on"
+    dialog_memory = _get_dialog_memory(context)
+    context_enabled = False
+    if dialog_memory is not None and user_id:
+        context_enabled = await dialog_memory.is_enabled(user_id)
     if section == "chat":
+        actions = [
+            Action(
+                id="chat.facts",
+                label="📌 Режим фактов",
+                payload={"op": "run_command", "command": facts_command, "args": ""},
+            ),
+            _menu_action(),
+        ]
+        if dialog_memory is not None:
+            actions.insert(
+                0,
+                Action(
+                    id="chat.context_clear",
+                    label="🧹 Очистить контекст",
+                    payload={"op": "run_command", "command": "/context_clear", "args": ""},
+                ),
+            )
         return ok(
-            "Режим чата: просто напиши сообщение.",
+            "Пиши сообщением — отвечу. Можно вернуться в меню.",
             intent="menu.chat",
             mode="local",
-            actions=[_menu_action()],
+            actions=actions,
+        )
+    if section == "home":
+        return ok(
+            "Выбери раздел:",
+            intent="menu.home",
+            mode="local",
+            actions=_build_menu_actions(context, user_id=user_id),
         )
     if section == "search":
         return ok(
-            "Функция в разработке. Пока доступен обычный чат.",
+            "Ищу в интернете и даю ссылки на источники.",
             intent="menu.search",
+            mode="local",
+            actions=[
+                Action(
+                    id="search.new",
+                    label="🔎 Новый поиск",
+                    payload={"op": "run_command", "command": "/search", "args": ""},
+                ),
+                Action(
+                    id="search.facts",
+                    label="📌 Режим фактов",
+                    payload={"op": "run_command", "command": facts_command, "args": ""},
+                ),
+                _menu_action(),
+            ],
+        )
+    if section == "images":
+        return ok(
+            "Опиши картинку — сгенерирую.",
+            intent="menu.images",
+            mode="local",
+            actions=[
+                Action(
+                    id="images.generate",
+                    label="🖼 Сгенерировать",
+                    payload={"op": "run_command", "command": "/image", "args": ""},
+                ),
+                Action(
+                    id="images.examples",
+                    label="ℹ️ Примеры",
+                    payload={"op": "menu_section", "section": "images_examples"},
+                ),
+                _menu_action(),
+            ],
+        )
+    if section == "images_examples":
+        return ok(
+            "Примеры:\n• Лис в космосе\n• Город ночью\n• Кот на скейтборде",
+            intent="menu.images.examples",
+            mode="local",
+            actions=[_menu_action()],
+        )
+    if section == "calc":
+        return ok(
+            "Введи выражение (например: 12*(5+3)).",
+            intent="menu.calc",
+            mode="local",
+            actions=[
+                Action(
+                    id="calc.run",
+                    label="🧮 Посчитать",
+                    payload={"op": "run_command", "command": "/calc", "args": ""},
+                ),
+                Action(
+                    id="calc.examples",
+                    label="ℹ️ Примеры",
+                    payload={"op": "menu_section", "section": "calc_examples"},
+                ),
+                _menu_action(),
+            ],
+        )
+    if section == "calc_examples":
+        return ok(
+            "Примеры:\n• 12*(5+3)\n• 100/4\n• (7+9)*2",
+            intent="menu.calc.examples",
             mode="local",
             actions=[_menu_action()],
         )
     if section == "calendar":
         return ok(
-            "Календарь: выбери действие.",
+            "Календарь: добавить/посмотреть/удалить события.",
             intent="menu.calendar",
             mode="local",
             actions=[
                 Action(
                     id="calendar.add",
-                    label="➕ Добавить событие",
+                    label="➕ Добавить",
                     payload={"op": "wizard_start", "wizard_id": wizard.WIZARD_CALENDAR_ADD},
+                ),
+                Action(
+                    id="calendar.list",
+                    label="📋 Список",
+                    payload={"op": "run_command", "command": "/calendar list", "args": ""},
                 ),
                 _menu_action(),
             ],
         )
     if section == "reminders":
         return ok(
-            "Напоминания: что сделать?",
+            "Напоминания: создать/список/удалить.",
             intent="menu.reminders",
             mode="local",
             actions=[
                 Action(
+                    id="reminders.create",
+                    label="➕ Создать",
+                    payload={"op": "run_command", "command": "/reminders", "args": ""},
+                ),
+                Action(
                     id="reminders.list",
-                    label="📋 Ближайшие",
+                    label="📋 Список",
                     payload={"op": "reminders_list", "limit": 5},
                 ),
                 _menu_action(),
@@ -1381,10 +1504,26 @@ async def _handle_menu_section(
         )
     if section == "settings":
         return ok(
-            "Настройки пока в разработке.",
+            "Настройки режимов и поведения.",
             intent="menu.settings",
             mode="local",
-            actions=[_menu_action()],
+            actions=[
+                Action(
+                    id="settings.facts",
+                    label=f"📌 Факты {'off' if facts_enabled else 'on'}",
+                    payload={"op": "run_command", "command": facts_command, "args": ""},
+                ),
+                Action(
+                    id="settings.context",
+                    label=f"🧠 Контекст {'off' if context_enabled else 'on'}",
+                    payload={
+                        "op": "run_command",
+                        "command": "/context_off" if context_enabled else "/context_on",
+                        "args": "",
+                    },
+                ),
+                _menu_action(),
+            ],
         )
     return refused(
         "Раздел меню недоступен.",
@@ -1655,7 +1794,7 @@ async def _dispatch_action_payload(
     if op_value == "menu_open":
         await _send_reply_keyboard_remove(update, context)
         user_id = update.effective_user.id if update.effective_user else 0
-        return ok("Меню:", intent="menu.open", mode="local", actions=_build_menu_actions(context, user_id=user_id))
+        return ok("Выбери раздел:", intent="menu.open", mode="local", actions=_build_menu_actions(context, user_id=user_id))
     if op_value == "menu_cancel":
         await _send_reply_keyboard_remove(update, context, text="Ок")
         return ok("Ок", intent="menu.cancel", mode="local")
@@ -1816,7 +1955,7 @@ async def _dispatch_command_payload(
     if normalized in {"/menu", "/start"}:
         await _send_reply_keyboard_remove(update, context)
         user_id = update.effective_user.id if update.effective_user else 0
-        return ok("Меню:", intent="menu.open", mode="local", actions=_build_menu_actions(context, user_id=user_id))
+        return ok("Выбери раздел:", intent="menu.open", mode="local", actions=_build_menu_actions(context, user_id=user_id))
     if normalized == "/calc":
         return ok("Calc: /calc <выражение>.", intent="menu.calc", mode="local")
     if normalized == "/calendar":
@@ -1842,6 +1981,18 @@ async def _dispatch_command_payload(
             intent="menu.summary",
             mode="local",
         )
+    if normalized == "/search":
+        return refused(
+            "Введите текст запроса. Пример: /search Новости",
+            intent="menu.search",
+            mode="local",
+        )
+    if normalized == "/image":
+        return refused(
+            "Укажите описание изображения. Пример: /image Слон в космосе",
+            intent="menu.image",
+            mode="local",
+        )
     if normalized == "/reminders":
         now = datetime.now(tz=calendar_store.VIENNA_TZ)
         return await list_reminders(now, limit=5, intent="menu.reminders")
@@ -1855,6 +2006,19 @@ async def _dispatch_command_payload(
             else "Режим фактов выключён. Можно отвечать без источников."
         )
         return ok(text, intent="menu.facts", mode="local")
+    if normalized in {"/context_on", "/context_off", "/context_clear"}:
+        dialog_memory = _get_dialog_memory(context)
+        if dialog_memory is None:
+            return refused("Контекст диалога не настроен.", intent="menu.context", mode="local")
+        user_id = update.effective_user.id if update.effective_user else 0
+        if normalized == "/context_clear":
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            await dialog_memory.clear(user_id, chat_id)
+            return ok("Контекст очищен.", intent="menu.context", mode="local")
+        enabled = normalized == "/context_on"
+        await dialog_memory.set_enabled(user_id, enabled)
+        text = "Контекст включён." if enabled else "Контекст выключён."
+        return ok(text, intent="menu.context", mode="local")
     return refused(
         f"Команда недоступна: {command}",
         intent="ui.action",
