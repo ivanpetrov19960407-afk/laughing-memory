@@ -107,6 +107,23 @@ def _build_wizard_cancel_markup() -> InlineKeyboardMarkup:
     )
 
 
+def _build_wizard_confirm_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Подтвердить", callback_data="wiz:confirm"),
+                InlineKeyboardButton("⛔ Отмена", callback_data="wiz:cancel"),
+            ],
+        ],
+    )
+
+
+def _wizard_markup_for_step(step_id: str | None) -> InlineKeyboardMarkup:
+    if step_id == "confirm":
+        return _build_wizard_confirm_markup()
+    return _build_wizard_cancel_markup()
+
+
 def _get_action_store(context: ContextTypes.DEFAULT_TYPE) -> ActionStore:
     store = context.application.bot_data.get("action_store")
     if isinstance(store, ActionStore):
@@ -646,7 +663,26 @@ async def wtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
     view = runtime.start(user_id, chat_id, "echo", "ask")
-    await message.reply_text(view.text, reply_markup=_build_wizard_cancel_markup())
+    state = runtime.get_active(user_id, chat_id)
+    await message.reply_text(view.text, reply_markup=_wizard_markup_for_step(state.step_id if state else None))
+
+
+@_with_error_handling
+async def wtest2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    message = update.effective_message
+    if message is None:
+        return
+    runtime = _get_wizard_runtime(context)
+    if runtime is None:
+        await message.reply_text("Wizard runtime не настроен.")
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    view = runtime.start(user_id, chat_id, "echo_confirm", "ask")
+    state = runtime.get_active(user_id, chat_id)
+    await message.reply_text(view.text, reply_markup=_wizard_markup_for_step(state.step_id if state else None))
 
 
 @_with_error_handling
@@ -1337,12 +1373,23 @@ async def wiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query = update.callback_query
     if query is None:
         return
-    if query.data != "wiz:cancel":
+    if query.data not in {"wiz:cancel", "wiz:confirm"}:
         await query.answer()
         return
     runtime = _get_wizard_runtime(context)
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
+    if query.data == "wiz:confirm":
+        if runtime is None or not runtime.has_active(user_id, chat_id):
+            await query.answer("Нет активного сценария.")
+            return
+        state = runtime.get_active(user_id, chat_id)
+        if state is not None:
+            state.data["confirmed"] = True
+        runtime.cancel(user_id, chat_id)
+        await query.answer()
+        await query.edit_message_text("Подтверждено.")
+        return
     if runtime is None or not runtime.has_active(user_id, chat_id):
         await query.answer()
         await query.edit_message_text("Нет активного сценария.")
@@ -2287,7 +2334,8 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     runtime = _get_wizard_runtime(context)
     if runtime is not None and runtime.has_active(user_id, chat_id):
         view = runtime.handle_text(user_id, chat_id, prompt)
-        await update.message.reply_text(view.text, reply_markup=_build_wizard_cancel_markup())
+        state = runtime.get_active(user_id, chat_id)
+        await update.message.reply_text(view.text, reply_markup=_wizard_markup_for_step(state.step_id if state else None))
         return
     if menu.is_menu_label(prompt):
         result = refused(
