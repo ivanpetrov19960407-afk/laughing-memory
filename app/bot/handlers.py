@@ -27,7 +27,7 @@ from app.core.tools_calendar import list_calendar_items, list_reminders
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.core.text_safety import has_pseudo_source_markers, sanitize_llm_text
 from app.infra.allowlist import AllowlistStore
-from app.infra.messaging import safe_send_text
+from app.infra.messaging import safe_edit_text, safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limiter import RateLimiter
 from app.infra.request_context import get_request_context, log_request, set_input_text, set_status, start_request
@@ -470,6 +470,9 @@ def _apply_pseudo_source_guard(
 
 
 async def _send_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None) -> None:
+    if update.callback_query:
+        await safe_edit_text(update, context, text, reply_markup=reply_markup)
+        return
     await safe_send_text(update, context, text, reply_markup=reply_markup)
 
 
@@ -557,7 +560,13 @@ async def send_result(
         user_id=user_id,
         chat_id=chat_id,
     )
-    effective_reply_markup = reply_markup if reply_markup is not None else inline_keyboard
+    effective_reply_markup = inline_keyboard if inline_keyboard is not None else reply_markup
+    LOGGER.info(
+        "UI send: status=%s actions=%s reply_markup=%s",
+        public_result.status,
+        len(public_result.actions),
+        effective_reply_markup is not None,
+    )
     await _send_text(update, context, public_result.text, reply_markup=effective_reply_markup)
     await _send_attachments(update, context, public_result.attachments)
     if request_id:
@@ -2320,7 +2329,13 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     set_status(context, "error")
-    LOGGER.exception("Unhandled exception", exc_info=context.error)
+    error = context.error
+    if isinstance(error, telegram.error.NetworkError):
+        message = str(error)
+        if update is None or "get_updates" in message or "getUpdates" in message:
+            LOGGER.info("NetworkError during polling shutdown: %s", message)
+            return
+    LOGGER.exception("Unhandled exception", exc_info=error)
     if isinstance(update, Update) and update.message:
         result = _build_simple_result(
             "Ошибка на сервере. Попробуй ещё раз.",

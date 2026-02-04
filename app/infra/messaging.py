@@ -71,6 +71,38 @@ async def safe_send_text(
     return len(payload)
 
 
+async def safe_edit_text(
+    update: Update | None,
+    context: ContextTypes.DEFAULT_TYPE | None,
+    text: str | None,
+    reply_markup=None,
+) -> int:
+    message = update.effective_message if update else None
+    callback_query = update.callback_query if update else None
+    if not message or not callback_query:
+        return await safe_send_text(update, context, text, reply_markup=reply_markup)
+    payload = text if text and text.strip() else EMPTY_MESSAGE_PLACEHOLDER
+    chunks = chunk_text(payload, max_len=MAX_CHUNK_SIZE)
+    if not chunks:
+        return 0
+    try:
+        await callback_query.edit_message_text(chunks[0], reply_markup=reply_markup)
+    except BadRequest as exc:
+        if "Message is too long" in str(exc):
+            LOGGER.warning("Telegram rejected edit as too long; falling back to reply_text.")
+            await _send_chunks(message, chunks, reply_markup=reply_markup)
+            add_response_size(context, len(payload))
+            return len(payload)
+        LOGGER.exception("Failed to edit message text: %s", exc)
+        await _send_chunks(message, chunks, reply_markup=reply_markup)
+        add_response_size(context, len(payload))
+        return len(payload)
+    if len(chunks) > 1:
+        await _send_chunks(message, chunks[1:])
+    add_response_size(context, len(payload))
+    return len(payload)
+
+
 async def safe_send_bot_text(bot, chat_id: int, text: str | None) -> int:
     payload = text if text and text.strip() else EMPTY_MESSAGE_PLACEHOLDER
     chunks = chunk_text(payload, max_len=MAX_CHUNK_SIZE)
