@@ -586,8 +586,7 @@ class Orchestrator:
             if not payload:
                 return ensure_valid(
                     refused(
-                        "Укажи запрос: /search <текст>",
-                        "Использование: /search <запрос>",
+                        "Укажи запрос: /search <текст>\nИспользование: /search <запрос>",
                         intent="command.search",
                         mode="local",
                         debug={"reason": "missing_payload"},
@@ -600,8 +599,7 @@ class Orchestrator:
             if not payload:
                 return ensure_valid(
                     refused(
-                        "Укажи запрос: /search <текст>",
-                        "Использование: /search <запрос>",
+                        "Укажи запрос: /search <текст>\nИспользование: /search <запрос>",
                         intent="command.search",
                         mode="local",
                         debug={"reason": "missing_payload"},
@@ -627,8 +625,7 @@ class Orchestrator:
         if not trimmed_query:
             return ensure_valid(
                 refused(
-                    "Укажи запрос: /search <текст>",
-                    "Использование: /search <запрос>",
+                    "Укажи запрос: /search <текст>\nИспользование: /search <запрос>",
                     intent=intent,
                     mode="local",
                     debug={"reason": "missing_payload"},
@@ -876,8 +873,7 @@ class Orchestrator:
             )
         if decision.reason == "missing_search_payload":
             return refused(
-                "Укажи запрос: /search <текст>",
-                "Использование: /search <запрос>",
+                "Укажи запрос: /search <текст>\nИспользование: /search <запрос>",
                 intent=decision.intent,
                 mode="local",
             )

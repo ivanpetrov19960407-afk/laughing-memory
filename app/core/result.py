@@ -241,7 +241,7 @@ def ensure_valid(
         payload = {}
 
     status = payload.get("status")
-    if status not in {"ok", "refused", "error"}:
+    if status not in {"ok", "refused", "error", "ratelimited"}:
         status = "error"
 
     text = payload.get("text")
@@ -255,7 +255,7 @@ def ensure_valid(
         intent_value = fallback_intent or "unknown"
 
     mode_value = payload.get("mode")
-    if not isinstance(mode_value, str):
+    if not isinstance(mode_value, str) or mode_value not in {"local", "llm", "tool"}:
         mode_value = "local"
 
     request_id_value = payload.get("request_id")
