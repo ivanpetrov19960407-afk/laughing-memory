@@ -124,6 +124,7 @@ def test_add_creates_reminder(calendar_path) -> None:
 
 def test_calendar_command_add_does_not_create_reminder(calendar_path, monkeypatch) -> None:
     captured: dict[str, object] = {}
+    scheduled: dict[str, bool] = {"called": False}
 
     class DummyUpdate:
         def __init__(self) -> None:
@@ -139,6 +140,10 @@ def test_calendar_command_add_does_not_create_reminder(calendar_path, monkeypatc
             self.application = SimpleNamespace(bot_data={"settings": SimpleNamespace(reminders_enabled=True)})
             self.chat_data = {}
 
+    class DummyScheduler:
+        async def schedule_reminder(self, reminder):
+            scheduled["called"] = True
+
     async def fake_guard_access(update, context, bucket="default"):
         return True
 
@@ -147,6 +152,7 @@ def test_calendar_command_add_does_not_create_reminder(calendar_path, monkeypatc
 
     monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
     monkeypatch.setattr(handlers, "send_result", fake_send_result)
+    monkeypatch.setattr(handlers, "_get_reminder_scheduler", lambda context: DummyScheduler())
 
     before = calendar_store.load_store()
     reminders_before = len(before.get("reminders") or [])
@@ -156,6 +162,7 @@ def test_calendar_command_add_does_not_create_reminder(calendar_path, monkeypatc
 
     assert captured["result"].status == "ok"
     assert reminders_after == reminders_before
+    assert scheduled["called"] is False
 
 
 def test_del_cancels_reminder(calendar_path) -> None:
