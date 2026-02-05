@@ -51,3 +51,12 @@ def test_sanitizer_strips_pseudo_sources(text: str, unexpected: str, failed: boo
 
     assert unexpected.lower() not in sanitized.lower()
     assert meta["failed"] is failed
+
+
+def test_sanitizer_keeps_bracket_citations_when_allowed() -> None:
+    text = "Ответ [1][2]"
+    sanitized, meta = sanitize_llm_text(text, allow_source_citations=True)
+
+    assert "[1]" in sanitized
+    assert "[2]" in sanitized
+    assert meta["failed"] is False

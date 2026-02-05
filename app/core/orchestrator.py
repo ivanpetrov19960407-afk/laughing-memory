@@ -270,6 +270,7 @@ class Orchestrator:
         executed_at = datetime.now(timezone.utc)
         trimmed = prompt.strip()
         sources_requested = is_sources_request(trimmed)
+        strict_sources_requested = sources_requested and mode != "search"
         if not trimmed:
             execution = self._error_execution(user_id, mode, prompt, "Запрос пустой.", executed_at)
             return execution, []
@@ -373,8 +374,13 @@ class Orchestrator:
                     web_search_options=None,
                 )
                 result = ensure_plain_text(response_text)
-                sanitized, meta = sanitize_llm_text(result, sources_requested=sources_requested)
-                if sources_requested and meta.get("needs_regeneration"):
+                allow_source_citations = mode == "search" or strict_sources_requested
+                sanitized, meta = sanitize_llm_text(
+                    result,
+                    sources_requested=strict_sources_requested,
+                    allow_source_citations=allow_source_citations,
+                )
+                if strict_sources_requested and meta.get("needs_regeneration"):
                     regen_instruction = (
                         "Объясни простыми словами, без чисел, без терминов, без науки, "
                         "как для человека без медицинских знаний."
@@ -388,10 +394,15 @@ class Orchestrator:
                         web_search_options=None,
                     )
                     result = ensure_plain_text(response_text)
-                    sanitized, meta = sanitize_llm_text(result, sources_requested=sources_requested)
+                    allow_source_citations = mode == "search" or strict_sources_requested
+                    sanitized, meta = sanitize_llm_text(
+                        result,
+                        sources_requested=strict_sources_requested,
+                        allow_source_citations=allow_source_citations,
+                    )
                 if meta["failed"]:
                     result = SAFE_FALLBACK_TEXT
-                    if sources_requested:
+                    if strict_sources_requested:
                         result = f"{SOURCES_DISCLAIMER_TEXT}\n{result}"
                     LOGGER.warning(
                         "LLM text sanitization failed: user_id=%s mode=%s meta=%s",

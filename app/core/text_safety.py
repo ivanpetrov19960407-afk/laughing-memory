@@ -118,7 +118,12 @@ def _rewrite_stats_sentence(sentence: str) -> str:
     return normalized
 
 
-def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[str, dict[str, Any]]:
+def sanitize_llm_text(
+    text: str,
+    *,
+    sources_requested: bool = False,
+    allow_source_citations: bool = False,
+) -> tuple[str, dict[str, Any]]:
     original = text or ""
     working = original
     removal_counts: dict[str, int] = {}
@@ -132,10 +137,17 @@ def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[st
     working, removal_counts["www"] = _WWW_RE.subn("", working)
     working, removal_counts["domains"] = _DOMAIN_RE.subn("", working)
     working, removal_counts["doi"] = _DOI_RE.subn("", working)
-    working, removal_counts["bracket_citations"] = _BRACKET_CITATION_RE.subn("", working)
-    working, removal_counts["paren_citations"] = _PAREN_CITATION_RE.subn("", working)
+    if allow_source_citations:
+        removal_counts["bracket_citations"] = 0
+        removal_counts["paren_citations"] = 0
+    else:
+        working, removal_counts["bracket_citations"] = _BRACKET_CITATION_RE.subn("", working)
+        working, removal_counts["paren_citations"] = _PAREN_CITATION_RE.subn("", working)
     working, removal_counts["source_lines"] = _SOURCE_LINE_RE.subn("", working)
-    working, removal_counts["attribution_leads"] = _ATTRIBUTION_LEAD_RE.subn("", working)
+    if allow_source_citations:
+        removal_counts["attribution_leads"] = 0
+    else:
+        working, removal_counts["attribution_leads"] = _ATTRIBUTION_LEAD_RE.subn("", working)
 
     header_match = _SOURCES_HEADER_RE.search(working)
     truncated_sources_section = False
@@ -196,8 +208,8 @@ def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[st
 
     forbidden_remaining = bool(
         _MARKDOWN_LINK_RE.search(working)
-        or _BRACKET_CITATION_RE.search(working)
-        or _PAREN_CITATION_RE.search(working)
+        or (not allow_source_citations and _BRACKET_CITATION_RE.search(working))
+        or (not allow_source_citations and _PAREN_CITATION_RE.search(working))
         or _SOURCES_HEADER_RE.search(working)
         or _SOURCE_LINE_RE.search(working)
         or _FORBIDDEN_PHRASES_RE.search(working)
@@ -234,5 +246,6 @@ def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[st
         "disclaimer_added": disclaimer_added,
         "needs_regeneration": needs_regeneration,
         "sources_requested": sources_requested,
+        "allow_source_citations": allow_source_citations,
     }
     return working, meta

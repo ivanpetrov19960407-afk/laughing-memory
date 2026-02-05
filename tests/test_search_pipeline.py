@@ -62,6 +62,8 @@ def test_search_integration_with_fake_clients(tmp_path: Path) -> None:
     assert len(result.sources) == 2
     assert "Источники:" in result.text
     assert "[1]" in result.text
+    body = result.text.split("Источники:")[0]
+    assert "[1]" in body
 
 
 def test_search_integration_without_results(tmp_path: Path) -> None:
