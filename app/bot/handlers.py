@@ -463,13 +463,14 @@ def _render_text_with_sources(text: str, sources: list[Any]) -> str:
     if "\nИсточники:\n" in base or base.endswith("\nИсточники:"):
         return base
     lines: list[str] = []
-    for index, source in enumerate(sources, start=1):
+    for source in sources:
         if isinstance(source, dict):
             url = str(source.get("url") or "").strip()
         else:
             url = str(getattr(source, "url", "") or "").strip()
         if not url:
             continue
+        index = len(lines) + 1
         lines.append(f"{index}) {url}")
     if not lines:
         return base
