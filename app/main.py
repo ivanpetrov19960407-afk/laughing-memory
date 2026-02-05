@@ -25,18 +25,56 @@ from app.storage.wizard_store import WizardStore
 
 
 def _register_handlers(application: Application) -> None:
+    # Core commands
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("help", handlers.help_command))
     application.add_handler(CommandHandler("ping", handlers.ping))
+    application.add_handler(CommandHandler("menu", handlers.menu_command))
+    application.add_handler(CommandHandler("cancel", handlers.cancel_command))
+
+    # Tasks
     application.add_handler(CommandHandler("tasks", handlers.tasks))
     application.add_handler(CommandHandler("task", handlers.task))
-    application.add_handler(CommandHandler("reminders", handlers.reminders))
+
+    # LLM tools
+    application.add_handler(CommandHandler("ask", handlers.ask))
     application.add_handler(CommandHandler("search", handlers.search))
+    application.add_handler(CommandHandler("summary", handlers.summary))
+    application.add_handler(CommandHandler("check", handlers.check))
+    application.add_handler(CommandHandler("rewrite", handlers.rewrite))
+    application.add_handler(CommandHandler("explain", handlers.explain))
+    application.add_handler(CommandHandler("image", handlers.image))
+
+    # Utilities
+    application.add_handler(CommandHandler("calc", handlers.calc))
+    application.add_handler(CommandHandler("calendar", handlers.calendar))
+    application.add_handler(CommandHandler("reminders", handlers.reminders))
+    application.add_handler(CommandHandler("reminder_off", handlers.reminder_off))
+    application.add_handler(CommandHandler("reminder_on", handlers.reminder_on))
+
+    # Facts & Context modes
     application.add_handler(CommandHandler("facts_on", handlers.facts_on))
     application.add_handler(CommandHandler("facts_off", handlers.facts_off))
-    application.add_handler(CommandHandler("menu", handlers.menu_command))
+    application.add_handler(CommandHandler("context_on", handlers.context_on))
+    application.add_handler(CommandHandler("context_off", handlers.context_off))
+    application.add_handler(CommandHandler("context_clear", handlers.context_clear))
+    application.add_handler(CommandHandler("context_status", handlers.context_status))
+
+    # Admin
+    application.add_handler(CommandHandler("allow", handlers.allow))
+    application.add_handler(CommandHandler("deny", handlers.deny))
+    application.add_handler(CommandHandler("allowlist", handlers.allowlist))
+
+    # Diagnostics
+    application.add_handler(CommandHandler("health", handlers.health))
+    application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
+    application.add_handler(CommandHandler("last", handlers.last))
+
+    # Callbacks
     application.add_handler(CallbackQueryHandler(handlers.static_callback, pattern="^cb:"))
     application.add_handler(CallbackQueryHandler(handlers.action_callback))
+
+    # Free text & unknown commands (must be last)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
     application.add_handler(MessageHandler(filters.COMMAND, handlers.unknown_command))
 
@@ -175,18 +213,6 @@ def main() -> None:
     application.post_init = _restore_reminders
 
     _register_handlers(application)
-    application.add_handler(CommandHandler("start", handlers.start))
-    application.add_handler(CommandHandler("help", handlers.help_command))
-    application.add_handler(CommandHandler("ping", handlers.ping))
-    application.add_handler(CommandHandler("tasks", handlers.tasks))
-    application.add_handler(CommandHandler("task", handlers.task))
-    application.add_handler(CommandHandler("reminders", handlers.reminders))
-    application.add_handler(CommandHandler("search", handlers.search))
-    application.add_handler(CommandHandler("menu", handlers.menu_command))
-    application.add_handler(CallbackQueryHandler(handlers.static_callback, pattern="^cb:"))
-    application.add_handler(CallbackQueryHandler(handlers.action_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
-    application.add_handler(MessageHandler(filters.COMMAND, handlers.unknown_command))
     application.add_error_handler(handlers.error_handler)
 
     logging.getLogger(__name__).info("Bot started")
