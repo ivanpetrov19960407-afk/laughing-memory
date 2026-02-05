@@ -36,7 +36,7 @@ class ReminderScheduler:
         self,
         application: Application,
         calendar_store_module=calendar_store,
-        timezone: ZoneInfo = calendar_store.VIENNA_TZ,
+        timezone: ZoneInfo = calendar_store.MOSCOW_TZ,
         max_future_days: int | None = None,
     ) -> None:
         self._application = application
@@ -144,7 +144,7 @@ class ReminderScheduler:
         event = await self._store.get_event(reminder.event_id)
         event_dt = event.dt if event else reminder.trigger_at
         event_label = event_dt.astimezone(self._timezone).strftime("%Y-%m-%d %H:%M")
-        text = f"⏰ Напоминание: {reminder.text}\nКогда: {event_label} (Europe/Vilnius)"
+        text = f"⏰ Напоминание: {reminder.text}\nКогда: {event_label} (МСК)"
         actions = _build_reminder_actions(reminder)
         action_store = self._application.bot_data.get("action_store")
         reply_markup = None
@@ -193,9 +193,8 @@ def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Actio
     base_trigger = reminder.trigger_at.isoformat()
     snooze_options = [
         (10, "⏸ Отложить 10 мин"),
-        (30, "⏸ Отложить 30 мин"),
-        (120, "⏸ Отложить 2 часа"),
-        (1440, "⏸ Отложить 1 день"),
+        (30, "⏸ +30 мин"),
+        (120, "⏸ +2 часа"),
     ]
     actions: list[Action] = []
     for minutes, label in snooze_options:
@@ -205,7 +204,7 @@ def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Actio
                 label=label,
                 payload={
                     "op": "reminder_snooze",
-                    "id": reminder.id,
+                    "reminder_id": reminder.id,
                     "minutes": minutes,
                     "base_trigger_at": base_trigger,
                 },
@@ -215,14 +214,14 @@ def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Actio
         Action(
             id=f"reminder_reschedule:{reminder.id}",
             label="✏ Перенести",
-            payload={"op": "reminder_reschedule", "id": reminder.id, "base_trigger_at": base_trigger},
+            payload={"op": "wizard_start", "wizard_id": "reminder.reschedule", "reminder_id": reminder.id},
         )
     )
     actions.append(
         Action(
-            id=f"reminder_delete:{reminder.id}",
-            label="🗑 Удалить",
-            payload={"op": "reminder_delete", "id": reminder.id},
+            id=f"reminder_disable:{reminder.id}",
+            label="🗑 Отключить",
+            payload={"op": "reminder_disable", "reminder_id": reminder.id},
         )
     )
     return actions

@@ -19,7 +19,7 @@ async def list_calendar_items(
         return ensure_valid(refused("Слишком много, сузь диапазон.", intent=intent, mode="tool"))
     lines = []
     for item in items:
-        dt_label = item.dt.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+        dt_label = item.dt.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
         lines.append(f"{item.id} | {dt_label} | {item.title}")
     return ensure_valid(ok("\n".join(lines), intent=intent, mode="tool"))
 
@@ -36,7 +36,7 @@ async def list_reminders(
     lines = []
     actions: list[Action] = []
     for item in items:
-        when_label = item.trigger_at.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+        when_label = item.trigger_at.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
         lines.append(f"{item.id} | {when_label} | {item.text}")
         actions.append(
             Action(
@@ -44,7 +44,7 @@ async def list_reminders(
                 label="⏸ Отложить на 10 минут",
                 payload={
                     "op": "reminder_snooze",
-                    "id": item.id,
+                    "reminder_id": item.id,
                     "minutes": 10,
                     "base_trigger_at": item.trigger_at.isoformat(),
                 },
@@ -54,14 +54,14 @@ async def list_reminders(
             Action(
                 id=f"reminder_reschedule:{item.id}",
                 label="✏ Перенести",
-                payload={"op": "reminder_reschedule", "id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
+                payload={"op": "reminder_reschedule", "reminder_id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
             )
         )
         actions.append(
             Action(
-                id=f"reminder_delete:{item.id}",
-                label="🗑 Удалить",
-                payload={"op": "reminder_delete", "id": item.id},
+                id=f"reminder_disable:{item.id}",
+                label="🗑 Отключить",
+                payload={"op": "reminder_disable", "reminder_id": item.id},
             )
         )
     actions.append(Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}))

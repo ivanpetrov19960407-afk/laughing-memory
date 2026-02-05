@@ -11,9 +11,11 @@ from app.storage.wizard_store import WizardState, WizardStore
 LOGGER = logging.getLogger(__name__)
 
 WIZARD_CALENDAR_ADD = "calendar.add_event"
+WIZARD_REMINDER_CREATE = "reminder.create"
 WIZARD_REMINDER_RESCHEDULE = "reminder.reschedule"
 STEP_AWAIT_DATETIME = "await_datetime"
 STEP_AWAIT_TITLE = "await_title"
+STEP_AWAIT_RECURRENCE = "await_recurrence"
 STEP_CONFIRM = "confirm"
 
 
@@ -40,6 +42,8 @@ class WizardManager:
             return None
         if state.wizard_id == WIZARD_CALENDAR_ADD:
             return await self._handle_calendar_add_text(state, user_id=user_id, chat_id=chat_id, text=text)
+        if state.wizard_id == WIZARD_REMINDER_CREATE:
+            return await self._handle_reminder_create_text(state, user_id=user_id, chat_id=chat_id, text=text)
         if state.wizard_id == WIZARD_REMINDER_RESCHEDULE:
             return await self._handle_reminder_reschedule_text(state, user_id=user_id, chat_id=chat_id, text=text)
         return refused(
@@ -64,6 +68,11 @@ class WizardManager:
         if op == "wizard_start":
             if not isinstance(wizard_id, str):
                 return refused("Некорректный сценарий.", intent="wizard.start", mode="local")
+            if wizard_id == WIZARD_REMINDER_RESCHEDULE:
+                reminder_id = payload.get("reminder_id")
+                if not isinstance(reminder_id, str) or not reminder_id:
+                    return refused("Некорректный reminder_id.", intent="wizard.start", mode="local")
+                return await self.start_reminder_reschedule(user_id=user_id, chat_id=chat_id, reminder_id=reminder_id)
             return self._start_wizard(
                 wizard_id,
                 user_id=user_id,
@@ -91,6 +100,14 @@ class WizardManager:
             return None
         if state.wizard_id == WIZARD_CALENDAR_ADD:
             return await self._handle_calendar_add_action(
+                state,
+                user_id=user_id,
+                chat_id=chat_id,
+                op=op,
+                payload=payload,
+            )
+        if state.wizard_id == WIZARD_REMINDER_CREATE:
+            return await self._handle_reminder_create_action(
                 state,
                 user_id=user_id,
                 chat_id=chat_id,
@@ -131,12 +148,15 @@ class WizardManager:
                 mode="local",
                 actions=_resume_actions(active_state.wizard_id),
             )
-        if wizard_id != WIZARD_CALENDAR_ADD:
+        if wizard_id not in {WIZARD_CALENDAR_ADD, WIZARD_REMINDER_CREATE}:
             return refused("Сценарий недоступен.", intent="wizard.start", mode="local")
         now = datetime.now(timezone.utc)
+        step = STEP_AWAIT_DATETIME
+        if wizard_id == WIZARD_REMINDER_CREATE:
+            step = STEP_AWAIT_TITLE
         state = WizardState(
             wizard_id=wizard_id,
-            step=STEP_AWAIT_DATETIME,
+            step=step,
             data={},
             started_at=now,
             updated_at=now,
@@ -261,7 +281,7 @@ class WizardManager:
         except ValueError:
             return refused("Дата повреждена, начни заново.", intent="wizard.calendar.confirm", mode="local")
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=calendar_store.VIENNA_TZ)
+            dt = dt.replace(tzinfo=calendar_store.MOSCOW_TZ)
         try:
             created = await calendar_store.add_item(
                 dt=dt,
@@ -281,13 +301,123 @@ class WizardManager:
         self._store.clear_state(user_id=user_id, chat_id=chat_id)
         event = created.get("event") if isinstance(created, dict) else None
         event_id = event.get("event_id") if isinstance(event, dict) else None
-        display_dt = dt.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+        display_dt = dt.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
         actions = _post_create_actions(event_id if isinstance(event_id, str) else "")
         return ok(
             f"Готово! Событие добавлено: {display_dt} — {title.strip()}",
             intent="wizard.calendar.done",
             mode="local",
             actions=actions,
+        )
+
+
+    async def _handle_reminder_create_text(
+        self,
+        state: WizardState,
+        *,
+        user_id: int,
+        chat_id: int,
+        text: str,
+    ) -> OrchestratorResult:
+        if state.step == STEP_AWAIT_TITLE:
+            title = text.strip()
+            if not title:
+                return refused(
+                    "Текст напоминания не должен быть пустым.",
+                    intent="wizard.reminder_create.title",
+                    mode="local",
+                    actions=_step_actions(),
+                )
+            updated = _touch_state(state, step=STEP_AWAIT_DATETIME, data={"title": title})
+            self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+            return ok(
+                "Когда напомнить? Формат: YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.",
+                intent="wizard.reminder_create.datetime",
+                mode="local",
+                actions=_step_actions(),
+            )
+        if state.step == STEP_AWAIT_DATETIME:
+            try:
+                dt = calendar_store.parse_user_datetime(text)
+            except ValueError as exc:
+                return refused(
+                    f"{exc}. Пример: 2026-02-05 18:30 или 05.02.2026 18:30",
+                    intent="wizard.reminder_create.datetime",
+                    mode="local",
+                    actions=_step_actions(),
+                )
+            updated = _touch_state(state, step=STEP_AWAIT_RECURRENCE, data={"trigger_at": dt.isoformat()})
+            self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+            return ok(
+                "Повтор? none/daily/weekdays/weekly:1,3,5/monthly:15",
+                intent="wizard.reminder_create.recurrence",
+                mode="local",
+                actions=_step_actions(),
+            )
+        if state.step == STEP_AWAIT_RECURRENCE:
+            try:
+                recurrence = _parse_recurrence_input(text)
+            except ValueError as exc:
+                return refused(str(exc), intent="wizard.reminder_create.recurrence", mode="local", actions=_step_actions())
+            updated = _touch_state(state, step=STEP_CONFIRM, data={"recurrence": recurrence})
+            self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+            return _render_prompt(updated)
+        return refused("Подтверди действие кнопками ниже.", intent="wizard.reminder_create.confirm", mode="local", actions=_confirm_actions())
+
+    async def _handle_reminder_create_action(
+        self,
+        state: WizardState,
+        *,
+        user_id: int,
+        chat_id: int,
+        op: str,
+        payload: dict[str, object],
+    ) -> OrchestratorResult:
+        if op == "wizard_edit":
+            updated = _touch_state(state, step=STEP_AWAIT_TITLE, data={})
+            self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+            return _render_prompt(updated)
+        if op != "wizard_confirm":
+            return refused("Действие не поддерживается.", intent="wizard.reminder_create.action", mode="local")
+        if state.step != STEP_CONFIRM:
+            return refused("Сначала заполни данные.", intent="wizard.reminder_create.confirm", mode="local")
+        title = state.data.get("title")
+        trigger_value = state.data.get("trigger_at")
+        recurrence = state.data.get("recurrence")
+        if not isinstance(title, str) or not isinstance(trigger_value, str):
+            return refused("Не хватает данных для создания напоминания.", intent="wizard.reminder_create.confirm", mode="local")
+        try:
+            trigger_at = datetime.fromisoformat(trigger_value)
+        except ValueError:
+            return refused("Дата повреждена, начни заново.", intent="wizard.reminder_create.confirm", mode="local")
+        if trigger_at.tzinfo is None:
+            trigger_at = trigger_at.replace(tzinfo=calendar_store.MOSCOW_TZ)
+        recurrence_payload = recurrence if isinstance(recurrence, dict) else None
+        try:
+            reminder = await calendar_store.add_reminder(
+                trigger_at=trigger_at,
+                text=title.strip(),
+                chat_id=chat_id,
+                user_id=user_id,
+                recurrence=recurrence_payload,
+                enabled=True,
+            )
+        except Exception:
+            LOGGER.exception("Failed to create reminder")
+            return error("Не удалось создать напоминание.", intent="wizard.reminder_create.confirm", mode="local")
+        if self._reminder_scheduler and (self._settings is None or self._settings.reminders_enabled):
+            await self._reminder_scheduler.schedule_reminder(reminder)
+        self._store.clear_state(user_id=user_id, chat_id=chat_id)
+        display_dt = reminder.trigger_at.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
+        LOGGER.info("Reminder created: reminder_id=%s user_id=%s trigger_at=%s", reminder.id, user_id, reminder.trigger_at.isoformat())
+        return ok(
+            f"Ок, поставил на {display_dt} (МСК).",
+            intent="wizard.reminder_create.done",
+            mode="local",
+            actions=[
+                Action(id="reminders.list", label="📋 Список", payload={"op": "reminders_list", "limit": 10}),
+                Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}),
+            ],
         )
 
     async def _handle_reminder_reschedule_text(
@@ -344,7 +474,7 @@ class WizardManager:
         except ValueError:
             return refused("Дата повреждена, начни заново.", intent="wizard.reminder.confirm", mode="local")
         if new_trigger.tzinfo is None:
-            new_trigger = new_trigger.replace(tzinfo=calendar_store.VIENNA_TZ)
+            new_trigger = new_trigger.replace(tzinfo=calendar_store.MOSCOW_TZ)
         reminder = await calendar_store.get_reminder(reminder_id)
         if reminder is None:
             return refused(
@@ -377,7 +507,7 @@ class WizardManager:
             reminder.trigger_at.isoformat(),
             updated.trigger_at.isoformat(),
         )
-        display_dt = updated.trigger_at.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+        display_dt = updated.trigger_at.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
         return ok(
             f"Ок, перенёс на {display_dt}.",
             intent="wizard.reminder.done",
@@ -400,6 +530,20 @@ def _touch_state(state: WizardState, *, step: str | None = None, data: dict[str,
 
 
 def _render_prompt(state: WizardState) -> OrchestratorResult:
+    if state.wizard_id == WIZARD_REMINDER_CREATE and state.step == STEP_AWAIT_TITLE:
+        return ok("Что напомнить? Напиши текст напоминания.", intent="wizard.reminder_create.title", mode="local", actions=_step_actions())
+    if state.wizard_id == WIZARD_REMINDER_CREATE and state.step == STEP_AWAIT_DATETIME:
+        return ok("Пришли дату и время в формате YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\nМожно: сегодня 18:30 или завтра 09:00.", intent="wizard.reminder_create.datetime", mode="local", actions=_step_actions())
+    if state.wizard_id == WIZARD_REMINDER_CREATE and state.step == STEP_AWAIT_RECURRENCE:
+        return ok("Повтор (none/daily/weekdays/weekly:1,3,5/monthly:15).", intent="wizard.reminder_create.recurrence", mode="local", actions=_step_actions())
+    if state.wizard_id == WIZARD_REMINDER_CREATE and state.step == STEP_CONFIRM:
+        title = state.data.get("title") if isinstance(state.data.get("title"), str) else "без текста"
+        trigger_raw = state.data.get("trigger_at")
+        trigger = datetime.fromisoformat(trigger_raw) if isinstance(trigger_raw, str) else None
+        rec = state.data.get("recurrence")
+        display_dt = trigger.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M") if isinstance(trigger, datetime) else "неизвестно"
+        rec_label = _recurrence_label(rec if isinstance(rec, dict) else None)
+        return ok(f"Создать напоминание: {title}\nКогда: {display_dt} (МСК)\nПовтор: {rec_label}?", intent="wizard.reminder_create.confirm", mode="local", actions=_confirm_actions())
     if state.wizard_id == WIZARD_REMINDER_RESCHEDULE and state.step == STEP_AWAIT_DATETIME:
         return ok(
             "Пришли новую дату и время в формате YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
@@ -418,7 +562,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
         else:
             new_trigger = None
         display_dt = (
-            new_trigger.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+            new_trigger.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
             if isinstance(new_trigger, datetime)
             else "неизвестно"
         )
@@ -454,7 +598,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
         else:
             dt = None
         display_dt = (
-            dt.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+            dt.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
             if isinstance(dt, datetime)
             else "неизвестно"
         )
@@ -468,6 +612,62 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
     return refused("Неизвестный шаг.", intent="wizard.calendar.step", mode="local")
 
 
+
+
+def _parse_recurrence_input(raw: str) -> dict[str, object] | None:
+    value = raw.strip().lower()
+    if value in {"", "none", "нет", "no"}:
+        return None
+    if value == "daily":
+        return {"freq": "daily"}
+    if value == "weekdays":
+        return {"freq": "weekdays"}
+    if value.startswith("weekly"):
+        if ":" not in value:
+            return {"freq": "weekly", "byweekday": [0]}
+        _, days = value.split(":", 1)
+        values = []
+        for part in days.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                day = int(part)
+            except ValueError as exc:
+                raise ValueError("weekly: укажи дни 0..6 через запятую") from exc
+            if day < 0 or day > 6:
+                raise ValueError("weekly: укажи дни 0..6")
+            values.append(day)
+        if not values:
+            raise ValueError("weekly: укажи минимум один день 0..6")
+        return {"freq": "weekly", "byweekday": sorted(set(values))}
+    if value.startswith("monthly"):
+        if ":" not in value:
+            raise ValueError("monthly: укажи число месяца, например monthly:15")
+        _, day_raw = value.split(":", 1)
+        try:
+            day = int(day_raw.strip())
+        except ValueError as exc:
+            raise ValueError("monthly: число 1..31") from exc
+        if day < 1 or day > 31:
+            raise ValueError("monthly: число 1..31")
+        return {"freq": "monthly", "bymonthday": day}
+    raise ValueError("Повтор: none/daily/weekdays/weekly:1,3,5/monthly:15")
+
+
+def _recurrence_label(recurrence: dict[str, object] | None) -> str:
+    if not recurrence:
+        return "без повтора"
+    freq = recurrence.get("freq")
+    if freq == "weekly":
+        days = recurrence.get("byweekday")
+        if isinstance(days, list):
+            return f"еженедельно ({','.join(str(x) for x in days)})"
+    if freq == "monthly":
+        return f"ежемесячно ({recurrence.get('bymonthday')})"
+    if isinstance(freq, str):
+        return freq
+    return "без повтора"
 def _expired_result() -> OrchestratorResult:
     return refused(
         "Сценарий истёк, начни заново.",
