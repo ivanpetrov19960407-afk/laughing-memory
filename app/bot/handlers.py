@@ -1776,6 +1776,7 @@ async def _dispatch_command_payload(
         query = args.strip()
         if not query:
             return refused("Укажи запрос: /search <текст>", intent="menu.search", mode="local")
+            return refused("Использование: /search <запрос>", intent="menu.search", mode="local")
         return await orchestrator.handle(f"/search {query}", _build_user_context(update))
     if normalized == "/reminders":
         now = datetime.now(tz=calendar_store.MOSCOW_TZ)
