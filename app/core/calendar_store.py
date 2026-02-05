@@ -213,26 +213,32 @@ async def add_item(
             "chat_id": chat_id,
             "user_id": user_id,
         }
-        reminder = {
-            "reminder_id": reminder_id,
-            "event_id": event_id,
-            "user_id": user_id,
-            "chat_id": chat_id,
-            "trigger_at": remind_at_value,
-            "text": title,
-            "enabled": reminders_enabled,
-            "sent_at": None,
-            "status": "active" if reminders_enabled else "disabled",
-            "recurrence": None,
-            "last_triggered_at": None,
-        }
+        reminder: dict[str, object] | None = None
+        if remind_at is not None or reminders_enabled:
+            reminder = {
+                "reminder_id": reminder_id,
+                "event_id": event_id,
+                "user_id": user_id,
+                "chat_id": chat_id,
+                "trigger_at": remind_at_value,
+                "text": title,
+                "enabled": reminders_enabled,
+                "sent_at": None,
+                "status": "active" if reminders_enabled else "disabled",
+                "recurrence": None,
+                "last_triggered_at": None,
+            }
         events.append(event)
-        reminders.append(reminder)
+        if reminder is not None:
+            reminders.append(reminder)
         store["events"] = events
         store["reminders"] = reminders
         store["updated_at"] = now_iso
         save_store_atomic(store)
-        return {"event": event, "reminder": reminder}
+        result: dict[str, object] = {"event": event}
+        if reminder is not None:
+            result["reminder"] = reminder
+        return result
 
 
 async def add_reminder(
