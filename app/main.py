@@ -13,11 +13,6 @@ from app.bot import actions, handlers, wizard
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
 from app.core.reminders import ReminderScheduler
 from app.core.dialog_memory import DialogMemory
-from app.core.wizard_manager import WizardManager
-from app.core.wizard_runtime import WizardRuntime
-from app.core.wizards import calendar_add as wizard_calendar_add
-from app.core.wizards import echo as wizard_echo
-from app.core.wizards import echo_confirm as wizard_echo_confirm
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.config import load_settings
@@ -58,7 +53,6 @@ def main() -> None:
         openai_client = OpenAIClient(
             api_key=settings.openai_api_key,
             model=settings.openai_model,
-            image_model=settings.openai_image_model,
             timeout_seconds=settings.openai_timeout_seconds,
         )
         llm_client = openai_client
@@ -104,12 +98,6 @@ def main() -> None:
 
     warnings.filterwarnings("ignore", message="No JobQueue set up", category=PTBUserWarning)
     application = Application.builder().token(settings.bot_token).build()
-    wizard_manager = WizardManager(timeout_seconds=900)
-    wizard_runtime = WizardRuntime(wizard_manager)
-    wizard_calendar_add.register(wizard_runtime)
-    wizard_echo.register(wizard_runtime)
-    wizard_echo_confirm.register(wizard_runtime)
-    application.bot_data["wizard_runtime"] = wizard_runtime
     reminder_scheduler = ReminderScheduler(
         application=application,
         max_future_days=settings.reminder_max_future_days,
@@ -164,15 +152,9 @@ def main() -> None:
     application.add_handler(CommandHandler("tasks", handlers.tasks))
     application.add_handler(CommandHandler("task", handlers.task))
     application.add_handler(CommandHandler("reminders", handlers.reminders))
-    application.add_handler(CommandHandler("wtest", handlers.wtest))
-    application.add_handler(CommandHandler("wtest2", handlers.wtest2))
-    application.add_handler(CommandHandler("calendar_add", handlers.calendar_add_command))
-    application.add_handler(CommandHandler("cancel_wizard", handlers.cancel_wizard))
     application.add_handler(CommandHandler("menu", handlers.menu_command))
     application.add_handler(CallbackQueryHandler(handlers.static_callback, pattern="^cb:"))
-    application.add_handler(CallbackQueryHandler(handlers.wiz_callback, pattern="^wiz:"))
     application.add_handler(CallbackQueryHandler(handlers.action_callback))
-    application.add_handler(MessageHandler(filters.PHOTO, handlers.photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
     application.add_handler(MessageHandler(filters.COMMAND, handlers.unknown_command))
     application.add_error_handler(handlers.error_handler)

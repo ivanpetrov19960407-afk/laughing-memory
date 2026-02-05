@@ -20,7 +20,6 @@ class Settings:
     db_path: Path
     openai_api_key: str | None
     openai_model: str
-    openai_image_model: str
     openai_timeout_seconds: float
     perplexity_api_key: str | None
     perplexity_base_url: str
@@ -63,7 +62,6 @@ def load_settings() -> Settings:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     openai_api_key = os.getenv("OPENAI_API_KEY") or None
     openai_model = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
-    openai_image_model = os.getenv("OPENAI_IMAGE_MODEL", "dall-e-3")
     openai_timeout_seconds = _parse_optional_float(os.getenv("OPENAI_TIMEOUT_SECONDS"), 30.0)
     perplexity_api_key = os.getenv("PERPLEXITY_API_KEY") or None
     perplexity_base_url = os.getenv("PERPLEXITY_BASE_URL", "https://api.perplexity.ai")
@@ -115,7 +113,6 @@ def load_settings() -> Settings:
         db_path=db_path,
         openai_api_key=openai_api_key,
         openai_model=openai_model,
-        openai_image_model=openai_image_model,
         openai_timeout_seconds=openai_timeout_seconds,
         perplexity_api_key=perplexity_api_key,
         perplexity_base_url=perplexity_base_url,
