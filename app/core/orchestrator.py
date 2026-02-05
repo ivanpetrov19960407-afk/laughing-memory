@@ -10,9 +10,11 @@ from typing import Any
 
 from app.core.decision import Decision
 from app.core.models import TaskExecutionResult
+from app.core.facts import build_sources_prompt, render_fact_response_with_sources
 from app.core.result import (
     OrchestratorResult,
     Source,
+    ensure_safe_text_strict,
     ensure_valid,
     error,
     ok,
@@ -24,6 +26,7 @@ from app.infra.access import AccessController
 from app.infra.llm import LLMAPIError, LLMClient, LLMGuardError, ensure_plain_text
 from app.infra.rate_limit import RateLimiter
 from app.infra.storage import TaskStorage
+from app.tools.web_search import NullSearchClient, SearchClient
 
 
 LOGGER = logging.getLogger(__name__)
@@ -87,6 +90,8 @@ class Orchestrator:
         rate_limiter: RateLimiter | None = None,
         llm_history_turns: int | None = None,
         llm_model: str | None = None,
+        search_client: SearchClient | None = None,
+        feature_web_search: bool = True,
     ) -> None:
         self._config = config
         self._storage = storage
@@ -96,6 +101,8 @@ class Orchestrator:
         self._rate_limiter = rate_limiter
         self._llm_history_turns = llm_history_turns
         self._llm_model = llm_model
+        self._search_client = search_client or NullSearchClient()
+        self._feature_web_search = feature_web_search
         self._facts_only_default = _coerce_bool(config.get("facts_only_default", False))
         self._facts_only_by_user: dict[int, bool] = {}
 
@@ -162,6 +169,15 @@ class Orchestrator:
                 execution,
                 intent=decision.intent,
                 facts_only=self.is_facts_only(user_id),
+            )
+
+        if decision.intent == "command.search":
+            _, payload = _split_command(trimmed)
+            return await self.run_fact_answer(
+                user_id,
+                payload,
+                facts_only=True,
+                intent="command.search",
             )
 
         execution, _ = await self._request_llm(
@@ -254,6 +270,7 @@ class Orchestrator:
         executed_at = datetime.now(timezone.utc)
         trimmed = prompt.strip()
         sources_requested = is_sources_request(trimmed)
+        strict_sources_requested = sources_requested and mode != "search"
         if not trimmed:
             execution = self._error_execution(user_id, mode, prompt, "Запрос пустой.", executed_at)
             return execution, []
@@ -357,8 +374,13 @@ class Orchestrator:
                     web_search_options=None,
                 )
                 result = ensure_plain_text(response_text)
-                sanitized, meta = sanitize_llm_text(result, sources_requested=sources_requested)
-                if sources_requested and meta.get("needs_regeneration"):
+                allow_source_citations = mode == "search" or strict_sources_requested
+                sanitized, meta = sanitize_llm_text(
+                    result,
+                    sources_requested=strict_sources_requested,
+                    allow_source_citations=allow_source_citations,
+                )
+                if strict_sources_requested and meta.get("needs_regeneration"):
                     regen_instruction = (
                         "Объясни простыми словами, без чисел, без терминов, без науки, "
                         "как для человека без медицинских знаний."
@@ -372,10 +394,15 @@ class Orchestrator:
                         web_search_options=None,
                     )
                     result = ensure_plain_text(response_text)
-                    sanitized, meta = sanitize_llm_text(result, sources_requested=sources_requested)
+                    allow_source_citations = mode == "search" or strict_sources_requested
+                    sanitized, meta = sanitize_llm_text(
+                        result,
+                        sources_requested=strict_sources_requested,
+                        allow_source_citations=allow_source_citations,
+                    )
                 if meta["failed"]:
                     result = SAFE_FALLBACK_TEXT
-                    if sources_requested:
+                    if strict_sources_requested:
                         result = f"{SOURCES_DISCLAIMER_TEXT}\n{result}"
                     LOGGER.warning(
                         "LLM text sanitization failed: user_id=%s mode=%s meta=%s",
@@ -565,49 +592,105 @@ class Orchestrator:
             LOGGER.info("Routing: user_id=%s action=local name=json_pretty", user_id)
             return self.execute_task(user_id, "json_pretty", payload)
 
-        if lower.startswith("/search "):
-            payload = trimmed[8:].strip()
+        if lower.startswith("/search"):
+            payload = trimmed[7:].strip()
             if not payload:
                 return ensure_valid(
                     refused(
-                        "Введите текст поиска. Пример: /search Новости",
-                        intent="search",
-                        mode="llm",
+                        "Укажи запрос: /search <текст>",
+                        intent="command.search",
+                        mode="local",
                         debug={"reason": "missing_payload"},
                     )
                 )
-            return ensure_valid(
-                refused(
-                    _UNKNOWN_COMMAND_MESSAGE,
-                    intent="command.search",
-                    mode="local",
-                    debug={"reason": "search_disabled"},
-                )
-            )
+            return await self.run_fact_answer(user_id, payload, facts_only=True, intent="command.search")
 
         if lower.startswith("search ") or lower.startswith("search:"):
             payload = trimmed[7:].strip()
             if not payload:
                 return ensure_valid(
                     refused(
-                        "Введите текст поиска. Пример: search Новости",
-                        intent="search",
-                        mode="llm",
+                        "Укажи запрос: /search <текст>",
+                        intent="command.search",
+                        mode="local",
                         debug={"reason": "missing_payload"},
                     )
                 )
-            return ensure_valid(
-                refused(
-                    _UNKNOWN_COMMAND_MESSAGE,
-                    intent="command.search",
-                    mode="local",
-                    debug={"reason": "search_disabled"},
-                )
-            )
+            return await self.run_fact_answer(user_id, payload, facts_only=True, intent="command.search")
 
         LOGGER.info("Routing: user_id=%s action=perplexity mode=ask", user_id)
         execution = await self.ask_llm(user_id, trimmed, mode="ask")
         return self._build_llm_result(execution, intent="ask", facts_only=False)
+
+    async def run_fact_answer(self, user_id: int, query: str, *, facts_only: bool, intent: str) -> OrchestratorResult:
+        if not self._feature_web_search:
+            return ensure_valid(
+                refused(
+                    "Поиск временно отключён.",
+                    intent=intent,
+                    mode="tool",
+                    debug={"reason": "web_search_disabled"},
+                )
+            )
+        trimmed_query = query.strip()
+        if not trimmed_query:
+            return ensure_valid(
+                refused(
+                    "Укажи запрос: /search <текст>",
+                    intent=intent,
+                    mode="local",
+                    debug={"reason": "missing_payload"},
+                )
+            )
+        started_at = time.monotonic()
+        try:
+            sources = await self._search_client.search(trimmed_query, max_results=5)
+        except Exception as exc:
+            LOGGER.warning("Web search failed: %s", exc, exc_info=True)
+            sources = []
+
+        if not sources:
+            reason = "facts_only_no_sources" if facts_only else "search_no_results"
+            return ensure_valid(
+                refused(
+                    "Ничего не найдено по запросу.",
+                    intent=intent,
+                    mode="tool",
+                    debug={"reason": reason, "query": trimmed_query},
+                )
+            )
+
+        sources_prompt = build_sources_prompt(sources)
+        llm_prompt = (
+            f"Вопрос пользователя: {trimmed_query}\n\n"
+            f"{sources_prompt}\n\n"
+            "Инструкция: Отвечай строго по источникам. Каждый факт помечай ссылками [N]. "
+            "Не придумывай. Если в источниках нет ответа — скажи, что данных нет."
+        )
+        execution, _ = await self._request_llm(user_id, llm_prompt, mode="search")
+        if execution.status != "success":
+            return ensure_valid(
+                error(
+                    execution.result,
+                    intent=intent,
+                    mode="llm",
+                    debug={"task_name": execution.task_name, "reason": "search_llm_error"},
+                )
+            )
+
+        rendered = render_fact_response_with_sources(execution.result, sources)
+        result = ok(
+            rendered,
+            intent=intent,
+            mode="llm",
+            sources=sources,
+            debug={
+                "provider": "perplexity_search",
+                "sources_count": len(sources),
+                "latency_seconds": round(time.monotonic() - started_at, 3),
+            },
+        )
+        return ensure_valid(ensure_safe_text_strict(result, facts_enabled=facts_only, allow_sources_in_text=True))
 
     def is_allowed(self, user_id: int) -> bool:
         return self._ensure_allowed(user_id)[0]
@@ -777,7 +860,9 @@ class Orchestrator:
                     return Decision(intent="utility_summary", status="refused", reason="missing_summary_payload")
                 return Decision(intent="utility_summary", status="ok")
             if command == "/search":
-                return Decision(intent="command.search", status="refused", reason="search_disabled")
+                if not payload:
+                    return Decision(intent="command.search", status="refused", reason="missing_search_payload")
+                return Decision(intent="command.search", status="ok")
             return Decision(intent="command.unknown", status="refused", reason="unknown_command")
         intent = detect_intent(trimmed)
         return Decision(intent=intent, status="ok")
@@ -797,6 +882,12 @@ class Orchestrator:
                 intent=decision.intent,
                 mode="local",
             )
+        if decision.reason == "missing_search_payload":
+            return refused(
+                "Укажи запрос: /search <текст>",
+                intent=decision.intent,
+                mode="local",
+            )
         if decision.reason == "missing_summary_payload":
             return refused(
                 "Использование: summary: <текст> или /summary <текст>.",
@@ -805,7 +896,7 @@ class Orchestrator:
             )
         if decision.reason == "destructive":
             return refused(_DESTRUCTIVE_REFUSAL, intent=decision.intent, mode="local")
-        if decision.reason in {"search_disabled", "unknown_command"}:
+        if decision.reason in {"unknown_command"}:
             return refused(_UNKNOWN_COMMAND_MESSAGE, intent=decision.intent, mode="local")
         return refused("Команда не поддерживается в этом режиме.", intent=decision.intent, mode="local")
 
