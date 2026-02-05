@@ -24,6 +24,23 @@ from app.tools import NullSearchClient, PerplexityWebSearchClient
 from app.storage.wizard_store import WizardStore
 
 
+def _register_handlers(application: Application) -> None:
+    application.add_handler(CommandHandler("start", handlers.start))
+    application.add_handler(CommandHandler("help", handlers.help_command))
+    application.add_handler(CommandHandler("ping", handlers.ping))
+    application.add_handler(CommandHandler("tasks", handlers.tasks))
+    application.add_handler(CommandHandler("task", handlers.task))
+    application.add_handler(CommandHandler("reminders", handlers.reminders))
+    application.add_handler(CommandHandler("search", handlers.search))
+    application.add_handler(CommandHandler("facts_on", handlers.facts_on))
+    application.add_handler(CommandHandler("facts_off", handlers.facts_off))
+    application.add_handler(CommandHandler("menu", handlers.menu_command))
+    application.add_handler(CallbackQueryHandler(handlers.static_callback, pattern="^cb:"))
+    application.add_handler(CallbackQueryHandler(handlers.action_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
+    application.add_handler(MessageHandler(filters.COMMAND, handlers.unknown_command))
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -157,6 +174,7 @@ def main() -> None:
 
     application.post_init = _restore_reminders
 
+    _register_handlers(application)
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("help", handlers.help_command))
     application.add_handler(CommandHandler("ping", handlers.ping))

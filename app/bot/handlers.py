@@ -455,6 +455,27 @@ async def _send_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: s
     await safe_send_text(update, context, text, reply_markup=reply_markup)
 
 
+def _render_text_with_sources(text: str, sources: list[Any]) -> str:
+    base = (text or "").rstrip()
+    if not sources:
+        return base
+    if "\nИсточники:\n" in base or base.endswith("\nИсточники:"):
+        return base
+    lines: list[str] = []
+    for index, source in enumerate(sources, start=1):
+        if isinstance(source, dict):
+            url = str(source.get("url") or "").strip()
+        else:
+            url = str(getattr(source, "url", "") or "").strip()
+        if not url:
+            continue
+        lines.append(f"{index}) {url}")
+    if not lines:
+        return base
+    return f"{base}\n\nИсточники:\n" + "\n".join(lines)
+
+
+
 async def _send_reply_keyboard_remove(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -551,7 +572,8 @@ async def send_result(
             return
         context.chat_data[sent_key] = True
     _log_orchestrator_result(user_id, public_result, request_id=request_id)
-    output_preview = public_result.text.replace("\n", " ").strip()
+    final_text = _render_text_with_sources(public_result.text, public_result.sources)
+    output_preview = final_text.replace("\n", " ").strip()
     if len(output_preview) > 80:
         output_preview = f"{output_preview[:80].rstrip()}…"
     inline_keyboard = build_inline_keyboard(
@@ -566,7 +588,7 @@ async def send_result(
         f"actions={len(public_result.actions)} "
         f"reply_markup={effective_reply_markup is not None}",
     )
-    await _send_text(update, context, public_result.text, reply_markup=effective_reply_markup)
+    await _send_text(update, context, final_text, reply_markup=effective_reply_markup)
     await _send_attachments(update, context, public_result.attachments)
     if request_id:
         LOGGER.info(
@@ -1753,6 +1775,7 @@ async def _dispatch_command_payload(
     if normalized == "/search":
         query = args.strip()
         if not query:
+            return refused("Укажи запрос: /search <текст>", intent="menu.search", mode="local")
             return refused("Использование: /search <запрос>", intent="menu.search", mode="local")
         return await orchestrator.handle(f"/search {query}", _build_user_context(update))
     if normalized == "/reminders":
