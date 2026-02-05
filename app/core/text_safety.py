@@ -118,10 +118,16 @@ def _rewrite_stats_sentence(sentence: str) -> str:
     return normalized
 
 
-def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[str, dict[str, Any]]:
+def sanitize_llm_text(
+    text: str,
+    *,
+    sources_requested: bool = False,
+    allow_source_citations: bool = False,
+) -> tuple[str, dict[str, Any]]:
     original = text or ""
     working = original
     removal_counts: dict[str, int] = {}
+    effective_sources_requested = sources_requested and not allow_source_citations
 
     def _strip_markdown_link(match: re.Match[str]) -> str:
         label = match.group(1).strip()
@@ -132,8 +138,12 @@ def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[st
     working, removal_counts["www"] = _WWW_RE.subn("", working)
     working, removal_counts["domains"] = _DOMAIN_RE.subn("", working)
     working, removal_counts["doi"] = _DOI_RE.subn("", working)
-    working, removal_counts["bracket_citations"] = _BRACKET_CITATION_RE.subn("", working)
-    working, removal_counts["paren_citations"] = _PAREN_CITATION_RE.subn("", working)
+    if allow_source_citations:
+        removal_counts["bracket_citations"] = 0
+        removal_counts["paren_citations"] = 0
+    else:
+        working, removal_counts["bracket_citations"] = _BRACKET_CITATION_RE.subn("", working)
+        working, removal_counts["paren_citations"] = _PAREN_CITATION_RE.subn("", working)
     working, removal_counts["source_lines"] = _SOURCE_LINE_RE.subn("", working)
     working, removal_counts["attribution_leads"] = _ATTRIBUTION_LEAD_RE.subn("", working)
 
@@ -146,7 +156,7 @@ def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[st
     working, removal_counts["forbidden_phrases"] = _FORBIDDEN_PHRASES_RE.subn("", working)
 
     strict_removed_sentences = 0
-    if sources_requested:
+    if effective_sources_requested:
         sentences = _split_sentences(working)
         kept: list[str] = []
         for sentence in sentences:
@@ -177,7 +187,7 @@ def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[st
     removed_chars = max(original_len - sanitized_len, 0)
     removed_ratio = removed_chars / original_len if original_len else 0.0
 
-    if sources_requested:
+    if effective_sources_requested:
         content = working
         if content and content.startswith(SOURCES_DISCLAIMER_TEXT):
             content = content[len(SOURCES_DISCLAIMER_TEXT) :].strip()
@@ -185,19 +195,19 @@ def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[st
         content = working
     sentence_count = len(_split_sentences(content))
     needs_regeneration = bool(
-        sources_requested and (not content or sentence_count < 2 or len(content) < 40)
+        effective_sources_requested and (not content or sentence_count < 2 or len(content) < 40)
     )
 
     disclaimer_added = False
-    if sources_requested:
+    if effective_sources_requested:
         if not working.startswith(SOURCES_DISCLAIMER_TEXT):
             working = f"{SOURCES_DISCLAIMER_TEXT}\n{working}".strip() if working else SOURCES_DISCLAIMER_TEXT
             disclaimer_added = True
 
     forbidden_remaining = bool(
         _MARKDOWN_LINK_RE.search(working)
-        or _BRACKET_CITATION_RE.search(working)
-        or _PAREN_CITATION_RE.search(working)
+        or (not allow_source_citations and _BRACKET_CITATION_RE.search(working))
+        or (not allow_source_citations and _PAREN_CITATION_RE.search(working))
         or _SOURCES_HEADER_RE.search(working)
         or _SOURCE_LINE_RE.search(working)
         or _FORBIDDEN_PHRASES_RE.search(working)
@@ -206,7 +216,7 @@ def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[st
         or _DOMAIN_RE.search(working)
         or _DOI_RE.search(working)
         or (
-            sources_requested
+            effective_sources_requested
             and (
                 _STRICT_BLOCK_RE.search(content)
                 or _HAS_DIGIT_RE.search(content)
@@ -234,5 +244,7 @@ def sanitize_llm_text(text: str, *, sources_requested: bool = False) -> tuple[st
         "disclaimer_added": disclaimer_added,
         "needs_regeneration": needs_regeneration,
         "sources_requested": sources_requested,
+        "effective_sources_requested": effective_sources_requested,
+        "allow_source_citations": allow_source_citations,
     }
     return working, meta

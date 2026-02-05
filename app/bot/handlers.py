@@ -1231,7 +1231,9 @@ async def _handle_menu_section(
             "calendar": "Календарь: добавить/посмотреть/удалить события.",
             "reminders": "Напоминания: создать/список/удалить.",
             "settings": "Настройки режимов и поведения.",
-            "search": "Введи запрос командой /search <запрос>.",
+            "search": "Ищу в интернете и даю ссылки на источники. Введи запрос командой /search <запрос>.",
+            "images": "Опиши картинку — сгенерирую.",
+            "image_examples": "Примеры: слон в космосе, кот в стиле пиксель-арт.",
         }
         if section not in text_map:
             return refused(
@@ -1373,8 +1375,46 @@ async def _handle_menu_section(
         )
     if section == "search":
         return ok(
-            "Введи запрос командой /search <запрос>.",
+            "Ищу в интернете и даю ссылки на источники. Введи запрос командой /search <запрос>.",
             intent="menu.search",
+            mode="local",
+            actions=[
+                Action(
+                    id="search.new",
+                    label="🔎 Новый поиск",
+                    payload={"op": "run_command", "command": "/search", "args": ""},
+                ),
+                Action(
+                    id="search.facts",
+                    label="📌 Режим фактов",
+                    payload={"op": "run_command", "command": facts_command, "args": ""},
+                ),
+                _menu_action(),
+            ],
+        )
+    if section == "images":
+        return ok(
+            "Опиши картинку — сгенерирую.",
+            intent="menu.images",
+            mode="local",
+            actions=[
+                Action(
+                    id="images.generate",
+                    label="🖼 Сгенерировать",
+                    payload={"op": "run_command", "command": "/image", "args": ""},
+                ),
+                Action(
+                    id="images.examples",
+                    label="ℹ️ Примеры",
+                    payload={"op": "menu_section", "section": "image_examples"},
+                ),
+                _menu_action(),
+            ],
+        )
+    if section == "image_examples":
+        return ok(
+            "Примеры:\n• Слон в космосе\n• Замок на берегу моря\n• Робот в стиле пиксель-арт",
+            intent="menu.images.examples",
             mode="local",
             actions=[_menu_action()],
         )
@@ -1773,6 +1813,12 @@ async def _dispatch_command_payload(
         return ok(
             "Summary: /summary <текст> или summary: <текст>.",
             intent="menu.summary",
+            mode="local",
+        )
+    if normalized == "/image":
+        return refused(
+            "Укажите описание изображения. Пример: /image Слон в космосе",
+            intent="command.image",
             mode="local",
         )
     if normalized == "/search":
