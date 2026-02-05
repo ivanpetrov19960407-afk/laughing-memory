@@ -44,26 +44,40 @@ class ReminderScheduler:
         self._timezone = timezone
         self._max_future_days = max_future_days or _get_max_future_days()
 
-    async def schedule_reminder(self, reminder: calendar_store.ReminderItem) -> str | None:
+    async def schedule_reminder(
+        self,
+        reminder: calendar_store.ReminderItem,
+        *,
+        now: datetime | None = None,
+    ) -> str | None:
         if not self._application.job_queue:
             LOGGER.warning("Reminder scheduling skipped: job_queue unavailable (reminder_id=%s)", reminder.id)
             return None
         if not reminder.enabled:
             LOGGER.info("Reminder skipped (disabled): reminder_id=%s", reminder.id)
             return None
-        now = datetime.now(tz=self._timezone)
-        if reminder.trigger_at <= now:
+        current = now or datetime.now(tz=self._timezone)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=self._timezone)
+        else:
+            current = current.astimezone(self._timezone)
+        trigger_at = reminder.trigger_at
+        if trigger_at.tzinfo is None:
+            trigger_at = trigger_at.replace(tzinfo=self._timezone)
+        else:
+            trigger_at = trigger_at.astimezone(self._timezone)
+        if trigger_at <= current:
             LOGGER.info(
                 "Reminder skipped (past trigger): reminder_id=%s trigger_at=%s",
                 reminder.id,
-                reminder.trigger_at.isoformat(),
+                trigger_at.isoformat(),
             )
             return None
-        if reminder.trigger_at > now + timedelta(days=self._max_future_days):
+        if trigger_at > current + timedelta(days=self._max_future_days):
             LOGGER.info(
                 "Reminder skipped (too far): reminder_id=%s trigger_at=%s",
                 reminder.id,
-                reminder.trigger_at.isoformat(),
+                trigger_at.isoformat(),
             )
             return None
         job_name = self._job_name(reminder.id)
@@ -100,14 +114,27 @@ class ReminderScheduler:
 
     async def restore_all(self, now: datetime | None = None) -> int:
         current = now or datetime.now(tz=self._timezone)
-        reminders = await self._store.list_reminders(current, limit=None)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=self._timezone)
+        else:
+            current = current.astimezone(self._timezone)
+        reminders = await self._store.list_reminders(current, limit=None, include_disabled=True)
         restored = 0
         for reminder in reminders:
-            if reminder.trigger_at <= current:
+            if not reminder.enabled:
                 continue
-            if reminder.trigger_at > current + timedelta(days=self._max_future_days):
+            if reminder.sent_at is not None:
                 continue
-            if await self.schedule_reminder(reminder):
+            trigger_at = reminder.trigger_at
+            if trigger_at.tzinfo is None:
+                trigger_at = trigger_at.replace(tzinfo=current.tzinfo)
+            else:
+                trigger_at = trigger_at.astimezone(current.tzinfo)
+            if trigger_at <= current:
+                continue
+            if trigger_at > current + timedelta(days=self._max_future_days):
+                continue
+            if await self.schedule_reminder(reminder, now=current):
                 restored += 1
         LOGGER.info("Reminder restore complete: restored=%s total=%s", restored, len(reminders))
         return restored
