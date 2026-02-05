@@ -66,13 +66,14 @@ class ReminderScheduler:
             trigger_at = trigger_at.replace(tzinfo=self._timezone)
         else:
             trigger_at = trigger_at.astimezone(self._timezone)
+        when_value: datetime | int = reminder.trigger_at
         if trigger_at <= current:
             LOGGER.info(
-                "Reminder skipped (past trigger): reminder_id=%s trigger_at=%s",
+                "Reminder past trigger scheduled immediately: reminder_id=%s trigger_at=%s",
                 reminder.id,
                 trigger_at.isoformat(),
             )
-            return None
+            when_value = 0
         if trigger_at > current + timedelta(days=self._max_future_days):
             LOGGER.info(
                 "Reminder skipped (too far): reminder_id=%s trigger_at=%s",
@@ -85,7 +86,7 @@ class ReminderScheduler:
             job.schedule_removal()
         self._application.job_queue.run_once(
             self._job_callback,
-            when=reminder.trigger_at,
+            when=when_value,
             name=job_name,
             data={"reminder_id": reminder.id},
         )

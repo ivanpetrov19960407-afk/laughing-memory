@@ -1,20 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 import sys
 import time
 from collections.abc import Awaitable, Callable
-from datetime import date, datetime, time as dt_time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any
 
 import telegram
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
+from telegram import InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import ContextTypes
-from PIL import Image
-import pytesseract
 
 from app.bot import menu, routing, wizard
 from app.bot.actions import ActionStore, StoredAction, build_inline_keyboard, parse_callback_token
@@ -32,7 +29,6 @@ from app.core.result import (
     ratelimited,
     refused,
 )
-from app.core.wizard_runtime import WizardRuntime
 from app.core.tools_calendar import list_calendar_items, list_reminders
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
@@ -92,36 +88,6 @@ def _get_wizard_manager(context: ContextTypes.DEFAULT_TYPE) -> wizard.WizardMana
     if isinstance(manager, wizard.WizardManager):
         return manager
     return None
-
-
-def _get_wizard_runtime(context: ContextTypes.DEFAULT_TYPE) -> WizardRuntime | None:
-    runtime = context.application.bot_data.get("wizard_runtime")
-    if isinstance(runtime, WizardRuntime):
-        return runtime
-    return None
-
-
-def _build_wizard_cancel_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⛔ Отмена", callback_data="wiz:cancel")]],
-    )
-
-
-def _build_wizard_confirm_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("✅ Подтвердить", callback_data="wiz:confirm"),
-                InlineKeyboardButton("⛔ Отмена", callback_data="wiz:cancel"),
-            ],
-        ],
-    )
-
-
-def _wizard_markup_for_step(step_id: str | None) -> InlineKeyboardMarkup:
-    if step_id == "confirm":
-        return _build_wizard_confirm_markup()
-    return _build_wizard_cancel_markup()
 
 
 def _get_action_store(context: ContextTypes.DEFAULT_TYPE) -> ActionStore:
@@ -377,12 +343,12 @@ def _build_simple_result(
     debug: dict[str, Any] | None = None,
 ) -> OrchestratorResult:
     if status == "ok":
-        return ok(text, intent=intent, mode=mode, debug=debug)
+        return ensure_valid(ok(text, intent=intent, mode=mode, debug=debug))
     if status == "refused":
-        return refused(text, intent=intent, mode=mode, debug=debug)
+        return ensure_valid(refused(text, intent=intent, mode=mode, debug=debug))
     if status == "ratelimited":
-        return ratelimited(text, intent=intent, mode=mode, debug=debug)
-    return error(text, intent=intent, mode=mode, debug=debug)
+        return ensure_valid(ratelimited(text, intent=intent, mode=mode, debug=debug))
+    return ensure_valid(error(text, intent=intent, mode=mode, debug=debug))
 
 
 def _menu_action() -> Action:
@@ -658,80 +624,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 @_with_error_handling
-async def wtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context):
-        return
-    message = update.effective_message
-    if message is None:
-        return
-    runtime = _get_wizard_runtime(context)
-    if runtime is None:
-        await message.reply_text("Wizard runtime не настроен.")
-        return
-    user_id = update.effective_user.id if update.effective_user else 0
-    chat_id = update.effective_chat.id if update.effective_chat else 0
-    view = runtime.start(user_id, chat_id, "echo", "ask")
-    state = runtime.get_active(user_id, chat_id)
-    await message.reply_text(view.text, reply_markup=_wizard_markup_for_step(state.step_id if state else None))
-
-
-@_with_error_handling
-async def wtest2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context):
-        return
-    message = update.effective_message
-    if message is None:
-        return
-    runtime = _get_wizard_runtime(context)
-    if runtime is None:
-        await message.reply_text("Wizard runtime не настроен.")
-        return
-    user_id = update.effective_user.id if update.effective_user else 0
-    chat_id = update.effective_chat.id if update.effective_chat else 0
-    view = runtime.start(user_id, chat_id, "echo_confirm", "ask")
-    state = runtime.get_active(user_id, chat_id)
-    await message.reply_text(view.text, reply_markup=_wizard_markup_for_step(state.step_id if state else None))
-
-
-@_with_error_handling
-async def calendar_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context, bucket="ui"):
-        return
-    message = update.effective_message
-    if message is None:
-        return
-    runtime = _get_wizard_runtime(context)
-    if runtime is None:
-        await message.reply_text("Wizard runtime не настроен.")
-        return
-    user_id = update.effective_user.id if update.effective_user else 0
-    chat_id = update.effective_chat.id if update.effective_chat else 0
-    view = runtime.start(user_id, chat_id, "calendar_add", "ask")
-    state = runtime.get_active(user_id, chat_id)
-    await message.reply_text(view.text, reply_markup=_wizard_markup_for_step(state.step_id if state else None))
-
-
-@_with_error_handling
-async def cancel_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context):
-        return
-    message = update.effective_message
-    if message is None:
-        return
-    runtime = _get_wizard_runtime(context)
-    if runtime is None:
-        await message.reply_text("Wizard runtime не настроен.")
-        return
-    user_id = update.effective_user.id if update.effective_user else 0
-    chat_id = update.effective_chat.id if update.effective_chat else 0
-    state = runtime.cancel(user_id, chat_id)
-    if state is None:
-        await message.reply_text("Активный wizard не найден.")
-        return
-    await message.reply_text("Wizard отменён.")
-
-
-@_with_error_handling
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
@@ -964,53 +856,6 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         result = await orchestrator.handle(
             f"/ask {prompt}",
-            _build_user_context_with_dialog(
-                update,
-                dialog_context=dialog_context,
-                dialog_message_count=dialog_count,
-                request_id=request_id,
-            ),
-        )
-    except Exception as exc:
-        set_status(context, "error")
-        await _handle_exception(update, context, exc)
-        return
-    await send_result(update, context, result)
-    if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
-        await dialog_memory.add_assistant(user_id, chat_id, result.text)
-
-
-@_with_error_handling
-async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    orchestrator = _get_orchestrator(context)
-    if not await _guard_access(update, context):
-        return
-    prompt = " ".join(context.args).strip()
-    if not prompt:
-        result = _build_simple_result(
-            "Введите текст запроса. Пример: /search Новости",
-            intent="command.search",
-            status="refused",
-            mode="local",
-        )
-        await send_result(update, context, result)
-        return
-    user_id = update.effective_user.id if update.effective_user else 0
-    chat_id = update.effective_chat.id if update.effective_chat else 0
-    dialog_memory = _get_dialog_memory(context)
-    if dialog_memory and await dialog_memory.is_enabled(user_id):
-        await dialog_memory.add_user(user_id, chat_id, prompt)
-    dialog_context, dialog_count = await _prepare_dialog_context(
-        dialog_memory,
-        user_id=user_id,
-        chat_id=chat_id,
-        prompt=prompt,
-    )
-    request_context = get_request_context(context)
-    request_id = request_context.request_id if request_context else None
-    try:
-        result = await orchestrator.handle(
-            f"/search {prompt}",
             _build_user_context_with_dialog(
                 update,
                 dialog_context=dialog_context,
@@ -1341,20 +1186,24 @@ async def _handle_menu_section(
         text_map = {
             "home": "Выбери раздел:",
             "chat": "Пиши сообщением — отвечу. Можно вернуться в меню.",
-            "search": "Ищу в интернете и даю ссылки на источники.",
-            "images": "Опиши картинку — сгенерирую.",
             "calc": "Введи выражение (например: 12*(5+3)).",
             "calendar": "Календарь: добавить/посмотреть/удалить события.",
             "reminders": "Напоминания: создать/список/удалить.",
             "settings": "Настройки режимов и поведения.",
         }
-        text = text_map.get(section, "Выбери раздел:")
+        if section not in text_map:
+            return refused(
+                "Раздел меню недоступен.",
+                intent="menu.unknown",
+                mode="local",
+                actions=[_menu_action()],
+            )
         actions = (
             menu.build_menu_actions(facts_enabled=False, enable_menu=True)
             if section == "home"
             else [_menu_action()]
         )
-        return ok(text, intent=f"menu.section.{section}", mode="local", actions=actions)
+        return ok(text_map[section], intent=f"menu.section.{section}", mode="local", actions=actions)
     orchestrator = _get_orchestrator(context)
     facts_enabled = bool(user_id) and orchestrator.is_facts_only(user_id)
     facts_command = "/facts_off" if facts_enabled else "/facts_on"
@@ -1392,51 +1241,6 @@ async def _handle_menu_section(
             intent="menu.home",
             mode="local",
             actions=_build_menu_actions(context, user_id=user_id),
-        )
-    if section == "search":
-        return ok(
-            "Ищу в интернете и даю ссылки на источники.",
-            intent="menu.search",
-            mode="local",
-            actions=[
-                Action(
-                    id="search.new",
-                    label="🔎 Новый поиск",
-                    payload={"op": "run_command", "command": "/search", "args": ""},
-                ),
-                Action(
-                    id="search.facts",
-                    label="📌 Режим фактов",
-                    payload={"op": "run_command", "command": facts_command, "args": ""},
-                ),
-                _menu_action(),
-            ],
-        )
-    if section == "images":
-        return ok(
-            "Опиши картинку — сгенерирую.",
-            intent="menu.images",
-            mode="local",
-            actions=[
-                Action(
-                    id="images.generate",
-                    label="🖼 Сгенерировать",
-                    payload={"op": "run_command", "command": "/image", "args": ""},
-                ),
-                Action(
-                    id="images.examples",
-                    label="ℹ️ Примеры",
-                    payload={"op": "menu_section", "section": "images_examples"},
-                ),
-                _menu_action(),
-            ],
-        )
-    if section == "images_examples":
-        return ok(
-            "Примеры:\n• Лис в космосе\n• Город ночью\n• Кот на скейтборде",
-            intent="menu.images.examples",
-            mode="local",
-            actions=[_menu_action()],
         )
     if section == "calc":
         return ok(
@@ -1613,83 +1417,6 @@ async def static_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         intent=intent,
     )
     await send_result(update, context, result)
-
-
-@_with_error_handling
-async def wiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if query is None:
-        return
-    await _safe_answer_callback(query)
-    data = query.data or ""
-    user_id = update.effective_user.id if update.effective_user else 0
-    chat_id = update.effective_chat.id if update.effective_chat else 0
-    LOGGER.info("wiz_callback: data=%s user_id=%s chat_id=%s", data, user_id, chat_id)
-
-    async def _send_response(text: str) -> None:
-        try:
-            await query.edit_message_text(text)
-        except telegram.error.TelegramError:
-            message = update.effective_message
-            if message is not None:
-                await message.reply_text(text)
-            elif chat_id:
-                await context.bot.send_message(chat_id=chat_id, text=text)
-
-    try:
-        if data not in {"wiz:cancel", "wiz:confirm"}:
-            return
-        runtime = _get_wizard_runtime(context)
-        if data == "wiz:confirm":
-            if runtime is None or not runtime.has_active(user_id, chat_id):
-                await _send_response("Нет активного сценария.")
-                return
-            state = runtime.get_active(user_id, chat_id)
-            if state is None:
-                await _send_response("Нет активного сценария.")
-                return
-            if state.wizard_id == "calendar_add":
-                title = state.data.get("title")
-                date_value = state.data.get("date")
-                if not isinstance(title, str) or not isinstance(date_value, str):
-                    runtime.cancel(user_id, chat_id)
-                    await _send_response("Не удалось добавить событие.")
-                    LOGGER.info("wiz_callback: CONFIRM handled; wizard ended")
-                    return
-                try:
-                    event_date = date.fromisoformat(date_value)
-                    event_dt = datetime.combine(event_date, dt_time.min, tzinfo=calendar_store.MOSCOW_TZ)
-                    await calendar_store.add_item(
-                        dt=event_dt,
-                        title=title,
-                        chat_id=chat_id,
-                        remind_at=None,
-                        user_id=user_id,
-                        reminders_enabled=False,
-                    )
-                except Exception:
-                    LOGGER.exception("Failed to add calendar event from wizard")
-                    runtime.cancel(user_id, chat_id)
-                    await _send_response("Не удалось добавить событие.")
-                    LOGGER.info("wiz_callback: CONFIRM handled; wizard ended")
-                    return
-                runtime.cancel(user_id, chat_id)
-                await _send_response("Событие добавлено.")
-                LOGGER.info("wiz_callback: CONFIRM handled; wizard ended")
-                return
-            state.data["confirmed"] = True
-            runtime.cancel(user_id, chat_id)
-            await _send_response("Подтверждено.")
-            LOGGER.info("wiz_callback: CONFIRM handled; wizard ended")
-            return
-        if runtime is None or not runtime.has_active(user_id, chat_id):
-            await _send_response("Нет активного сценария.")
-            return
-        runtime.cancel(user_id, chat_id)
-        await _send_response("Сценарий отменён.")
-        LOGGER.info("wiz_callback: CANCEL handled; wizard ended")
-    finally:
-        return
 
 
 @_with_error_handling
@@ -1999,18 +1726,6 @@ async def _dispatch_command_payload(
             intent="menu.summary",
             mode="local",
         )
-    if normalized == "/search":
-        return refused(
-            "Введите текст запроса. Пример: /search Новости",
-            intent="menu.search",
-            mode="local",
-        )
-    if normalized == "/image":
-        return refused(
-            "Укажите описание изображения. Пример: /image Слон в космосе",
-            intent="menu.image",
-            mode="local",
-        )
     if normalized == "/reminders":
         now = datetime.now(tz=calendar_store.MOSCOW_TZ)
         return await list_reminders(now, limit=5, intent="menu.reminders")
@@ -2282,11 +1997,6 @@ async def _handle_reminder_on(
         intent="utility_reminders.on",
         mode="local",
     )
-
-
-def _extract_text_from_image(image_bytes: bytes) -> str:
-    with Image.open(io.BytesIO(image_bytes)) as image:
-        return pytesseract.image_to_string(image).strip()
 
 
 @_with_error_handling
@@ -2678,42 +2388,6 @@ async def reminder_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 @_with_error_handling
-async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context):
-        return
-    if not update.message or not update.message.photo:
-        return
-    file = await update.message.photo[-1].get_file()
-    buf = io.BytesIO()
-    await file.download_to_memory(out=buf)
-    image_bytes = buf.getvalue()
-    loop = asyncio.get_running_loop()
-    try:
-        text = await loop.run_in_executor(None, _extract_text_from_image, bytes(image_bytes))
-    except Exception:
-        LOGGER.exception("OCR failed")
-        result = _build_simple_result(
-            "Не удалось распознать текст.",
-            intent="utility_ocr",
-            status="error",
-            mode="local",
-        )
-        await send_result(update, context, result)
-        return
-    if not text:
-        result = _build_simple_result(
-            "Текст не найден.",
-            intent="utility_ocr",
-            status="refused",
-            mode="local",
-        )
-        await send_result(update, context, result)
-        return
-    result = _build_simple_result(text, intent="utility_ocr", status="ok", mode="local")
-    await send_result(update, context, result)
-
-
-@_with_error_handling
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     orchestrator = _get_orchestrator(context)
     if not await _guard_access(update, context):
@@ -2724,12 +2398,6 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
-    runtime = _get_wizard_runtime(context)
-    if runtime is not None and runtime.has_active(user_id, chat_id):
-        view = runtime.handle_text(user_id, chat_id, prompt)
-        state = runtime.get_active(user_id, chat_id)
-        await update.message.reply_text(view.text, reply_markup=_wizard_markup_for_step(state.step_id if state else None))
-        return
     if menu.is_menu_label(prompt):
         result = refused(
             "Используй /menu и нажимай кнопки, или введи команду /calc ...",
