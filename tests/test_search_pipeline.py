@@ -77,3 +77,18 @@ def test_search_integration_without_results(tmp_path: Path) -> None:
 
     assert result.status == "refused"
     assert result.sources == []
+
+
+def test_search_without_payload_returns_refused(tmp_path: Path) -> None:
+    storage = TaskStorage(tmp_path / "bot.db")
+    orchestrator = Orchestrator(
+        config={},
+        storage=storage,
+        llm_client=FakeLLM("ignored"),
+        search_client=FakeSearch([]),
+    )
+
+    result = asyncio.run(orchestrator.handle("/search", {"user_id": 1}))
+
+    assert result.status == "refused"
+    assert "Использование: /search <запрос>" in result.text

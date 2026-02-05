@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import re
 import sys
@@ -515,12 +516,18 @@ async def _send_attachments(
     if message is None:
         LOGGER.warning("Cannot send attachments: no message context.")
         return
+
+    def _field(item: Any, key: str) -> Any:
+        if isinstance(item, dict):
+            return item.get(key)
+        return getattr(item, key, None)
+
     for attachment in attachments:
-        attachment_type = getattr(attachment, "type", None) or attachment.get("type")
-        name = getattr(attachment, "name", None) or attachment.get("name")
-        payload_path = getattr(attachment, "path", None) or attachment.get("path")
-        payload_bytes = getattr(attachment, "bytes", None) or attachment.get("bytes")
-        payload_url = getattr(attachment, "url", None) or attachment.get("url")
+        attachment_type = _field(attachment, "type")
+        name = _field(attachment, "name")
+        payload_path = _field(attachment, "path")
+        payload_bytes = _field(attachment, "bytes")
+        payload_url = _field(attachment, "url")
         try:
             if payload_url:
                 if attachment_type == "image":
@@ -807,22 +814,9 @@ async def task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
         return
-
-    status = tool_result.status
-    text = (
-        "Результат:\n"
-        f"Задача: {task_name}\n"
-        f"Статус: {status}\n"
-        f"Ответ: {tool_result.text}"
-    )
-    result = (
-        ok(text, intent="command.task", mode="local")
-        if status == "ok"
-        else refused(text, intent="command.task", mode="local")
-        if status == "refused"
-        else error(text, intent="command.task", mode="local")
-    )
-    await send_result(update, context, result)
+    # Orchestrator v2 rule: handlers must not rewrite intent/status/text.
+    # We pass-through the tool result and let UI renderer handle it.
+    await send_result(update, context, tool_result)
 
 
 @_with_error_handling
@@ -1785,7 +1779,6 @@ async def _dispatch_command_payload(
     if normalized == "/search":
         query = args.strip()
         if not query:
-            return refused("Укажи запрос: /search <текст>", intent="menu.search", mode="local")
             return refused("Использование: /search <запрос>", intent="menu.search", mode="local")
         return await orchestrator.handle(f"/search {query}", _build_user_context(update))
     if normalized == "/reminders":

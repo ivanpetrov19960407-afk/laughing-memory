@@ -200,6 +200,16 @@ def test_ensure_valid_dict_result_defaults() -> None:
     assert result.debug == {}
 
 
+def test_ensure_valid_preserves_ratelimited_status() -> None:
+    result = ensure_valid({"status": "ratelimited", "text": "slow down", "intent": "rate_limit", "mode": "local"})
+    assert result.status == "ratelimited"
+
+
+def test_ensure_valid_clamps_invalid_mode() -> None:
+    result = ensure_valid({"status": "ok", "text": "x", "intent": "test", "mode": "invalid"})
+    assert result.mode == "local"
+
+
 def test_strict_guard_allows_text_when_sources_present() -> None:
     result = ok("Sources: [1]", intent="test", mode="llm", sources=[{"title": "x", "url": "y", "snippet": "z"}])
     guarded = ensure_safe_text_strict(result, facts_enabled=False, allow_sources_in_text=False)
