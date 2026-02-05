@@ -48,7 +48,7 @@ def _write_store(store: dict[str, object]) -> None:
 
 
 def test_restore_schedules_only_future(calendar_path) -> None:
-    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.VIENNA_TZ)
+    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.MOSCOW_TZ)
     past_trigger = (now - timedelta(minutes=30)).isoformat()
     future_trigger = (now + timedelta(minutes=30)).isoformat()
     store = {
@@ -105,7 +105,7 @@ def test_restore_schedules_only_future(calendar_path) -> None:
 
 
 def test_add_creates_reminder(calendar_path) -> None:
-    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.VIENNA_TZ)
+    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.MOSCOW_TZ)
     item = asyncio_run(
         calendar_store.add_item(
             dt=now + timedelta(hours=1),
@@ -122,7 +122,7 @@ def test_add_creates_reminder(calendar_path) -> None:
 
 
 def test_del_cancels_reminder(calendar_path) -> None:
-    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.VIENNA_TZ)
+    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.MOSCOW_TZ)
     result_item = asyncio_run(
         calendar_store.add_item(
             dt=now + timedelta(hours=2),
@@ -148,7 +148,7 @@ def test_del_cancels_reminder(calendar_path) -> None:
 
 
 def test_snooze_shifts_trigger(calendar_path) -> None:
-    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.VIENNA_TZ)
+    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.MOSCOW_TZ)
     item = asyncio_run(
         calendar_store.add_item(
             dt=now + timedelta(hours=2),
@@ -161,14 +161,14 @@ def test_snooze_shifts_trigger(calendar_path) -> None:
     reminder_id = item["reminder"]["reminder_id"]
     reminder = asyncio_run(calendar_store.get_reminder(reminder_id))
     updated = asyncio_run(
-        calendar_store.apply_snooze(reminder_id, minutes=30, base_trigger_at=reminder.trigger_at)
+        calendar_store.apply_snooze(reminder_id, minutes=30, now=now, base_trigger_at=reminder.trigger_at)
     )
     assert updated is not None
     assert updated.trigger_at == reminder.trigger_at + timedelta(minutes=30)
 
 
 def test_recurrence_creates_next_trigger(calendar_path) -> None:
-    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.VIENNA_TZ)
+    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.MOSCOW_TZ)
     store = {
         "events": [
             {
@@ -205,7 +205,7 @@ def test_recurrence_creates_next_trigger(calendar_path) -> None:
 
 
 def test_disable_reminder_updates_status(calendar_path) -> None:
-    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.VIENNA_TZ)
+    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.MOSCOW_TZ)
     item = asyncio_run(
         calendar_store.add_item(
             dt=now + timedelta(hours=1),
@@ -227,3 +227,25 @@ def asyncio_run(coro):
     import asyncio
 
     return asyncio.run(coro)
+
+
+def test_scheduler_cancel_disables_reminder(calendar_path) -> None:
+    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.MOSCOW_TZ)
+    item = asyncio_run(
+        calendar_store.add_item(
+            dt=now + timedelta(hours=1),
+            title="Cleanup",
+            chat_id=1,
+            remind_at=now + timedelta(minutes=20),
+            user_id=1,
+        )
+    )
+    reminder_id = item["reminder"]["reminder_id"]
+    job_queue = DummyJobQueue()
+    scheduler = ReminderScheduler(application=_build_application(job_queue))
+    reminder = asyncio_run(calendar_store.get_reminder(reminder_id))
+    asyncio_run(scheduler.schedule_reminder(reminder))
+    asyncio_run(scheduler.cancel_reminder(reminder_id))
+    loaded = asyncio_run(calendar_store.get_reminder(reminder_id))
+    assert loaded is not None
+    assert loaded.enabled is False

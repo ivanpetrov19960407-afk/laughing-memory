@@ -10,7 +10,8 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-BOT_TZ = ZoneInfo(os.getenv("BOT_TIMEZONE", "Europe/Vilnius"))
+BOT_TZ = ZoneInfo(os.getenv("BOT_TIMEZONE", "Europe/Moscow"))
+MOSCOW_TZ = BOT_TZ
 VIENNA_TZ = BOT_TZ  # backward compatible alias
 @dataclass(frozen=True)
 class CalendarItem:
@@ -232,6 +233,37 @@ async def add_item(
         store["updated_at"] = now_iso
         save_store_atomic(store)
         return {"event": event, "reminder": reminder}
+
+
+async def add_reminder(
+    *,
+    trigger_at: datetime,
+    text: str,
+    chat_id: int,
+    user_id: int,
+    recurrence: dict[str, object] | None = None,
+    enabled: bool = True,
+) -> ReminderItem:
+    created = await add_item(
+        dt=trigger_at,
+        title=text,
+        chat_id=chat_id,
+        remind_at=trigger_at,
+        user_id=user_id,
+        reminders_enabled=enabled,
+    )
+    reminder_payload = created.get("reminder") if isinstance(created, dict) else None
+    reminder_id = reminder_payload.get("reminder_id") if isinstance(reminder_payload, dict) else None
+    if not isinstance(reminder_id, str):
+        raise RuntimeError("Failed to create reminder")
+    if recurrence:
+        updated = await set_reminder_recurrence(reminder_id, recurrence)
+        if updated is not None:
+            return updated
+    reminder = await get_reminder(reminder_id)
+    if reminder is None:
+        raise RuntimeError("Failed to load reminder")
+    return reminder
 
 
 async def list_items(start: datetime | None = None, end: datetime | None = None) -> list[CalendarItem]:
@@ -540,6 +572,24 @@ async def disable_reminder(reminder_id: str) -> bool:
         return True
 
 
+async def set_reminder_recurrence(reminder_id: str, recurrence: dict[str, object] | None) -> ReminderItem | None:
+    async with _STORE_LOCK:
+        store = load_store()
+        reminders = list(store.get("reminders") or [])
+        updated_item: dict[str, object] | None = None
+        for item in reminders:
+            if isinstance(item, dict) and item.get("reminder_id") == reminder_id:
+                item["recurrence"] = recurrence
+                updated_item = item
+                break
+        if updated_item is None:
+            return None
+        store["reminders"] = reminders
+        store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
+        save_store_atomic(store)
+    return await get_reminder(reminder_id)
+
+
 async def enable_reminder(reminder_id: str) -> bool:
     async with _STORE_LOCK:
         store = load_store()
@@ -563,9 +613,11 @@ async def apply_snooze(
     reminder_id: str,
     *,
     minutes: int,
+    now: datetime | None = None,
     base_trigger_at: datetime | None = None,
 ) -> ReminderItem | None:
     offset = max(1, minutes)
+    current_now = (now or datetime.now(tz=VIENNA_TZ)).astimezone(VIENNA_TZ)
     async with _STORE_LOCK:
         store = load_store()
         reminders = list(store.get("reminders") or [])
@@ -580,14 +632,10 @@ async def apply_snooze(
             trigger_value = item.get("trigger_at")
             if not isinstance(trigger_value, str):
                 return None
-            current_trigger = _parse_datetime(trigger_value, datetime.now(tz=VIENNA_TZ))
-            base = base_trigger_at or current_trigger
-            desired = base + timedelta(minutes=offset)
-            if current_trigger >= desired:
-                new_trigger = current_trigger
-            else:
-                new_trigger = desired
-                item["trigger_at"] = new_trigger.astimezone(VIENNA_TZ).isoformat()
+            current_trigger = _parse_datetime(trigger_value, current_now)
+            base = max(current_now, base_trigger_at or current_trigger)
+            new_trigger = base + timedelta(minutes=offset)
+            item["trigger_at"] = new_trigger.astimezone(VIENNA_TZ).isoformat()
             item["enabled"] = True
             item["status"] = "active"
             updated_item = item
