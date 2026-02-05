@@ -24,7 +24,7 @@ def test_reply_keyboard_markup_not_used() -> None:
         assert "ReplyKeyboardMarkup" not in source.read_text(encoding="utf-8")
 
 
-def test_menu_search_returns_refused() -> None:
+def test_menu_search_returns_hint() -> None:
     result = asyncio.run(
         handlers._handle_menu_section(
             None,
@@ -33,7 +33,8 @@ def test_menu_search_returns_refused() -> None:
             chat_id=1,
         )
     )
-    assert result.status == "refused"
+    assert result.status == "ok"
+    assert "/search" in result.text
 
 
 def test_unknown_command_returns_refused(monkeypatch) -> None:

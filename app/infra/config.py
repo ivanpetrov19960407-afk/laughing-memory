@@ -48,6 +48,7 @@ class Settings:
     strict_no_pseudo_sources: bool
     wizard_store_path: Path
     wizard_timeout_seconds: int
+    feature_web_search: bool
 
 
 def load_settings() -> Settings:
@@ -106,6 +107,9 @@ def load_settings() -> Settings:
         strict_no_pseudo_sources = True
     wizard_store_path = Path(os.getenv("WIZARD_STORE_PATH", "data/wizards"))
     wizard_timeout_seconds = _parse_int_with_default(os.getenv("WIZARD_TIMEOUT_SECONDS"), 600)
+    feature_web_search = _parse_optional_bool(os.getenv("FEATURE_WEB_SEARCH"))
+    if feature_web_search is None:
+        feature_web_search = True
 
     return Settings(
         bot_token=token,
@@ -141,6 +145,7 @@ def load_settings() -> Settings:
         strict_no_pseudo_sources=strict_no_pseudo_sources,
         wizard_store_path=wizard_store_path,
         wizard_timeout_seconds=wizard_timeout_seconds,
+        feature_web_search=feature_web_search,
     )
 
 
