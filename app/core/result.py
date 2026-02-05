@@ -241,7 +241,7 @@ def ensure_valid(
         payload = {}
 
     status = payload.get("status")
-    if status not in {"ok", "refused", "error"}:
+    if status not in {"ok", "refused", "error", "ratelimited"}:
         status = "error"
 
     text = payload.get("text")
