@@ -16,6 +16,7 @@ MENU_LABELS = {
     "🔎 Facts ON",
     "🔎 Facts OFF",
     "💬 Чат",
+    "🖼 Картинки",
     "🧮 Калькулятор",
     "📅 Календарь",
     "⏰ Напоминания",
@@ -24,6 +25,7 @@ MENU_LABELS = {
     "🏠 Меню",
     "📌 Режим фактов",
     "🧹 Очистить контекст",
+    "🖼 Сгенерировать",
     "🧮 Посчитать",
     "➕ Добавить",
     "📋 Список",
@@ -34,6 +36,7 @@ MENU_LABELS = {
     "🧠 Контекст off",
     "ℹ️ Примеры",
     "🔎 Поиск",
+    "🔎 Новый поиск",
 }
 
 
@@ -42,11 +45,12 @@ def build_menu_actions(*, facts_enabled: bool, enable_menu: bool) -> list[Action
         return build_legacy_menu_actions(facts_enabled=facts_enabled)
     return [
         Action(id="menu.chat", label="💬 Чат", payload={"op": "menu_section", "section": "chat"}),
+        Action(id="menu.search", label="🔎 Поиск", payload={"op": "menu_section", "section": "search"}),
+        Action(id="menu.images", label="🖼 Картинки", payload={"op": "menu_section", "section": "images"}),
         Action(id="menu.calc", label="🧮 Калькулятор", payload={"op": "menu_section", "section": "calc"}),
         Action(id="menu.calendar", label="📅 Календарь", payload={"op": "menu_section", "section": "calendar"}),
         Action(id="menu.reminders", label="⏰ Напоминания", payload={"op": "menu_section", "section": "reminders"}),
         Action(id="menu.settings", label="⚙️ Настройки", payload={"op": "menu_section", "section": "settings"}),
-        Action(id="menu.search", label="🔎 Поиск", payload={"op": "menu_section", "section": "search"}),
         Action(id="menu.home", label="🏠 Меню", payload={"op": "menu_section", "section": "home"}),
     ]
 
