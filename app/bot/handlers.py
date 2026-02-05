@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -475,6 +476,12 @@ def _render_text_with_sources(text: str, sources: list[Any]) -> str:
     return f"{base}\n\nИсточники:\n" + "\n".join(lines)
 
 
+def _apply_strict_pseudo_source_guard(text: str | None) -> str:
+    cleaned = str(text or "")
+    cleaned = re.sub(r"\[\s*\d+\s*\]", "", cleaned)
+    return cleaned
+
+
 
 async def _send_reply_keyboard_remove(
     update: Update,
@@ -572,7 +579,10 @@ async def send_result(
             return
         context.chat_data[sent_key] = True
     _log_orchestrator_result(user_id, public_result, request_id=request_id)
-    final_text = _render_text_with_sources(public_result.text, public_result.sources)
+    guarded_text = public_result.text
+    if _strict_no_pseudo_sources(context):
+        guarded_text = _apply_strict_pseudo_source_guard(public_result.text)
+    final_text = _render_text_with_sources(guarded_text, public_result.sources)
     output_preview = final_text.replace("\n", " ").strip()
     if len(output_preview) > 80:
         output_preview = f"{output_preview[:80].rstrip()}…"
