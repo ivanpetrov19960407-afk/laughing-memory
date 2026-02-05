@@ -668,6 +668,8 @@ def _recurrence_label(recurrence: dict[str, object] | None) -> str:
     if isinstance(freq, str):
         return freq
     return "без повтора"
+
+
 def _expired_result() -> OrchestratorResult:
     return refused(
         "Сценарий истёк, начни заново.",
