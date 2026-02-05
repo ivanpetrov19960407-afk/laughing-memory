@@ -82,7 +82,7 @@ def test_handler_applies_strict_guard(monkeypatch) -> None:
     result = ok("Вот ссылка [1].", intent="test", mode="llm")
     asyncio.run(handlers.send_result(DummyUpdate(), DummyContext(), result))
 
-    assert captured["text"] == "Вот ссылка [1]."
+    assert captured["text"] == "Вот ссылка ."
 
 
 def test_strict_guard_cleans_brackets_without_sources_when_facts_off() -> None:
