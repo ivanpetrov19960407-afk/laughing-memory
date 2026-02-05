@@ -297,7 +297,7 @@ def ensure_safe_text_strict(
     *,
     allow_sources_in_text: bool = False,
 ) -> OrchestratorResult:
-    if allow_sources_in_text:
+    if allow_sources_in_text or bool(result.sources):
         return result
     text = result.text or ""
     if not text.strip():
@@ -312,6 +312,20 @@ def ensure_safe_text_strict(
         result.request_id or "-",
         facts_enabled,
     )
+    if not facts_enabled:
+        cleaned = _strip_pseudo_sources(text)
+        if cleaned:
+            return OrchestratorResult(
+                text=cleaned,
+                status=result.status,
+                mode=result.mode,
+                intent=result.intent,
+                request_id=result.request_id,
+                sources=[],
+                attachments=result.attachments,
+                actions=result.actions,
+                debug=result.debug,
+            )
     return OrchestratorResult(
         text=STRICT_REFUSAL_TEXT,
         status="refused",
@@ -323,6 +337,16 @@ def ensure_safe_text_strict(
         actions=result.actions,
         debug=result.debug,
     )
+
+
+def _strip_pseudo_sources(text: str) -> str:
+    cleaned = re.sub(r"\n*\s*Источники\s*:\s*[\s\S]*$", "", text, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"\[\s*\d+\s*\]", "", cleaned)
+    cleaned = re.sub(r"\(\s*\d+\s*\)", "", cleaned)
+    cleaned = re.sub(r"https?://\S+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(согласно|по данным|according to|as reported by)\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 
 def _action_payload_contains_debug(action: Action | dict[str, Any]) -> bool:

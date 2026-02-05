@@ -890,6 +890,22 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @_with_error_handling
+async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    orchestrator = _get_orchestrator(context)
+    if not await _guard_access(update, context):
+        return
+    prompt = " ".join(context.args).strip()
+    payload = f"/search {prompt}" if prompt else "/search"
+    try:
+        result = await orchestrator.handle(payload, _build_user_context(update))
+    except Exception as exc:
+        set_status(context, "error")
+        await _handle_exception(update, context, exc)
+        return
+    await send_result(update, context, result)
+
+
+@_with_error_handling
 async def facts_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     orchestrator = _get_orchestrator(context)
     if not await _guard_access(update, context):
@@ -1190,6 +1206,7 @@ async def _handle_menu_section(
             "calendar": "Календарь: добавить/посмотреть/удалить события.",
             "reminders": "Напоминания: создать/список/удалить.",
             "settings": "Настройки режимов и поведения.",
+            "search": "Введи запрос командой /search <запрос>.",
         }
         if section not in text_map:
             return refused(
@@ -1328,6 +1345,13 @@ async def _handle_menu_section(
                 ),
                 _menu_action(),
             ],
+        )
+    if section == "search":
+        return ok(
+            "Введи запрос командой /search <запрос>.",
+            intent="menu.search",
+            mode="local",
+            actions=[_menu_action()],
         )
     return refused(
         "Раздел меню недоступен.",
@@ -1726,6 +1750,11 @@ async def _dispatch_command_payload(
             intent="menu.summary",
             mode="local",
         )
+    if normalized == "/search":
+        query = args.strip()
+        if not query:
+            return refused("Использование: /search <запрос>", intent="menu.search", mode="local")
+        return await orchestrator.handle(f"/search {query}", _build_user_context(update))
     if normalized == "/reminders":
         now = datetime.now(tz=calendar_store.MOSCOW_TZ)
         return await list_reminders(now, limit=5, intent="menu.reminders")

@@ -30,7 +30,7 @@ class DummyUpdate:
         self.callback_query = None
 
 
-def test_strict_guard_blocks_pseudo_sources() -> None:
+def test_strict_guard_allows_text_with_real_sources() -> None:
     result = ok(
         "HTTP details [1][2]",
         intent="test",
@@ -40,10 +40,9 @@ def test_strict_guard_blocks_pseudo_sources() -> None:
     )
     guarded = ensure_safe_text_strict(result, facts_enabled=False, allow_sources_in_text=False)
 
-    assert guarded.status == "refused"
-    assert guarded.text == STRICT_REFUSAL_TEXT
-    assert guarded.sources == []
-    assert guarded.attachments == []
+    assert guarded.status == "ok"
+    assert guarded.text == "HTTP details [1][2]"
+    assert len(guarded.sources) == 1
 
 
 @pytest.mark.parametrize(
@@ -83,4 +82,27 @@ def test_handler_applies_strict_guard(monkeypatch) -> None:
     result = ok("Вот ссылка [1].", intent="test", mode="llm")
     asyncio.run(handlers.send_result(DummyUpdate(), DummyContext(), result))
 
-    assert captured["text"] == STRICT_REFUSAL_TEXT
+    assert captured["text"] == "Вот ссылка ."
+
+
+def test_strict_guard_cleans_brackets_without_sources_when_facts_off() -> None:
+    result = ok("Ответ [1]", intent="test", mode="llm", sources=[])
+
+    guarded = ensure_safe_text_strict(result, facts_enabled=False, allow_sources_in_text=False)
+
+    assert guarded.status == "ok"
+    assert "[1]" not in guarded.text
+
+
+def test_strict_guard_allows_citations_when_sources_present() -> None:
+    result = ok(
+        "Ответ [1]",
+        intent="test",
+        mode="llm",
+        sources=[{"title": "a", "url": "https://example.com", "snippet": "b"}],
+    )
+
+    guarded = ensure_safe_text_strict(result, facts_enabled=True, allow_sources_in_text=False)
+
+    assert guarded.status == "ok"
+    assert "[1]" in guarded.text
