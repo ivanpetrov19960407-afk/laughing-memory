@@ -6,6 +6,7 @@ import re
 import sys
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any
@@ -559,17 +560,8 @@ async def send_result(
         facts_enabled = orchestrator.is_facts_only(user_id)
     public_result = ensure_valid(ensure_safe_text_strict(public_result, facts_enabled, allow_sources_in_text=False))
     if not public_result.text.strip():
-        public_result = OrchestratorResult(
-            text="Нет ответа.",
-            status=public_result.status,
-            mode=public_result.mode,
-            intent=public_result.intent,
-            request_id=public_result.request_id,
-            sources=public_result.sources,
-            attachments=public_result.attachments,
-            actions=public_result.actions,
-            debug=public_result.debug,
-        )
+        # Replace empty text with fallback message while preserving all other fields
+        public_result = replace(public_result, text="Нет ответа.")
     chat_id = update.effective_chat.id if update.effective_chat else 0
     request_context = get_request_context(context)
     request_id = request_context.request_id if request_context else None
@@ -1787,7 +1779,6 @@ async def _dispatch_command_payload(
         query = args.strip()
         if not query:
             return refused("Укажи запрос: /search <текст>", intent="menu.search", mode="local")
-            return refused("Использование: /search <запрос>", intent="menu.search", mode="local")
         return await orchestrator.handle(f"/search {query}", _build_user_context(update))
     if normalized == "/reminders":
         now = datetime.now(tz=calendar_store.MOSCOW_TZ)
