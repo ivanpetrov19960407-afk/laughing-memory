@@ -20,6 +20,7 @@ from app.infra.llm import OpenAIClient, PerplexityClient
 from app.infra.rate_limit import RateLimiter as LLMRateLimiter
 from app.infra.rate_limiter import RateLimiter
 from app.infra.storage import TaskStorage
+from app.tools import NullSearchClient, PerplexityWebSearchClient
 from app.storage.wizard_store import WizardStore
 
 
@@ -49,6 +50,8 @@ def main() -> None:
     storage = TaskStorage(settings.db_path)
     llm_client = None
     openai_client = None
+    search_client = NullSearchClient()
+    perplexity_client = None
     if settings.openai_api_key:
         openai_client = OpenAIClient(
             api_key=settings.openai_api_key,
@@ -57,10 +60,16 @@ def main() -> None:
         )
         llm_client = openai_client
     elif settings.perplexity_api_key:
-        llm_client = PerplexityClient(
+        perplexity_client = PerplexityClient(
             api_key=settings.perplexity_api_key,
             base_url=settings.perplexity_base_url,
             timeout_seconds=settings.perplexity_timeout_seconds,
+        )
+        llm_client = perplexity_client
+    if settings.perplexity_api_key and perplexity_client is not None:
+        search_client = PerplexityWebSearchClient(
+            perplexity_client,
+            model=settings.perplexity_model,
         )
     config_allowlist_ids = extract_allowed_user_ids(config)
     initial_allowlist_ids = settings.allowed_user_ids or config_allowlist_ids
@@ -89,6 +98,8 @@ def main() -> None:
         rate_limiter=rate_limiter,
         llm_history_turns=settings.llm_history_turns,
         llm_model=settings.openai_model if openai_client else settings.perplexity_model,
+        search_client=search_client,
+        feature_web_search=settings.feature_web_search,
     )
     dialog_memory = DialogMemory(
         settings.dialog_memory_path,
@@ -152,6 +163,7 @@ def main() -> None:
     application.add_handler(CommandHandler("tasks", handlers.tasks))
     application.add_handler(CommandHandler("task", handlers.task))
     application.add_handler(CommandHandler("reminders", handlers.reminders))
+    application.add_handler(CommandHandler("search", handlers.search))
     application.add_handler(CommandHandler("menu", handlers.menu_command))
     application.add_handler(CallbackQueryHandler(handlers.static_callback, pattern="^cb:"))
     application.add_handler(CallbackQueryHandler(handlers.action_callback))
