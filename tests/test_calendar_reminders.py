@@ -8,6 +8,7 @@ import pytest
 
 from app.core import calendar_store
 from app.core.reminders import ReminderScheduler
+from app.bot import handlers
 
 
 @dataclass
@@ -119,6 +120,42 @@ def test_add_creates_reminder(calendar_path) -> None:
     store = calendar_store.load_store()
     reminders = store.get("reminders") or []
     assert any(rem.get("reminder_id") == reminder_id and rem.get("enabled") is True for rem in reminders)
+
+
+def test_calendar_command_add_does_not_create_reminder(calendar_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyUpdate:
+        def __init__(self) -> None:
+            self.effective_user = SimpleNamespace(id=1, username="tester")
+            self.effective_chat = SimpleNamespace(id=10)
+            self.message = SimpleNamespace(text="/calendar add 2026-02-05 22:00 Test")
+            self.effective_message = self.message
+            self.callback_query = None
+
+    class DummyContext:
+        def __init__(self) -> None:
+            self.args = ["add", "2026-02-05", "22:00", "Test"]
+            self.application = SimpleNamespace(bot_data={"settings": SimpleNamespace(reminders_enabled=True)})
+            self.chat_data = {}
+
+    async def fake_guard_access(update, context, bucket="default"):
+        return True
+
+    async def fake_send_result(update, context, result, reply_markup=None):
+        captured["result"] = result
+
+    monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
+    monkeypatch.setattr(handlers, "send_result", fake_send_result)
+
+    before = calendar_store.load_store()
+    reminders_before = len(before.get("reminders") or [])
+    asyncio_run(handlers.calendar(DummyUpdate(), DummyContext()))
+    after = calendar_store.load_store()
+    reminders_after = len(after.get("reminders") or [])
+
+    assert captured["result"].status == "ok"
+    assert reminders_after == reminders_before
 
 
 def test_del_cancels_reminder(calendar_path) -> None:

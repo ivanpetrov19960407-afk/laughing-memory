@@ -1466,7 +1466,7 @@ async def _handle_menu_section(
         )
     if section == "calendar":
         return ok(
-            "Календарь: добавить/посмотреть/удалить события.",
+            "Календарь: события (добавить/список/удалить).",
             intent="menu.calendar",
             mode="local",
             actions=[
@@ -1485,7 +1485,7 @@ async def _handle_menu_section(
         )
     if section == "reminders":
         return ok(
-            "Напоминания: создать/список/удалить.",
+            "Напоминания: отдельные напоминания (создать/список/управление).",
             intent="menu.reminders",
             mode="local",
             actions=[
@@ -1978,7 +1978,7 @@ async def _dispatch_command_payload(
         return ok("Calc: /calc <выражение>.", intent="menu.calc", mode="local")
     if normalized == "/calendar":
         return ok(
-            "Calendar: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> (или DD.MM.YYYY HH:MM) | list [YYYY-MM-DD YYYY-MM-DD] | today | week | del <id> | debug_due.",
+            "Calendar: /calendar add YYYY-MM-DD HH:MM <title> (или DD.MM.YYYY HH:MM) | list [YYYY-MM-DD YYYY-MM-DD] | today | week | del <id> | debug_due.",
             intent="menu.calendar",
             mode="local",
         )
@@ -2447,7 +2447,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args
     if not args:
         result = refused(
-            "Использование: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> (или DD.MM.YYYY HH:MM) | list [YYYY-MM-DD YYYY-MM-DD] | "
+            "Использование: /calendar add YYYY-MM-DD HH:MM <title> (или DD.MM.YYYY HH:MM) | list [YYYY-MM-DD YYYY-MM-DD] | "
             "today | week | del <id> | debug_due.",
             intent="utility_calendar",
             mode="local",
@@ -2458,7 +2458,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if command == "add":
         if len(args) < 4:
             result = refused(
-                "Использование: /calendar add YYYY-MM-DD HH:MM [-m MINUTES] <title> (или DD.MM.YYYY HH:MM).",
+                "Использование: /calendar add YYYY-MM-DD HH:MM <title> (или DD.MM.YYYY HH:MM).",
                 intent="utility_calendar.add",
                 mode="local",
             )
@@ -2466,32 +2466,15 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         date_part = args[1]
         time_part = args[2]
-        minutes_before = None
         title_start = 3
         if len(args) >= 5 and args[3] == "-m":
-            try:
-                minutes_before = int(args[4])
-            except ValueError:
-                result = refused(
-                    "Минуты должны быть числом. Пример: /calendar add 2026-02-03 18:30 -m 10 Позвонить маме "
-                    "(или /calendar add 03.02.2026 18:30 -m 10 Позвонить маме).",
-                    intent="utility_calendar.add",
-                    mode="local",
-                )
-                await send_result(update, context, result)
-                return
-            if minutes_before < 0:
-                result = refused(
-                    "Минуты не могут быть отрицательными.",
-                    intent="utility_calendar.add",
-                    mode="local",
-                )
-                await send_result(update, context, result)
-                return
-            title_start = 5
-        settings = context.application.bot_data.get("settings")
-        if minutes_before is None and settings is not None:
-            minutes_before = settings.reminder_default_offset_minutes
+            result = refused(
+                "Напоминания создаются в разделе /menu → Напоминания.",
+                intent="utility_calendar.add",
+                mode="local",
+            )
+            await send_result(update, context, result)
+            return
         title = " ".join(args[title_start:]).strip()
         if not title:
             result = refused(
@@ -2513,31 +2496,16 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             await send_result(update, context, result)
             return
-        remind_at = dt
-        if minutes_before:
-            remind_at = dt - timedelta(minutes=minutes_before)
         chat_id = update.effective_chat.id if update.effective_chat else 0
-        reminders_enabled = True
-        if settings is not None and not settings.reminders_enabled:
-            reminders_enabled = False
         result_item = await calendar_store.add_item(
             dt,
             title,
             chat_id=chat_id,
-            remind_at=remind_at,
+            remind_at=None,
             user_id=user_id,
-            reminders_enabled=reminders_enabled,
+            reminders_enabled=False,
         )
         event = result_item["event"]
-        reminder = result_item["reminder"]
-        scheduler = _get_reminder_scheduler(context)
-        if scheduler and reminders_enabled:
-            try:
-                reminder_item = await calendar_store.get_reminder(reminder["reminder_id"])
-                if reminder_item:
-                    await scheduler.schedule_reminder(reminder_item)
-            except Exception:
-                LOGGER.exception("Failed to schedule reminder: reminder_id=%s", reminder.get("reminder_id"))
         dt_label = dt.strftime("%Y-%m-%d %H:%M")
         text = f"Добавлено: {event['event_id']} | {dt_label} | {title}"
         result = ok(text, intent="utility_calendar.add", mode="local")
