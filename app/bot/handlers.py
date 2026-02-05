@@ -1202,12 +1202,12 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not await _guard_access(update, context, bucket="ui"):
         return
     if not _wizards_enabled(context):
-        result = refused("Сценарии отключены.", intent="wizard.cancel", mode="local")
+        result = refused("Сценарии отключены.", intent="wizard.cancel", mode="local", actions=[_menu_action()])
         await send_result(update, context, result)
         return
     manager = _get_wizard_manager(context)
     if manager is None:
-        result = error("Сценарии не настроены.", intent="wizard.cancel", mode="local")
+        result = error("Сценарии не настроены.", intent="wizard.cancel", mode="local", actions=[_menu_action()])
         await send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
@@ -1231,7 +1231,8 @@ async def _handle_menu_section(
             "calendar": "Календарь: добавить/посмотреть/удалить события.",
             "reminders": "Напоминания: создать/список/удалить.",
             "settings": "Настройки режимов и поведения.",
-            "search": "Введи запрос командой /search <запрос>.",
+            "search": "Ищу в интернете и даю ссылки на источники.",
+            "images": "Опиши картинку — сгенерирую.",
         }
         if section not in text_map:
             return refused(
@@ -1372,9 +1373,48 @@ async def _handle_menu_section(
             ],
         )
     if section == "search":
+        actions = [
+            Action(
+                id="search.new",
+                label="🔎 Новый поиск",
+                payload={"op": "run_command", "command": "/search", "args": ""},
+            ),
+            Action(
+                id="search.facts",
+                label="📌 Режим фактов",
+                payload={"op": "run_command", "command": facts_command, "args": ""},
+            ),
+            _menu_action(),
+        ]
         return ok(
-            "Введи запрос командой /search <запрос>.",
+            "Ищу в интернете и даю ссылки на источники.",
             intent="menu.search",
+            mode="local",
+            actions=actions,
+        )
+    if section == "images":
+        return ok(
+            "Опиши картинку — сгенерирую.",
+            intent="menu.images",
+            mode="local",
+            actions=[
+                Action(
+                    id="images.generate",
+                    label="🖼 Сгенерировать",
+                    payload={"op": "run_command", "command": "/image", "args": ""},
+                ),
+                Action(
+                    id="images.examples",
+                    label="ℹ️ Примеры",
+                    payload={"op": "menu_section", "section": "images_examples"},
+                ),
+                _menu_action(),
+            ],
+        )
+    if section == "images_examples":
+        return ok(
+            "Примеры:\n• Закат над океаном\n• Кот в космическом шлеме\n• Футуристический город",
+            intent="menu.images.examples",
             mode="local",
             actions=[_menu_action()],
         )
@@ -1734,6 +1774,7 @@ async def _dispatch_action_payload(
         intent="ui.action",
         mode="local",
         debug={"reason": "unknown_action", "action_id": intent},
+        actions=[_menu_action()],
     )
 
 
@@ -1751,34 +1792,36 @@ async def _dispatch_command_payload(
         user_id = update.effective_user.id if update.effective_user else 0
         return ok("Выбери раздел:", intent="menu.open", mode="local", actions=_build_menu_actions(context, user_id=user_id))
     if normalized == "/calc":
-        return ok("Calc: /calc <выражение>.", intent="menu.calc", mode="local")
+        return ok("Calc: /calc <выражение>.", intent="menu.calc", mode="local", actions=[_menu_action()])
     if normalized == "/calendar":
         return ok(
             "Calendar: /calendar add YYYY-MM-DD HH:MM <title> (или DD.MM.YYYY HH:MM) | list [YYYY-MM-DD YYYY-MM-DD] | today | week | del <id> | debug_due.",
             intent="menu.calendar",
             mode="local",
+            actions=[_menu_action()],
         )
     if normalized == "/check":
-        return ok("Проверка: /check <текст> или ответом на сообщение.", intent="menu.check", mode="local")
+        return ok("Проверка: /check <текст> или ответом на сообщение.", intent="menu.check", mode="local", actions=[_menu_action()])
     if normalized == "/help":
         access_note = ""
         if orchestrator.is_access_restricted():
             access_note = "\n\nДоступ ограничен whitelist пользователей."
-        return ok(_build_help_text(access_note), intent="menu.help", mode="local")
+        return ok(_build_help_text(access_note), intent="menu.help", mode="local", actions=[_menu_action()])
     if normalized == "/health":
         user_id = update.effective_user.id if update.effective_user else 0
         message = await _build_health_message(context, user_id=user_id)
-        return ok(message, intent="menu.status", mode="local")
+        return ok(message, intent="menu.status", mode="local", actions=[_menu_action()])
     if normalized == "/summary":
         return ok(
             "Summary: /summary <текст> или summary: <текст>.",
             intent="menu.summary",
             mode="local",
+            actions=[_menu_action()],
         )
     if normalized == "/search":
         query = args.strip()
         if not query:
-            return refused("Укажи запрос: /search <текст>", intent="menu.search", mode="local")
+            return refused("Укажи запрос: /search <текст>", intent="menu.search", mode="local", actions=[_menu_action()])
         return await orchestrator.handle(f"/search {query}", _build_user_context(update))
     if normalized == "/reminders":
         now = datetime.now(tz=calendar_store.MOSCOW_TZ)
@@ -1792,25 +1835,26 @@ async def _dispatch_command_payload(
             if enabled
             else "Режим фактов выключён. Можно отвечать без источников."
         )
-        return ok(text, intent="menu.facts", mode="local")
+        return ok(text, intent="menu.facts", mode="local", actions=[_menu_action()])
     if normalized in {"/context_on", "/context_off", "/context_clear"}:
         dialog_memory = _get_dialog_memory(context)
         if dialog_memory is None:
-            return refused("Контекст диалога не настроен.", intent="menu.context", mode="local")
+            return refused("Контекст диалога не настроен.", intent="menu.context", mode="local", actions=[_menu_action()])
         user_id = update.effective_user.id if update.effective_user else 0
         if normalized == "/context_clear":
             chat_id = update.effective_chat.id if update.effective_chat else 0
             await dialog_memory.clear(user_id, chat_id)
-            return ok("Контекст очищен.", intent="menu.context", mode="local")
+            return ok("Контекст очищен.", intent="menu.context", mode="local", actions=[_menu_action()])
         enabled = normalized == "/context_on"
         await dialog_memory.set_enabled(user_id, enabled)
         text = "Контекст включён." if enabled else "Контекст выключён."
-        return ok(text, intent="menu.context", mode="local")
+        return ok(text, intent="menu.context", mode="local", actions=[_menu_action()])
     return refused(
         f"Команда недоступна: {command}",
         intent="ui.action",
         mode="local",
         debug={"command": command, "args": args},
+        actions=[_menu_action()],
     )
 
 
@@ -2196,7 +2240,7 @@ async def calc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         result_value = parse_and_eval(expression)
     except CalcError as exc:
-        result = error(f"Ошибка вычисления: {exc}", intent="utility_calc", mode="local")
+        result = error(f"Ошибка вычисления: {exc}", intent="utility_calc", mode="local", actions=[_menu_action()])
         await send_result(update, context, result)
         return
     result = ok(f"{expression} = {result_value}", intent="utility_calc", mode="local")
@@ -2215,6 +2259,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "today | week | del <id> | debug_due.",
             intent="utility_calendar",
             mode="local",
+            actions=[_menu_action()],
         )
         await send_result(update, context, result)
         return
@@ -2225,6 +2270,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Использование: /calendar add YYYY-MM-DD HH:MM <title> (или DD.MM.YYYY HH:MM).",
                 intent="utility_calendar.add",
                 mode="local",
+                actions=[_menu_action()],
             )
             await send_result(update, context, result)
             return
@@ -2236,6 +2282,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Напоминания создаются в разделе /menu → Напоминания.",
                 intent="utility_calendar.add",
                 mode="local",
+                actions=[_menu_action()],
             )
             await send_result(update, context, result)
             return
@@ -2246,6 +2293,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "(или /calendar add 05.02.2026 18:30 Врач).",
                 intent="utility_calendar.add",
                 mode="local",
+                actions=[_menu_action()],
             )
             await send_result(update, context, result)
             return
@@ -2257,6 +2305,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "(или /calendar add 05.02.2026 18:30 Врач).",
                 intent="utility_calendar.add",
                 mode="local",
+                actions=[_menu_action()],
             )
             await send_result(update, context, result)
             return
@@ -2286,6 +2335,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "Неверный формат. Пример: /calendar list 2026-02-01 2026-02-28.",
                     intent="utility_calendar.list",
                     mode="local",
+                    actions=[_menu_action()],
                 )
                 await send_result(update, context, result)
                 return
@@ -2296,6 +2346,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Использование: /calendar list [YYYY-MM-DD YYYY-MM-DD].",
                 intent="utility_calendar.list",
                 mode="local",
+                actions=[_menu_action()],
             )
             await send_result(update, context, result)
             return
@@ -2321,12 +2372,13 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Использование: /calendar del <id>.",
                 intent="utility_calendar.del",
                 mode="local",
+                actions=[_menu_action()],
             )
             await send_result(update, context, result)
             return
         item_id = args[1].strip()
         if not item_id:
-            result = refused("Укажите id для удаления.", intent="utility_calendar.del", mode="local")
+            result = refused("Укажите id для удаления.", intent="utility_calendar.del", mode="local", actions=[_menu_action()])
             await send_result(update, context, result)
             return
         removed, reminder_id = await calendar_store.delete_item(item_id)
@@ -2369,6 +2421,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Неизвестная команда. Использование: /calendar add|list|today|week|del|debug_due.",
         intent="utility_calendar",
         mode="local",
+        actions=[_menu_action()],
     )
     await send_result(update, context, result)
 
@@ -2393,7 +2446,7 @@ async def reminders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             limit = max(1, int(context.args[0]))
         except ValueError:
-            result = refused("Использование: /reminders [N].", intent="utility_reminders.list", mode="local")
+            result = refused("Использование: /reminders [N].", intent="utility_reminders.list", mode="local", actions=[_menu_action()])
             await send_result(update, context, result)
             return
     now = datetime.now(tz=calendar_store.MOSCOW_TZ)
@@ -2407,12 +2460,12 @@ async def reminder_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     user_id = update.effective_user.id if update.effective_user else 0
     if not context.args:
-        result = refused("Использование: /reminder_off <id>.", intent="utility_reminders.off", mode="local")
+        result = refused("Использование: /reminder_off <id>.", intent="utility_reminders.off", mode="local", actions=[_menu_action()])
         await send_result(update, context, result)
         return
     reminder_id = context.args[0].strip()
     if not reminder_id:
-        result = refused("Укажите id напоминания.", intent="utility_reminders.off", mode="local")
+        result = refused("Укажите id напоминания.", intent="utility_reminders.off", mode="local", actions=[_menu_action()])
         await send_result(update, context, result)
         return
     result = await _handle_reminder_off(context, user_id=user_id, reminder_id=reminder_id)
@@ -2434,7 +2487,7 @@ async def reminder_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     event_id = context.args[0].strip()
     if not event_id:
-        result = refused("Укажите event_id.", intent="utility_reminders.on", mode="local")
+        result = refused("Укажите event_id.", intent="utility_reminders.on", mode="local", actions=[_menu_action()])
         await send_result(update, context, result)
         return
     result = await _handle_reminder_on(context, user_id=user_id, event_id=event_id)

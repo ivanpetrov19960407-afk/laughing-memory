@@ -34,7 +34,7 @@ def test_menu_search_returns_hint() -> None:
         )
     )
     assert result.status == "ok"
-    assert "/search" in result.text
+    assert "интернете" in result.text or "источники" in result.text
 
 
 def test_unknown_command_returns_refused(monkeypatch) -> None:

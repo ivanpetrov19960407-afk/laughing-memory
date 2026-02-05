@@ -67,11 +67,11 @@ class WizardManager:
         wizard_id = payload.get("wizard_id")
         if op == "wizard_start":
             if not isinstance(wizard_id, str):
-                return refused("Некорректный сценарий.", intent="wizard.start", mode="local")
+                return refused("Некорректный сценарий.", intent="wizard.start", mode="local", actions=_menu_actions())
             if wizard_id == WIZARD_REMINDER_RESCHEDULE:
                 reminder_id = payload.get("reminder_id")
                 if not isinstance(reminder_id, str) or not reminder_id:
-                    return refused("Некорректный reminder_id.", intent="wizard.start", mode="local")
+                    return refused("Некорректный reminder_id.", intent="wizard.start", mode="local", actions=_menu_actions())
                 return await self.start_reminder_reschedule(user_id=user_id, chat_id=chat_id, reminder_id=reminder_id)
             return self._start_wizard(
                 wizard_id,
@@ -81,14 +81,14 @@ class WizardManager:
             )
         if op in {"wizard_continue", "wizard_restart"}:
             if state is None:
-                return refused("Нет активного сценария.", intent="wizard.continue", mode="local")
+                return refused("Нет активного сценария.", intent="wizard.continue", mode="local", actions=_menu_actions())
             if op == "wizard_restart":
                 self._store.clear_state(user_id=user_id, chat_id=chat_id)
                 return self._start_wizard(state.wizard_id, user_id=user_id, chat_id=chat_id, active_state=None)
             return _render_prompt(state)
         if op == "wizard_cancel":
             if state is None:
-                return refused("Активный сценарий не найден.", intent="wizard.cancel", mode="local")
+                return refused("Активный сценарий не найден.", intent="wizard.cancel", mode="local", actions=_menu_actions())
             self._store.clear_state(user_id=user_id, chat_id=chat_id)
             return refused(
                 "Сценарий отменён.",
@@ -129,7 +129,7 @@ class WizardManager:
         if expired:
             return _expired_result()
         if state is None:
-            return refused("Активный сценарий не найден.", intent="wizard.cancel", mode="local")
+            return refused("Активный сценарий не найден.", intent="wizard.cancel", mode="local", actions=_menu_actions())
         self._store.clear_state(user_id=user_id, chat_id=chat_id)
         return refused("Сценарий отменён.", intent="wizard.cancel", mode="local", actions=_menu_actions())
 
@@ -149,7 +149,7 @@ class WizardManager:
                 actions=_resume_actions(active_state.wizard_id),
             )
         if wizard_id not in {WIZARD_CALENDAR_ADD, WIZARD_REMINDER_CREATE}:
-            return refused("Сценарий недоступен.", intent="wizard.start", mode="local")
+            return refused("Сценарий недоступен.", intent="wizard.start", mode="local", actions=_menu_actions())
         now = datetime.now(timezone.utc)
         step = STEP_AWAIT_DATETIME
         if wizard_id == WIZARD_REMINDER_CREATE:
@@ -187,12 +187,14 @@ class WizardManager:
                 f"Напоминание не найдено: {reminder_id}",
                 intent="wizard.reminder.missing",
                 mode="local",
+                actions=_menu_actions(),
             )
         if reminder.status != "active":
             return refused(
                 "Напоминание отключено, перенос недоступен.",
                 intent="wizard.reminder.disabled",
                 mode="local",
+                actions=_menu_actions(),
             )
         now = datetime.now(timezone.utc)
         state = WizardState(
@@ -253,7 +255,7 @@ class WizardManager:
                 mode="local",
                 actions=_confirm_actions(),
             )
-        return refused("Шаг сценария не распознан.", intent="wizard.calendar.step", mode="local")
+        return refused("Шаг сценария не распознан.", intent="wizard.calendar.step", mode="local", actions=_menu_actions())
 
     async def _handle_calendar_add_action(
         self,
@@ -269,17 +271,17 @@ class WizardManager:
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return _render_prompt(updated)
         if op != "wizard_confirm":
-            return refused("Действие не поддерживается.", intent="wizard.calendar.action", mode="local")
+            return refused("Действие не поддерживается.", intent="wizard.calendar.action", mode="local", actions=_menu_actions())
         if state.step != STEP_CONFIRM:
-            return refused("Сначала заполни данные.", intent="wizard.calendar.confirm", mode="local")
+            return refused("Сначала заполни данные.", intent="wizard.calendar.confirm", mode="local", actions=_step_actions())
         dt_value = state.data.get("dt")
         title = state.data.get("title")
         if not isinstance(dt_value, str) or not isinstance(title, str) or not title.strip():
-            return refused("Не хватает данных для создания события.", intent="wizard.calendar.confirm", mode="local")
+            return refused("Не хватает данных для создания события.", intent="wizard.calendar.confirm", mode="local", actions=_menu_actions())
         try:
             dt = datetime.fromisoformat(dt_value)
         except ValueError:
-            return refused("Дата повреждена, начни заново.", intent="wizard.calendar.confirm", mode="local")
+            return refused("Дата повреждена, начни заново.", intent="wizard.calendar.confirm", mode="local", actions=_menu_actions())
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=calendar_store.MOSCOW_TZ)
         try:
@@ -296,6 +298,7 @@ class WizardManager:
             return error(
                 "Не удалось создать событие. Попробуй позже.",
                 intent="wizard.calendar.confirm",
+                actions=_menu_actions(),
                 mode="local",
             )
         self._store.clear_state(user_id=user_id, chat_id=chat_id)
@@ -378,18 +381,18 @@ class WizardManager:
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return _render_prompt(updated)
         if op != "wizard_confirm":
-            return refused("Действие не поддерживается.", intent="wizard.reminder_create.action", mode="local")
+            return refused("Действие не поддерживается.", intent="wizard.reminder_create.action", mode="local", actions=_menu_actions())
         if state.step != STEP_CONFIRM:
-            return refused("Сначала заполни данные.", intent="wizard.reminder_create.confirm", mode="local")
+            return refused("Сначала заполни данные.", intent="wizard.reminder_create.confirm", mode="local", actions=_step_actions())
         title = state.data.get("title")
         trigger_value = state.data.get("trigger_at")
         recurrence = state.data.get("recurrence")
         if not isinstance(title, str) or not isinstance(trigger_value, str):
-            return refused("Не хватает данных для создания напоминания.", intent="wizard.reminder_create.confirm", mode="local")
+            return refused("Не хватает данных для создания напоминания.", intent="wizard.reminder_create.confirm", mode="local", actions=_menu_actions())
         try:
             trigger_at = datetime.fromisoformat(trigger_value)
         except ValueError:
-            return refused("Дата повреждена, начни заново.", intent="wizard.reminder_create.confirm", mode="local")
+            return refused("Дата повреждена, начни заново.", intent="wizard.reminder_create.confirm", mode="local", actions=_menu_actions())
         if trigger_at.tzinfo is None:
             trigger_at = trigger_at.replace(tzinfo=calendar_store.MOSCOW_TZ)
         recurrence_payload = recurrence if isinstance(recurrence, dict) else None
@@ -404,7 +407,7 @@ class WizardManager:
             )
         except Exception:
             LOGGER.exception("Failed to create reminder")
-            return error("Не удалось создать напоминание.", intent="wizard.reminder_create.confirm", mode="local")
+            return error("Не удалось создать напоминание.", intent="wizard.reminder_create.confirm", mode="local", actions=_menu_actions())
         if self._reminder_scheduler and (self._settings is None or self._settings.reminders_enabled):
             await self._reminder_scheduler.schedule_reminder(reminder)
         self._store.clear_state(user_id=user_id, chat_id=chat_id)
@@ -462,17 +465,17 @@ class WizardManager:
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return _render_prompt(updated)
         if op != "wizard_confirm":
-            return refused("Действие не поддерживается.", intent="wizard.reminder.action", mode="local")
+            return refused("Действие не поддерживается.", intent="wizard.reminder.action", mode="local", actions=_menu_actions())
         if state.step != STEP_CONFIRM:
-            return refused("Сначала заполни данные.", intent="wizard.reminder.confirm", mode="local")
+            return refused("Сначала заполни данные.", intent="wizard.reminder.confirm", mode="local", actions=_step_actions())
         reminder_id = state.data.get("reminder_id")
         new_trigger_value = state.data.get("new_trigger_at")
         if not isinstance(reminder_id, str) or not isinstance(new_trigger_value, str):
-            return refused("Не хватает данных для переноса.", intent="wizard.reminder.confirm", mode="local")
+            return refused("Не хватает данных для переноса.", intent="wizard.reminder.confirm", mode="local", actions=_menu_actions())
         try:
             new_trigger = datetime.fromisoformat(new_trigger_value)
         except ValueError:
-            return refused("Дата повреждена, начни заново.", intent="wizard.reminder.confirm", mode="local")
+            return refused("Дата повреждена, начни заново.", intent="wizard.reminder.confirm", mode="local", actions=_menu_actions())
         if new_trigger.tzinfo is None:
             new_trigger = new_trigger.replace(tzinfo=calendar_store.MOSCOW_TZ)
         reminder = await calendar_store.get_reminder(reminder_id)
@@ -481,6 +484,7 @@ class WizardManager:
                 f"Напоминание не найдено: {reminder_id}",
                 intent="wizard.reminder.missing",
                 mode="local",
+                actions=_menu_actions(),
             )
         updated = await calendar_store.update_reminder_trigger(reminder_id, new_trigger, enabled=True)
         if updated is None:
@@ -488,6 +492,7 @@ class WizardManager:
                 "Не удалось перенести напоминание.",
                 intent="wizard.reminder.confirm",
                 mode="local",
+                actions=_menu_actions(),
             )
         if self._reminder_scheduler and (self._settings is None or self._settings.reminders_enabled):
             try:
@@ -498,6 +503,7 @@ class WizardManager:
                     "Не удалось перенести напоминание.",
                     intent="wizard.reminder.confirm",
                     mode="local",
+                    actions=_menu_actions(),
                 )
         self._store.clear_state(user_id=user_id, chat_id=chat_id)
         LOGGER.info(
