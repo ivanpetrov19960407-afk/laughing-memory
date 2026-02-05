@@ -472,6 +472,12 @@ def _render_text_with_sources(text: str, sources: list[Any]) -> str:
         if not url:
             continue
         lines.append(f"[{index}] {title} — {url}")
+            url = str(source.get("url") or "").strip()
+        else:
+            url = str(getattr(source, "url", "") or "").strip()
+        if not url:
+            continue
+        lines.append(f"{index}) {url}")
     if not lines:
         return base
     return f"{base}\n\nИсточники:\n" + "\n".join(lines)
@@ -1778,6 +1784,7 @@ async def _dispatch_command_payload(
         query = args.strip()
         if not query:
             return refused("Укажи запрос: /search <текст>", intent="menu.search", mode="local")
+            return refused("Использование: /search <запрос>", intent="menu.search", mode="local")
         return await orchestrator.handle(f"/search {query}", _build_user_context(update))
     if normalized == "/reminders":
         now = datetime.now(tz=calendar_store.MOSCOW_TZ)

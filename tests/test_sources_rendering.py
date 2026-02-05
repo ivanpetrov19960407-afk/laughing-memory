@@ -13,7 +13,7 @@ def test_render_text_with_sources_only_when_sources_present() -> None:
 
     assert "Источники:" not in plain
     assert "Источники:" in with_sources
-    assert "[1] A — https://a.example" in with_sources
+    assert "1) https://a.example" in with_sources
 
 
 def test_render_text_with_sources_not_duplicated() -> None:
