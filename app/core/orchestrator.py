@@ -587,7 +587,6 @@ class Orchestrator:
                 return ensure_valid(
                     refused(
                         "Укажи запрос: /search <текст>",
-                        "Использование: /search <запрос>",
                         intent="command.search",
                         mode="local",
                         debug={"reason": "missing_payload"},
@@ -601,7 +600,6 @@ class Orchestrator:
                 return ensure_valid(
                     refused(
                         "Укажи запрос: /search <текст>",
-                        "Использование: /search <запрос>",
                         intent="command.search",
                         mode="local",
                         debug={"reason": "missing_payload"},
@@ -628,7 +626,6 @@ class Orchestrator:
             return ensure_valid(
                 refused(
                     "Укажи запрос: /search <текст>",
-                    "Использование: /search <запрос>",
                     intent=intent,
                     mode="local",
                     debug={"reason": "missing_payload"},
@@ -877,7 +874,6 @@ class Orchestrator:
         if decision.reason == "missing_search_payload":
             return refused(
                 "Укажи запрос: /search <текст>",
-                "Использование: /search <запрос>",
                 intent=decision.intent,
                 mode="local",
             )
