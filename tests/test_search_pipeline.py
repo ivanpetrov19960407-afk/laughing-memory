@@ -77,3 +77,50 @@ def test_search_integration_without_results(tmp_path: Path) -> None:
 
     assert result.status == "refused"
     assert result.sources == []
+
+
+def test_search_without_query_returns_refused(tmp_path: Path) -> None:
+    """Regression: /search without args must not crash (was TypeError from double text arg)."""
+    storage = TaskStorage(tmp_path / "bot.db")
+    orchestrator = Orchestrator(
+        config={},
+        storage=storage,
+        llm_client=FakeLLM("Ответ"),
+        search_client=FakeSearch([]),
+    )
+
+    result = asyncio.run(orchestrator.handle("/search", {"user_id": 1}))
+
+    assert result.status == "refused"
+    assert "search" in result.text.lower() or "запрос" in result.text.lower()
+
+
+def test_search_text_without_query_returns_refused(tmp_path: Path) -> None:
+    """Regression: 'search:' text prefix without args must not crash."""
+    storage = TaskStorage(tmp_path / "bot.db")
+    orchestrator = Orchestrator(
+        config={},
+        storage=storage,
+        llm_client=FakeLLM("Ответ"),
+        search_client=FakeSearch([]),
+    )
+
+    # "search:" triggers the search prefix path but has no query after it
+    result = asyncio.run(orchestrator.handle_text(1, "search:"))
+
+    assert result.status == "refused"
+
+
+def test_handle_text_slash_search_no_query(tmp_path: Path) -> None:
+    """Regression: '/search' via handle_text must not crash (was TypeError from double text arg)."""
+    storage = TaskStorage(tmp_path / "bot.db")
+    orchestrator = Orchestrator(
+        config={},
+        storage=storage,
+        llm_client=FakeLLM("Ответ"),
+        search_client=FakeSearch([]),
+    )
+
+    result = asyncio.run(orchestrator.handle_text(1, "/search"))
+
+    assert result.status == "refused"

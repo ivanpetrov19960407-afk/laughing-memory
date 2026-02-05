@@ -219,3 +219,11 @@ def test_ensure_valid_normalizes_none_actions() -> None:
     )
     normalized = ensure_valid(result)
     assert normalized.actions == []
+
+
+def test_ensure_valid_preserves_ratelimited_status() -> None:
+    result = ratelimited("slow down", intent="rate_limit", mode="local")
+    normalized = ensure_valid(result)
+    assert normalized.status == "ratelimited"
+    assert normalized.text == "slow down"
+    assert normalized.intent == "rate_limit"
