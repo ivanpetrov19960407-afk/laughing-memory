@@ -216,12 +216,7 @@ def ensure_valid(
 ) -> OrchestratorResult:
     logger = logger or LOGGER
     if result is None:
-        return OrchestratorResult(
-            text="Internal error",
-            status="error",
-            mode="local",
-            intent="internal.error",
-        )
+        return OrchestratorResult(text="Внутренняя ошибка.", status="error", mode="local", intent="internal.error")
     if isinstance(result, OrchestratorResult):
         payload: dict[str, Any] = {
             "text": result.text,
@@ -241,7 +236,7 @@ def ensure_valid(
         payload = {}
 
     status = payload.get("status")
-    if status not in {"ok", "refused", "error"}:
+    if status not in {"ok", "refused", "error", "ratelimited"}:
         status = "error"
 
     text = payload.get("text")
@@ -255,30 +250,116 @@ def ensure_valid(
         intent_value = fallback_intent or "unknown"
 
     mode_value = payload.get("mode")
-    if not isinstance(mode_value, str):
+    if not isinstance(mode_value, str) or mode_value not in {"local", "llm", "tool"}:
         mode_value = "local"
 
     request_id_value = payload.get("request_id")
     if not isinstance(request_id_value, str):
         request_id_value = ""
 
-    sources = payload.get("sources")
-    if not isinstance(sources, list):
-        sources = []
+    sources_raw = payload.get("sources")
+    if not isinstance(sources_raw, list):
+        sources_raw = []
 
-    actions = payload.get("actions")
-    if not isinstance(actions, list):
-        actions = []
+    actions_raw = payload.get("actions")
+    if not isinstance(actions_raw, list):
+        actions_raw = []
 
-    attachments = payload.get("attachments")
-    if not isinstance(attachments, list):
-        attachments = []
+    attachments_raw = payload.get("attachments")
+    if not isinstance(attachments_raw, list):
+        attachments_raw = []
 
     debug = payload.get("debug")
     if not isinstance(debug, dict):
         debug = {}
+    # Defense-in-depth: never allow actions data inside debug.
+    if "actions" in debug:
+        debug = dict(debug)
+        debug.pop("actions", None)
 
-    return OrchestratorResult(
+    sources: list[Source] = []
+    for item in sources_raw:
+        if isinstance(item, Source):
+            sources.append(item)
+            continue
+        if isinstance(item, dict):
+            title = item.get("title")
+            url = item.get("url")
+            snippet = item.get("snippet", "")
+            if isinstance(title, str) and isinstance(url, str) and isinstance(snippet, str):
+                sources.append(Source(title=title, url=url, snippet=snippet))
+            continue
+
+    actions: list[Action] = []
+    for item in actions_raw:
+        if isinstance(item, Action):
+            # strip accidental debug leakage from payload
+            if "debug" in item.payload:
+                safe_payload = dict(item.payload)
+                safe_payload.pop("debug", None)
+                actions.append(Action(id=item.id, label=item.label, payload=safe_payload))
+            else:
+                actions.append(item)
+            continue
+        if isinstance(item, dict):
+            action_id = item.get("id")
+            label = item.get("label")
+            action_payload = item.get("payload")
+            if not isinstance(action_payload, dict):
+                action_payload = {}
+            if "debug" in action_payload:
+                action_payload = dict(action_payload)
+                action_payload.pop("debug", None)
+            if isinstance(action_id, str) and isinstance(label, str):
+                actions.append(Action(id=action_id, label=label, payload=action_payload))
+
+    attachments: list[Attachment] = []
+    for item in attachments_raw:
+        if isinstance(item, Attachment):
+            attachments.append(item)
+            continue
+        if isinstance(item, dict):
+            attachment_type = item.get("type")
+            name = item.get("name")
+            path = item.get("path")
+            payload_bytes = item.get("bytes")
+            url = item.get("url")
+            if not isinstance(attachment_type, str) or not isinstance(name, str):
+                continue
+            if path is not None and not isinstance(path, str):
+                path = None
+            if url is not None and not isinstance(url, str):
+                url = None
+            if payload_bytes is not None and not isinstance(payload_bytes, (bytes, bytearray)):
+                payload_bytes = None
+            if path is None and url is None and payload_bytes is None:
+                continue
+            attachments.append(
+                Attachment(
+                    type=attachment_type,
+                    name=name,
+                    path=path,
+                    bytes=bytes(payload_bytes) if isinstance(payload_bytes, bytearray) else payload_bytes,
+                    url=url,
+                )
+            )
+
+    # Remove pseudo-citations/sources markers from text when sources[] is empty
+    # (prevents fake citations and "drawn" references leaking to the user).
+    if not sources and text.strip():
+        text = _strip_pseudo_sources(text)
+
+    if not text.strip():
+        if status == "ok":
+            text = "Ок."
+        elif status == "refused":
+            text = "Не могу выполнить запрос."
+        elif status == "ratelimited":
+            text = "Слишком часто. Попробуй позже."
+        else:
+            text = "Ошибка."
+
+    normalized = OrchestratorResult(
         text=text,
         status=status,
         mode=mode_value,
@@ -289,6 +370,27 @@ def ensure_valid(
         attachments=attachments,
         debug=debug,
     )
+    try:
+        normalized.validate()
+    except Exception as exc:  # pragma: no cover - safety net
+        logger.warning(
+            "Result validation failed after normalization: intent=%s status=%s mode=%s error=%s",
+            intent_value,
+            status,
+            mode_value,
+            str(exc),
+        )
+        return OrchestratorResult(
+            text="Внутренняя ошибка.",
+            status="error",
+            mode="local",
+            intent=fallback_intent or "internal.error",
+            sources=[],
+            actions=[],
+            attachments=[],
+            debug={"reason": "ensure_valid_failed"},
+        )
+    return normalized
 
 
 def ensure_safe_text_strict(

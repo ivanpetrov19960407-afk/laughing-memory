@@ -10,9 +10,14 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-BOT_TZ = ZoneInfo(os.getenv("BOT_TIMEZONE", "Europe/Moscow"))
+_DEFAULT_BOT_TIMEZONE = "Europe/Vilnius"
+BOT_TZ = ZoneInfo(os.getenv("BOT_TIMEZONE", _DEFAULT_BOT_TIMEZONE))
+
+# Backward compatible aliases. Historically the project used these names in code/tests.
+# Keep them, but the actual timezone is configured via BOT_TIMEZONE (default Europe/Vilnius).
+VILNIUS_TZ = BOT_TZ
 MOSCOW_TZ = BOT_TZ
-VIENNA_TZ = BOT_TZ  # backward compatible alias
+VIENNA_TZ = BOT_TZ
 @dataclass(frozen=True)
 class CalendarItem:
     id: str

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any
 
+import io
 import telegram
 from telegram import InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import ContextTypes
@@ -562,6 +563,24 @@ async def send_result(
     if not public_result.text.strip():
         # Replace empty text with fallback message while preserving all other fields
         public_result = replace(public_result, text="Нет ответа.")
+    try:
+        public_result.validate()
+    except Exception as exc:
+        LOGGER.warning(
+            "UI result validation failed: intent=%s status=%s mode=%s error=%s",
+            public_result.intent,
+            public_result.status,
+            public_result.mode,
+            str(exc),
+        )
+        public_result = ensure_valid(
+            error(
+                "Внутренняя ошибка ответа. Попробуй ещё раз.",
+                intent="ui.validation_error",
+                mode="local",
+                debug={"reason": "result_validation_failed"},
+            )
+        )
     chat_id = update.effective_chat.id if update.effective_chat else 0
     request_context = get_request_context(context)
     request_id = request_context.request_id if request_context else None
@@ -653,7 +672,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await _guard_access(update, context):
         return
     result = refused(
-        "Неизвестная команда.",
+        "Неизвестная команда. Открой /menu.",
         intent="command.unknown",
         mode="local",
         actions=[_menu_action()],

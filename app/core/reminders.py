@@ -36,7 +36,7 @@ class ReminderScheduler:
         self,
         application: Application,
         calendar_store_module=calendar_store,
-        timezone: ZoneInfo = calendar_store.MOSCOW_TZ,
+        timezone: ZoneInfo = calendar_store.BOT_TZ,
         max_future_days: int | None = None,
     ) -> None:
         self._application = application
@@ -172,7 +172,8 @@ class ReminderScheduler:
         event = await self._store.get_event(reminder.event_id)
         event_dt = event.dt if event else reminder.trigger_at
         event_label = event_dt.astimezone(self._timezone).strftime("%Y-%m-%d %H:%M")
-        text = f"⏰ Напоминание: {reminder.text}\nКогда: {event_label} (МСК)"
+        tz_label = getattr(self._timezone, "key", None) or "local"
+        text = f"⏰ Напоминание: {reminder.text}\nКогда: {event_label} ({tz_label})"
         actions = _build_reminder_actions(reminder)
         action_store = self._application.bot_data.get("action_store")
         reply_markup = None
