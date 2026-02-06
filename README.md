@@ -46,10 +46,11 @@ python bot.py
 
 ### CalDAV (основной способ подключения календаря)
 Добавьте в `.env`:
-- `CALDAV_URL` (URL календаря, например `https://nextcloud.example.com/remote.php/dav/calendars/user/default/`)
+- `CALENDAR_BACKEND` (`local` или `caldav`, по умолчанию `local`)
+- `CALDAV_URL` (base URL DAV, например `https://nextcloud.example.com/remote.php/dav`)
 - `CALDAV_USERNAME`
 - `CALDAV_PASSWORD` (app password)
-- `CALDAV_CALENDAR_NAME` (необязательно; если не задан, берётся первый доступный)
+- `CALDAV_CALENDAR_NAME` (необязательно; если не задан, берётся первый **writable** календарь; если есть календарь `personal` — он в приоритете)
 
 ### Google Calendar OAuth (опционально)
 Добавьте в `.env`, если хотите оставить экспериментальную интеграцию:
@@ -62,8 +63,13 @@ python bot.py
 
 ## Подключение CalDAV
 1. Создайте app password в вашем сервере (Nextcloud или совместимый).
-2. Заполните `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD`.
+2. Заполните `CALENDAR_BACKEND=caldav`, `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD`.
 3. В Telegram откройте **Menu → Settings → 📅 CalDAV → Подключить**, нажмите **Проверить подключение**.
+
+### Smoke (Nextcloud)
+1. Убедитесь, что `CALENDAR_BACKEND=caldav` и CalDAV успешно проверяется в меню.
+2. Создайте событие через **Menu → Calendar → ➕ Добавить** (wizard) или `/calendar add ...`.
+3. Откройте Nextcloud Calendar и убедитесь, что событие появилось в выбранном календаре.
 
 ## Подключение Google Calendar (опционально)
 1. В Google Cloud Console создайте OAuth Client (тип “Web application”).
