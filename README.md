@@ -49,18 +49,21 @@ python bot.py
 - `GOOGLE_OAUTH_CLIENT_ID`
 - `GOOGLE_OAUTH_CLIENT_SECRET`
 - `PUBLIC_BASE_URL` (публичный базовый URL, например `https://your-domain` или `http://host:8080`)
-- `GOOGLE_OAUTH_REDIRECT_PATH` (например `/oauth/google/callback`)
+- `GOOGLE_OAUTH_REDIRECT_PATH` (по умолчанию `/oauth2/callback`)
+- `GOOGLE_TOKENS_DB_PATH` (по умолчанию `data/google_tokens.db`)
+- `OAUTH_WEB_PORT` (по умолчанию `8000`, сервис слушает только `127.0.0.1`)
 
 ## Подключение Google Calendar
 1. В Google Cloud Console создайте OAuth Client (тип “Web application”).
 2. В “Authorized redirect URIs” укажите:
    - `${PUBLIC_BASE_URL}${GOOGLE_OAUTH_REDIRECT_PATH}`  
-     (например `https://your-domain/oauth/google/callback`).
+     (например `https://your-domain/oauth2/callback`).
 3. Заполните переменные окружения из секции выше.
-4. Убедитесь, что бот доступен по `PUBLIC_BASE_URL` (через прямой порт или reverse proxy).
-5. В Telegram откройте **Menu → Settings → 🔗 Подключить Google Calendar**, пройдите авторизацию.
+4. Поднимите web-сервис OAuth (например через systemd, см. `deploy/systemd/telegram-bot-web.service`).
+5. Настройте Nginx proxy для `/oauth2/` и `/health` на `http://127.0.0.1:8000` (см. `deploy/nginx/oauth-web-proxy.conf`).
+6. В Telegram откройте **Menu → Settings → 📅 Google Calendar → Подключить** (или команда `/gcal`), пройдите авторизацию.
 
-> Файл токенов хранится на диске (по умолчанию `data/google_tokens.json`).
+> Токены хранятся в SQLite (по умолчанию `data/google_tokens.db`, таблица `google_tokens`).
 > При деплое задайте права `chmod 600` для защиты.
 
 ## Тесты
