@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
 from app.core import calendar_store
 from app.core.reminders import ReminderScheduler
 from app.bot import handlers
+from app.stores.google_tokens import GoogleTokenStore, GoogleTokens
 
 
 @dataclass
@@ -125,7 +128,22 @@ def test_add_creates_reminder(calendar_path) -> None:
 def test_calendar_command_add_does_not_create_reminder(calendar_path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     scheduled: dict[str, bool] = {"called": False}
-    monkeypatch.setenv("CALENDAR_CONNECTED", "1")
+    tokens_path = Path(calendar_path).parent / "google_tokens.json"
+    monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:8080")
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
+    token_store = GoogleTokenStore(tokens_path)
+    token_store.load()
+    token_store.set_tokens(
+        1,
+        GoogleTokens(
+            access_token="token",
+            refresh_token="refresh",
+            expires_at=time.time() + 3600,
+        ),
+    )
 
     class DummyUpdate:
         def __init__(self) -> None:
@@ -154,6 +172,11 @@ def test_calendar_command_add_does_not_create_reminder(calendar_path, monkeypatc
     monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
     monkeypatch.setattr(handlers, "send_result", fake_send_result)
     monkeypatch.setattr(handlers, "_get_reminder_scheduler", lambda context: DummyScheduler())
+
+    async def fake_create_event(*, access_token: str, start_at: datetime, title: str) -> dict[str, object]:
+        return {"id": "evt-1"}
+
+    monkeypatch.setattr("app.core.tools_calendar._create_google_event", fake_create_event)
 
     before = calendar_store.load_store()
     reminders_before = len(before.get("reminders") or [])

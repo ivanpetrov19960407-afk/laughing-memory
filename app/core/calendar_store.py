@@ -192,13 +192,23 @@ async def add_item(
     remind_at: datetime | None = None,
     user_id: int = 0,
     reminders_enabled: bool = True,
+    event_id: str | None = None,
 ) -> dict[str, object]:
     async with _STORE_LOCK:
         store = load_store()
         events = list(store.get("events") or [])
         reminders = list(store.get("reminders") or [])
         existing_ids = {item.get("event_id") for item in events if isinstance(item, dict)}
-        event_id = _generate_id({item_id for item_id in existing_ids if isinstance(item_id, str)})
+        if isinstance(event_id, str) and event_id in existing_ids:
+            existing_item = next(
+                (item for item in events if isinstance(item, dict) and item.get("event_id") == event_id),
+                None,
+            )
+            result: dict[str, object] = {"event": existing_item} if isinstance(existing_item, dict) else {"event": None}
+            return result
+        event_id = event_id if isinstance(event_id, str) else _generate_id(
+            {item_id for item_id in existing_ids if isinstance(item_id, str)}
+        )
         reminder_ids = {
             item.get("reminder_id") for item in reminders if isinstance(item, dict) and item.get("reminder_id")
         }
