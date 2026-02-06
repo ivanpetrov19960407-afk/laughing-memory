@@ -7,20 +7,12 @@ from datetime import datetime, timedelta, timezone
 from app.bot.wizard import WizardManager, WIZARD_CALENDAR_ADD
 from app.storage.wizard_store import WizardStore, WizardState
 from app.core import calendar_store
-from app.core import tools_calendar_caldav
 
 
 def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-    monkeypatch.setenv("CALDAV_URL", "https://caldav.example.com")
-    monkeypatch.setenv("CALDAV_USERNAME", "user")
-    monkeypatch.setenv("CALDAV_PASSWORD", "pass")
-
-    async def fake_create_event(*args, **kwargs) -> tools_calendar_caldav.CreatedEvent:
-        return tools_calendar_caldav.CreatedEvent(uid="evt-1", href="https://caldav.example.com/e/1")
-
-    monkeypatch.setattr("app.core.tools_calendar_caldav.create_event", fake_create_event)
+    monkeypatch.setenv("CALENDAR_BACKEND", "local")
     store = WizardStore(tmp_path / "wizards", timeout_seconds=600)
     manager = WizardManager(store)
 
@@ -57,7 +49,7 @@ def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
     )
     assert confirm is not None
     assert confirm.status == "ok"
-    assert "Событие добавлено" in confirm.text
+    assert "Событие создано" in confirm.text
 
     state, _expired = store.load_state(user_id=1, chat_id=10)
     assert state is None
@@ -66,9 +58,13 @@ def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
     assert any(item.title == "Врач" for item in items)
 
 
-def test_wizard_calendar_refuses_without_connection(tmp_path, monkeypatch) -> None:
+def test_wizard_calendar_caldav_missing_config_falls_back_to_local(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    monkeypatch.setenv("CALENDAR_BACKEND", "caldav")
+    monkeypatch.delenv("CALDAV_URL", raising=False)
+    monkeypatch.delenv("CALDAV_USERNAME", raising=False)
+    monkeypatch.delenv("CALDAV_PASSWORD", raising=False)
     tokens_path = tmp_path / "google_tokens.db"
     monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
     store = WizardStore(tmp_path / "wizards", timeout_seconds=600)
@@ -92,9 +88,8 @@ def test_wizard_calendar_refuses_without_connection(tmp_path, monkeypatch) -> No
             payload={},
         )
     )
-    assert confirm.status == "refused"
-    assert "CALDAV_URL/USERNAME/PASSWORD" in confirm.text
-    assert "Событие добавлено" not in confirm.text
+    assert confirm.status == "ok"
+    assert "Событие создано" in confirm.text
 
 
 def test_wizard_cancel_and_timeout(tmp_path) -> None:

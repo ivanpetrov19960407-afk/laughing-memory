@@ -11,7 +11,6 @@ import pytest
 from app.core import calendar_store
 from app.core.reminders import ReminderScheduler
 from app.bot import handlers
-from app.core import tools_calendar_caldav
 
 
 @dataclass
@@ -128,9 +127,7 @@ def test_add_creates_reminder(calendar_path) -> None:
 def test_calendar_command_add_does_not_create_reminder(calendar_path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     scheduled: dict[str, bool] = {"called": False}
-    monkeypatch.setenv("CALDAV_URL", "https://caldav.example.com")
-    monkeypatch.setenv("CALDAV_USERNAME", "user")
-    monkeypatch.setenv("CALDAV_PASSWORD", "pass")
+    monkeypatch.setenv("CALENDAR_BACKEND", "local")
 
     class DummyUpdate:
         def __init__(self) -> None:
@@ -159,11 +156,6 @@ def test_calendar_command_add_does_not_create_reminder(calendar_path, monkeypatc
     monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
     monkeypatch.setattr(handlers, "send_result", fake_send_result)
     monkeypatch.setattr(handlers, "_get_reminder_scheduler", lambda context: DummyScheduler())
-
-    async def fake_create_event(*args, **kwargs) -> tools_calendar_caldav.CreatedEvent:
-        return tools_calendar_caldav.CreatedEvent(uid="evt-1", href="https://caldav.example.com/e/1")
-
-    monkeypatch.setattr("app.core.tools_calendar_caldav.create_event", fake_create_event)
 
     before = calendar_store.load_store()
     reminders_before = len(before.get("reminders") or [])
