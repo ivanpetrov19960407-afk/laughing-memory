@@ -17,6 +17,7 @@ LOGGER = logging.getLogger(__name__)
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar"]
+DEFAULT_REDIRECT_PATH = "/oauth2/callback"
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,7 @@ def load_google_oauth_config() -> GoogleOAuthConfig | None:
     client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
     client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
     public_base_url = os.getenv("PUBLIC_BASE_URL")
-    redirect_path = os.getenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
+    redirect_path = os.getenv("GOOGLE_OAUTH_REDIRECT_PATH", DEFAULT_REDIRECT_PATH)
     if not client_id or not client_secret or not public_base_url:
         return None
     return GoogleOAuthConfig(
@@ -71,6 +72,16 @@ class OAuthStateStore:
     def issue_state(self, user_id: int) -> str:
         self._cleanup()
         state = secrets.token_urlsafe(24)
+        expires_at = time.time() + self._ttl_seconds
+        prior_state = self._user_index.get(user_id)
+        if prior_state:
+            self._states.pop(prior_state, None)
+        self._states[state] = (user_id, expires_at)
+        self._user_index[user_id] = state
+        return state
+
+    def register_state(self, *, user_id: int, state: str) -> str:
+        self._cleanup()
         expires_at = time.time() + self._ttl_seconds
         prior_state = self._user_index.get(user_id)
         if prior_state:
@@ -138,25 +149,27 @@ def handle_oauth_callback(
         message = f"Google вернул ошибку: {error_value}"
         if description:
             message = f"{message}. {description}"
-        return 400, message
+        return 400, _wrap_html(message)
     code = query_params.get("code")
     state = query_params.get("state")
     if not code or not state:
-        return 400, "Не хватает параметров OAuth (code/state)."
+        return 400, _wrap_html("Не хватает параметров OAuth (code/state).")
     user_id = state_store.consume_state(state)
     if user_id is None:
-        return 400, "Неверный или просроченный state."
+        if not state.isdigit():
+            return 400, _wrap_html("Неверный state.")
+        user_id = int(state)
     try:
         token_payload = exchange_code_for_tokens(config, code=code)
     except httpx.HTTPError as exc:
         LOGGER.exception("OAuth exchange failed: %s", exc)
-        return 500, "Не удалось обменять код на токены. Проверьте настройки OAuth."
+        return 500, _wrap_html("Не удалось обменять код на токены. Проверьте настройки OAuth.")
     access_token = token_payload.get("access_token")
     refresh_token = token_payload.get("refresh_token")
     expires_in = token_payload.get("expires_in")
     if not isinstance(access_token, str) or not isinstance(refresh_token, str):
-        LOGGER.error("OAuth exchange missing tokens: payload=%s", token_payload)
-        return 500, "Google не вернул refresh_token. Попробуйте подключить заново."
+        LOGGER.error("OAuth exchange missing tokens.")
+        return 500, _wrap_html("Google не вернул refresh_token. Попробуйте подключить заново.")
     expires_at = time.time() + float(expires_in) if isinstance(expires_in, (int, float)) else None
     token_store.set_tokens(
         user_id,
@@ -168,4 +181,26 @@ def handle_oauth_callback(
             scope=token_payload.get("scope") if isinstance(token_payload.get("scope"), str) else None,
         ),
     )
-    return 200, "✅ Календарь подключён. Можно вернуться в Telegram."
+    _notify_telegram_connected(user_id)
+    return 200, _wrap_html("Готово. Можно вернуться в Telegram.")
+
+
+def _notify_telegram_connected(user_id: int) -> None:
+    bot_token = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+    if not bot_token:
+        return
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": user_id, "text": "Google Calendar подключён"}
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            response = client.post(url, data=payload)
+    except httpx.HTTPError:
+        LOGGER.warning("Telegram notify failed.")
+        return
+    if response.status_code >= 400:
+        LOGGER.warning("Telegram notify failed with status %s.", response.status_code)
+
+
+def _wrap_html(message: str) -> str:
+    safe = message.replace("<", "&lt;").replace(">", "&gt;")
+    return f"<!doctype html><html><body>{safe}</body></html>"

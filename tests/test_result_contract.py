@@ -70,7 +70,7 @@ def test_ratelimited_result_is_valid() -> None:
 def test_tool_calendar_returns_result(tmp_path, monkeypatch) -> None:
     path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(path))
-    tokens_path = tmp_path / "google_tokens.json"
+    tokens_path = tmp_path / "google_tokens.db"
     monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
     token_store = GoogleTokenStore(tokens_path)
     token_store.load()
