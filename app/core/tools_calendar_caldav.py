@@ -225,8 +225,14 @@ def _safe_ical_value(vevent, name: str) -> str | None:
         return None
     decoded = vevent.decoded(name, None)
     if decoded is None:
-        return str(value)
-    return str(decoded)
+        return _decode_ical_value(value)
+    return _decode_ical_value(decoded)
+
+
+def _decode_ical_value(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return str(value)
 
 
 def _normalize_datetime(value: datetime | date) -> datetime:
