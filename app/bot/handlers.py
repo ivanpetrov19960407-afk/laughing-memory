@@ -653,7 +653,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await _guard_access(update, context):
         return
     result = refused(
-        "Неизвестная команда.",
+        "Неизвестная команда. Открой /menu.",
         intent="command.unknown",
         mode="local",
         actions=[_menu_action()],
@@ -1827,7 +1827,7 @@ async def _dispatch_command_payload(
             return refused("Укажи запрос: /search <текст>", intent="menu.search", mode="local")
         return await orchestrator.handle(f"/search {query}", _build_user_context(update))
     if normalized == "/reminders":
-        now = datetime.now(tz=calendar_store.MOSCOW_TZ)
+        now = datetime.now(tz=calendar_store.BOT_TZ)
         return await list_reminders(now, limit=5, intent="menu.reminders")
     if normalized in {"/facts_on", "/facts_off"}:
         user_id = update.effective_user.id if update.effective_user else 0
@@ -1853,7 +1853,7 @@ async def _dispatch_command_payload(
         text = "Контекст включён." if enabled else "Контекст выключён."
         return ok(text, intent="menu.context", mode="local")
     return refused(
-        f"Команда недоступна: {command}",
+        "Неизвестная команда. Открой /menu.",
         intent="ui.action",
         mode="local",
         debug={"command": command, "args": args},
@@ -1866,7 +1866,7 @@ async def _handle_reminders_list(
     limit: int = 5,
     intent: str = "menu.reminders",
 ) -> OrchestratorResult:
-    now = datetime.now(tz=calendar_store.MOSCOW_TZ)
+    now = datetime.now(tz=calendar_store.BOT_TZ)
     return await list_reminders(now, limit=limit, intent=intent)
 
 
@@ -1893,10 +1893,10 @@ async def _handle_reminder_snooze(
         except ValueError:
             base_dt = None
         if base_dt and base_dt.tzinfo is None:
-            base_dt = base_dt.replace(tzinfo=calendar_store.MOSCOW_TZ)
+            base_dt = base_dt.replace(tzinfo=calendar_store.BOT_TZ)
         if base_dt and base_dt.tzinfo is not None:
-            base_dt = base_dt.astimezone(calendar_store.MOSCOW_TZ)
-    updated = await calendar_store.apply_snooze(reminder_id, minutes=offset, now=datetime.now(tz=calendar_store.MOSCOW_TZ), base_trigger_at=base_dt)
+            base_dt = base_dt.astimezone(calendar_store.BOT_TZ)
+    updated = await calendar_store.apply_snooze(reminder_id, minutes=offset, now=datetime.now(tz=calendar_store.BOT_TZ), base_trigger_at=base_dt)
     if updated is None:
         return error(
             "Не удалось отложить напоминание (возможно, уже отключено).",
@@ -1922,7 +1922,7 @@ async def _handle_reminder_snooze(
         reminder.trigger_at.isoformat(),
         updated.trigger_at.isoformat(),
     )
-    when_label = updated.trigger_at.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
+    when_label = updated.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
     return ok(
         f"Ок, отложил до {when_label}.",
         intent="utility_reminders.snooze",
@@ -2030,7 +2030,7 @@ async def _handle_reminder_add_offset(
                 intent="utility_reminders.add",
                 mode="local",
             )
-    when_label = trigger_at.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
+    when_label = trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
     return ok(
         f"Напоминание добавлено на {when_label}.",
         intent="utility_reminders.add",
@@ -2396,7 +2396,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send_result(update, context, result)
         return
     if command == "debug_due":
-        now = datetime.now(tz=calendar_store.MOSCOW_TZ)
+        now = datetime.now(tz=calendar_store.BOT_TZ)
         due_items = await calendar_store.list_due_reminders(now, limit=5)
         if not due_items:
             result = ok("Нет просроченных напоминаний.", intent="utility_calendar.debug_due", mode="local")
@@ -2404,7 +2404,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         lines = []
         for item in due_items:
-            remind_label = item.trigger_at.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
+            remind_label = item.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
             lines.append(
                 f"{item.id} | trigger_at={remind_label} | enabled={item.enabled} | {item.text}"
             )
@@ -2442,7 +2442,7 @@ async def reminders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             result = refused("Использование: /reminders [N].", intent="utility_reminders.list", mode="local")
             await send_result(update, context, result)
             return
-    now = datetime.now(tz=calendar_store.MOSCOW_TZ)
+    now = datetime.now(tz=calendar_store.BOT_TZ)
     result = await list_reminders(now, limit=limit, intent="utility_reminders.list")
     await send_result(update, context, result)
 

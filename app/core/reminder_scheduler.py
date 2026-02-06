@@ -32,7 +32,7 @@ def _get_grace_minutes() -> int:
 
 
 async def _process_due_reminders(application: Application) -> None:
-    now = datetime.now(tz=calendar_store.VIENNA_TZ)
+    now = datetime.now(tz=calendar_store.BOT_TZ)
     grace_window = timedelta(minutes=_get_grace_minutes())
     due_items = await calendar_store.list_due_reminders(now)
     for item in due_items:
@@ -58,7 +58,7 @@ async def _process_due_reminders(application: Application) -> None:
             continue
         event = await calendar_store.get_event(item.event_id)
         event_dt = event.dt if event else item.trigger_at
-        message_time = event_dt.astimezone(calendar_store.VIENNA_TZ).strftime("%Y-%m-%d %H:%M")
+        message_time = event_dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         text = f"⏰ Напоминание: {item.text}\nКогда: {message_time} (Europe/Vilnius)"
         actions = _build_reminder_actions(item)
         action_store = application.bot_data.get("action_store")

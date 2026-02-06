@@ -281,7 +281,7 @@ class WizardManager:
         except ValueError:
             return refused("Дата повреждена, начни заново.", intent="wizard.calendar.confirm", mode="local")
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=calendar_store.MOSCOW_TZ)
+            dt = dt.replace(tzinfo=calendar_store.BOT_TZ)
         try:
             created = await calendar_store.add_item(
                 dt=dt,
@@ -301,7 +301,7 @@ class WizardManager:
         self._store.clear_state(user_id=user_id, chat_id=chat_id)
         event = created.get("event") if isinstance(created, dict) else None
         event_id = event.get("event_id") if isinstance(event, dict) else None
-        display_dt = dt.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
+        display_dt = dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         actions = _post_create_actions(event_id if isinstance(event_id, str) else "")
         return ok(
             f"Готово! Событие добавлено: {display_dt} — {title.strip()}",
@@ -391,7 +391,7 @@ class WizardManager:
         except ValueError:
             return refused("Дата повреждена, начни заново.", intent="wizard.reminder_create.confirm", mode="local")
         if trigger_at.tzinfo is None:
-            trigger_at = trigger_at.replace(tzinfo=calendar_store.MOSCOW_TZ)
+            trigger_at = trigger_at.replace(tzinfo=calendar_store.BOT_TZ)
         recurrence_payload = recurrence if isinstance(recurrence, dict) else None
         try:
             reminder = await calendar_store.add_reminder(
@@ -408,7 +408,7 @@ class WizardManager:
         if self._reminder_scheduler and (self._settings is None or self._settings.reminders_enabled):
             await self._reminder_scheduler.schedule_reminder(reminder)
         self._store.clear_state(user_id=user_id, chat_id=chat_id)
-        display_dt = reminder.trigger_at.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
+        display_dt = reminder.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         LOGGER.info("Reminder created: reminder_id=%s user_id=%s trigger_at=%s", reminder.id, user_id, reminder.trigger_at.isoformat())
         return ok(
             f"Ок, поставил на {display_dt} (МСК).",
@@ -474,7 +474,7 @@ class WizardManager:
         except ValueError:
             return refused("Дата повреждена, начни заново.", intent="wizard.reminder.confirm", mode="local")
         if new_trigger.tzinfo is None:
-            new_trigger = new_trigger.replace(tzinfo=calendar_store.MOSCOW_TZ)
+            new_trigger = new_trigger.replace(tzinfo=calendar_store.BOT_TZ)
         reminder = await calendar_store.get_reminder(reminder_id)
         if reminder is None:
             return refused(
@@ -507,7 +507,7 @@ class WizardManager:
             reminder.trigger_at.isoformat(),
             updated.trigger_at.isoformat(),
         )
-        display_dt = updated.trigger_at.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
+        display_dt = updated.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         return ok(
             f"Ок, перенёс на {display_dt}.",
             intent="wizard.reminder.done",
@@ -541,7 +541,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
         trigger_raw = state.data.get("trigger_at")
         trigger = datetime.fromisoformat(trigger_raw) if isinstance(trigger_raw, str) else None
         rec = state.data.get("recurrence")
-        display_dt = trigger.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M") if isinstance(trigger, datetime) else "неизвестно"
+        display_dt = trigger.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M") if isinstance(trigger, datetime) else "неизвестно"
         rec_label = _recurrence_label(rec if isinstance(rec, dict) else None)
         return ok(f"Создать напоминание: {title}\nКогда: {display_dt} (МСК)\nПовтор: {rec_label}?", intent="wizard.reminder_create.confirm", mode="local", actions=_confirm_actions())
     if state.wizard_id == WIZARD_REMINDER_RESCHEDULE and state.step == STEP_AWAIT_DATETIME:
@@ -562,7 +562,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
         else:
             new_trigger = None
         display_dt = (
-            new_trigger.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
+            new_trigger.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
             if isinstance(new_trigger, datetime)
             else "неизвестно"
         )
@@ -598,7 +598,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
         else:
             dt = None
         display_dt = (
-            dt.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
+            dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
             if isinstance(dt, datetime)
             else "неизвестно"
         )

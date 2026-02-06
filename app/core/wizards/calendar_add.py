@@ -16,7 +16,7 @@ def register(runtime: WizardRuntime) -> None:
         title = text.strip()
         if not title:
             return None
-        today = datetime.now(tz=calendar_store.VIENNA_TZ).date()
+        today = datetime.now(tz=calendar_store.BOT_TZ).date()
         state.data["title"] = title
         state.data["date"] = today.isoformat()
         return STEP_CONFIRM

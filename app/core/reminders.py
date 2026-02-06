@@ -36,7 +36,7 @@ class ReminderScheduler:
         self,
         application: Application,
         calendar_store_module=calendar_store,
-        timezone: ZoneInfo = calendar_store.MOSCOW_TZ,
+        timezone: ZoneInfo = calendar_store.BOT_TZ,
         max_future_days: int | None = None,
     ) -> None:
         self._application = application

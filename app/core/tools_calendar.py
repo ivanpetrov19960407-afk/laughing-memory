@@ -19,7 +19,7 @@ async def list_calendar_items(
         return ensure_valid(refused("Слишком много, сузь диапазон.", intent=intent, mode="tool"))
     lines = []
     for item in items:
-        dt_label = item.dt.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
+        dt_label = item.dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         lines.append(f"{item.id} | {dt_label} | {item.title}")
     return ensure_valid(ok("\n".join(lines), intent=intent, mode="tool"))
 
@@ -36,7 +36,7 @@ async def list_reminders(
     lines = []
     actions: list[Action] = []
     for item in items:
-        when_label = item.trigger_at.astimezone(calendar_store.MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
+        when_label = item.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         lines.append(f"{item.id} | {when_label} | {item.text}")
         actions.append(
             Action(

@@ -37,7 +37,7 @@ _PLAIN_TEXT_SYSTEM_PROMPT = (
     "\"references\". Если источники не были предоставлены отдельно, не упоминай источники вовсе. "
     "Верни только связный текст без упоминаний источников."
 )
-_UNKNOWN_COMMAND_MESSAGE = "Неизвестная команда. Напиши /help."
+_UNKNOWN_COMMAND_MESSAGE = "Неизвестная команда. Открой /menu."
 _DESTRUCTIVE_REFUSAL = "Не могу выполнить разрушительное действие."
 
 
@@ -654,7 +654,7 @@ class Orchestrator:
             reason = "facts_only_no_sources" if facts_only else "search_no_results"
             return ensure_valid(
                 refused(
-                    "Ничего не найдено по запросу.",
+                    "Не могу ответить без источников. Попробуй переформулировать запрос.",
                     intent=intent,
                     mode="tool",
                     debug={"reason": reason, "query": trimmed_query},
