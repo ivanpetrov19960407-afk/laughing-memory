@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from app.bot import wizard
-from app.bot.wizard import WizardManager
+from app.bot.wizard import STEP_AWAIT_TITLE, WizardManager, WIZARD_CALENDAR_ADD
 from app.core import calendar_store
 from app.storage.wizard_store import WizardStore
 
@@ -65,3 +65,31 @@ def test_create_wizard_creates_reminder(tmp_path, monkeypatch) -> None:
     assert len(reminders) == 1
     assert reminders[0].text == "Позвонить маме"
     assert reminders[0].recurrence is None
+
+
+def test_resume_prompt_restart_starts_reminder_wizard(tmp_path, monkeypatch) -> None:
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    store = WizardStore(tmp_path / "wizards")
+    manager = WizardManager(store, reminder_scheduler=None, settings=DummySettings())
+
+    started = asyncio_run(
+        manager.handle_action(user_id=1, chat_id=1, op="wizard_start", payload={"wizard_id": WIZARD_CALENDAR_ADD})
+    )
+    assert started.status == "ok"
+
+    resume_prompt = asyncio_run(
+        manager.handle_action(user_id=1, chat_id=1, op="wizard_start", payload={"wizard_id": wizard.WIZARD_REMINDER_CREATE})
+    )
+    assert resume_prompt.status == "ok"
+    restart_action = next(action for action in resume_prompt.actions if action.id == "wizard.restart")
+    restarted = asyncio_run(
+        manager.handle_action(user_id=1, chat_id=1, op="wizard_restart", payload=restart_action.payload)
+    )
+    assert restarted.status == "ok"
+    assert restarted.intent == "wizard.reminder_create.title"
+    state, expired = manager.get_state(user_id=1, chat_id=1)
+    assert expired is False
+    assert state is not None
+    assert state.wizard_id == wizard.WIZARD_REMINDER_CREATE
+    assert state.step == STEP_AWAIT_TITLE

@@ -85,7 +85,9 @@ class WizardManager:
                 return refused("Нет активного сценария.", intent="wizard.continue", mode="local")
             if op == "wizard_restart":
                 self._store.clear_state(user_id=user_id, chat_id=chat_id)
-                return self._start_wizard(state.wizard_id, user_id=user_id, chat_id=chat_id, active_state=None)
+                resume_target = payload.get("resume_target")
+                target = resume_target if isinstance(resume_target, str) and resume_target else state.wizard_id
+                return self._start_wizard(target, user_id=user_id, chat_id=chat_id, active_state=None)
             return _render_prompt(state)
         if op == "wizard_cancel":
             if state is None:
@@ -147,7 +149,7 @@ class WizardManager:
                 "У тебя уже есть активный сценарий. Продолжить или начать заново?",
                 intent="wizard.resume_prompt",
                 mode="local",
-                actions=_resume_actions(active_state.wizard_id),
+                actions=_resume_actions(active_state.wizard_id, resume_target=wizard_id),
             )
         if wizard_id not in {WIZARD_CALENDAR_ADD, WIZARD_REMINDER_CREATE}:
             return refused("Сценарий недоступен.", intent="wizard.start", mode="local")
@@ -689,10 +691,13 @@ def _confirm_actions() -> list[Action]:
     ]
 
 
-def _resume_actions(wizard_id: str) -> list[Action]:
+def _resume_actions(wizard_id: str, *, resume_target: str | None = None) -> list[Action]:
+    restart_payload: dict[str, object] = {"op": "wizard_restart", "wizard_id": wizard_id}
+    if resume_target:
+        restart_payload["resume_target"] = resume_target
     return [
         Action(id="wizard.continue", label="▶️ Продолжить", payload={"op": "wizard_continue", "wizard_id": wizard_id}),
-        Action(id="wizard.restart", label="🔄 Начать заново", payload={"op": "wizard_restart", "wizard_id": wizard_id}),
+        Action(id="wizard.restart", label="🔄 Начать заново", payload=restart_payload),
         Action(id="wizard.cancel", label="❌ Отмена", payload={"op": "wizard_cancel", "wizard_id": wizard_id}),
     ]
 
