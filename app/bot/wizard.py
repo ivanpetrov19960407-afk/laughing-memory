@@ -692,14 +692,25 @@ def _confirm_actions() -> list[Action]:
 
 
 def _resume_actions(wizard_id: str, *, resume_target: str | None = None) -> list[Action]:
-    restart_payload: dict[str, object] = {"op": "wizard_restart", "wizard_id": wizard_id}
-    if resume_target:
-        restart_payload["resume_target"] = resume_target
+    target_label = _wizard_target_label(resume_target)
+    restart_payload: dict[str, object] = {"op": "wizard.restart"}
+    if target_label:
+        restart_payload["target"] = target_label
     return [
-        Action(id="wizard.continue", label="▶️ Продолжить", payload={"op": "wizard_continue", "wizard_id": wizard_id}),
+        Action(id="wizard.resume", label="▶️ Продолжить", payload={"op": "wizard.resume"}),
         Action(id="wizard.restart", label="🔄 Начать заново", payload=restart_payload),
-        Action(id="wizard.cancel", label="❌ Отмена", payload={"op": "wizard_cancel", "wizard_id": wizard_id}),
+        Action(id="wizard.cancel", label="❌ Отмена", payload={"op": "wizard.cancel"}),
     ]
+
+
+def _wizard_target_label(wizard_id: str | None) -> str | None:
+    if wizard_id == WIZARD_REMINDER_CREATE:
+        return "reminders.create"
+    if wizard_id == WIZARD_CALENDAR_ADD:
+        return "calendar.add"
+    if wizard_id == WIZARD_REMINDER_RESCHEDULE:
+        return "reminder.reschedule"
+    return None
 
 
 def _post_create_actions(event_id: str) -> list[Action]:

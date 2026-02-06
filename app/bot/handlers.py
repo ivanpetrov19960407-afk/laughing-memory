@@ -440,6 +440,19 @@ def _reminder_list_controls_actions() -> list[Action]:
     ]
 
 
+def _map_wizard_target(target: str | None) -> str | None:
+    if not target:
+        return None
+    normalized = target.strip().lower()
+    if normalized in {"reminders.create", "reminder.create"}:
+        return wizard.WIZARD_REMINDER_CREATE
+    if normalized in {"calendar.add", "calendar.create"}:
+        return wizard.WIZARD_CALENDAR_ADD
+    if normalized in {"reminder.reschedule"}:
+        return wizard.WIZARD_REMINDER_RESCHEDULE
+    return None
+
+
 def _build_user_context_with_dialog(
     update: Update,
     *,
@@ -1676,7 +1689,11 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         payload=stored.payload,
         intent=normalized_intent,
     )
-    if isinstance(result, OrchestratorResult) and result.intent != normalized_intent:
+    if (
+        isinstance(result, OrchestratorResult)
+        and normalized_intent != stored.intent
+        and result.intent != normalized_intent
+    ):
         result = replace(result, intent=normalized_intent)
     await send_result(update, context, result)
 
@@ -1730,6 +1747,43 @@ async def _dispatch_action_payload(
                 debug={"reason": "invalid_section"},
             )
         return await _handle_menu_section(context, section=section, user_id=user_id, chat_id=chat_id)
+    if op_value == "wizard.resume":
+        manager = _get_wizard_manager(context)
+        if manager is None:
+            return error("Сценарии не настроены.", intent="wizard.missing", mode="local")
+        result = await manager.handle_action(
+            user_id=user_id,
+            chat_id=chat_id,
+            op="wizard_continue",
+            payload={},
+        )
+        if result is None:
+            return refused("Нет активного сценария.", intent="wizard.resume", mode="local")
+        return result
+    if op_value == "wizard.restart":
+        manager = _get_wizard_manager(context)
+        if manager is None:
+            return error("Сценарии не настроены.", intent="wizard.missing", mode="local")
+        target = payload.get("target")
+        manager.cancel(user_id=user_id, chat_id=chat_id)
+        wizard_id = _map_wizard_target(target if isinstance(target, str) else None)
+        if wizard_id is None:
+            return refused("Не удалось начать заново, открой /menu.", intent="wizard.restart", mode="local")
+        result = await manager.handle_action(
+            user_id=user_id,
+            chat_id=chat_id,
+            op="wizard_start",
+            payload={"wizard_id": wizard_id},
+        )
+        if result is None:
+            return refused("Не удалось начать заново, открой /menu.", intent="wizard.restart", mode="local")
+        return result
+    if op_value == "wizard.cancel":
+        manager = _get_wizard_manager(context)
+        if manager is None:
+            return error("Сценарии не настроены.", intent="wizard.missing", mode="local")
+        manager.cancel(user_id=user_id, chat_id=chat_id)
+        return refused("Отменено.", intent="wizard.cancel", mode="local")
     if op_value in {
         "wizard_start",
         "wizard_continue",
