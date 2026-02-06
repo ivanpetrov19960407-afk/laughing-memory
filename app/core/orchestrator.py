@@ -37,7 +37,7 @@ _PLAIN_TEXT_SYSTEM_PROMPT = (
     "\"references\". Если источники не были предоставлены отдельно, не упоминай источники вовсе. "
     "Верни только связный текст без упоминаний источников."
 )
-_UNKNOWN_COMMAND_MESSAGE = "Неизвестная команда. Напиши /help."
+_UNKNOWN_COMMAND_MESSAGE = "Неизвестная команда, открой /menu."
 _DESTRUCTIVE_REFUSAL = "Не могу выполнить разрушительное действие."
 
 
@@ -596,7 +596,6 @@ class Orchestrator:
                 return ensure_valid(
                     refused(
                         "Укажи запрос: /search <текст>",
-                        "Использование: /search <запрос>",
                         intent="command.search",
                         mode="local",
                         debug={"reason": "missing_payload"},
@@ -610,7 +609,6 @@ class Orchestrator:
                 return ensure_valid(
                     refused(
                         "Укажи запрос: /search <текст>",
-                        "Использование: /search <запрос>",
                         intent="command.search",
                         mode="local",
                         debug={"reason": "missing_payload"},
@@ -637,7 +635,6 @@ class Orchestrator:
             return ensure_valid(
                 refused(
                     "Укажи запрос: /search <текст>",
-                    "Использование: /search <запрос>",
                     intent=intent,
                     mode="local",
                     debug={"reason": "missing_payload"},
@@ -886,7 +883,6 @@ class Orchestrator:
         if decision.reason == "missing_search_payload":
             return refused(
                 "Укажи запрос: /search <текст>",
-                "Использование: /search <запрос>",
                 intent=decision.intent,
                 mode="local",
             )

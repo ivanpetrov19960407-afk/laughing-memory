@@ -241,7 +241,7 @@ def ensure_valid(
         payload = {}
 
     status = payload.get("status")
-    if status not in {"ok", "refused", "error"}:
+    if status not in {"ok", "refused", "error", "ratelimited"}:
         status = "error"
 
     text = payload.get("text")
@@ -249,6 +249,16 @@ def ensure_valid(
         text = ""
     elif not isinstance(text, str):
         text = str(text)
+
+    # Guarantee non-empty text for user-visible responses
+    if not text.strip():
+        _fallback_map = {
+            "ok": "Готово.",
+            "refused": "Запрос отклонён.",
+            "error": "Произошла ошибка.",
+            "ratelimited": "Слишком много запросов, попробуйте позже.",
+        }
+        text = _fallback_map.get(status, "Произошла ошибка.")
 
     intent_value = payload.get("intent")
     if not isinstance(intent_value, str) or not intent_value:
@@ -277,6 +287,10 @@ def ensure_valid(
     debug = payload.get("debug")
     if not isinstance(debug, dict):
         debug = {}
+
+    # Strip citation markers from text when sources list is empty
+    if not sources and text:
+        text = _strip_citation_markers(text)
 
     return OrchestratorResult(
         text=text,
@@ -337,6 +351,14 @@ def ensure_safe_text_strict(
         actions=result.actions,
         debug=result.debug,
     )
+
+
+def _strip_citation_markers(text: str) -> str:
+    """Remove [1], [2], (1) style citation markers from text when no real sources."""
+    cleaned = re.sub(r"\[\s*\d+\s*\]", "", text)
+    cleaned = re.sub(r"\(\s*\d+\s*\)", "", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned
 
 
 def _strip_pseudo_sources(text: str) -> str:

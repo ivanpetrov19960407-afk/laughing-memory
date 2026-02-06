@@ -558,7 +558,8 @@ async def send_result(
     orchestrator = context.application.bot_data.get("orchestrator")
     if isinstance(orchestrator, Orchestrator) and user_id:
         facts_enabled = orchestrator.is_facts_only(user_id)
-    public_result = ensure_valid(ensure_safe_text_strict(public_result, facts_enabled, allow_sources_in_text=False))
+    has_real_sources = bool(public_result.sources)
+    public_result = ensure_valid(ensure_safe_text_strict(public_result, facts_enabled, allow_sources_in_text=has_real_sources))
     if not public_result.text.strip():
         # Replace empty text with fallback message while preserving all other fields
         public_result = replace(public_result, text="Нет ответа.")
@@ -653,7 +654,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await _guard_access(update, context):
         return
     result = refused(
-        "Неизвестная команда.",
+        "Неизвестная команда, открой /menu.",
         intent="command.unknown",
         mode="local",
         actions=[_menu_action()],
