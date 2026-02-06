@@ -1,0 +1,24 @@
+[Unit]
+Description=Telegram Bot OAuth Web Server (Google Calendar)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/telegram-bot
+EnvironmentFile=/opt/telegram-bot/.env
+ExecStart=/opt/telegram-bot/venv/bin/python3 oauth_server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/telegram-bot/data
+
+[Install]
+WantedBy=multi-user.target

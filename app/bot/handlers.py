@@ -132,7 +132,7 @@ def _build_google_oauth_url(context: ContextTypes.DEFAULT_TYPE, *, user_id: int)
     if not isinstance(base, str) or not base:
         return None
     base = base.rstrip("/")
-    return f"{base}/oauth/google/start?user_id={user_id}"
+    return f"{base}/oauth2/start?state={user_id}"
 
 
 async def _handle_google_calendar_settings(
@@ -1433,7 +1433,7 @@ async def _handle_menu_section(
             actions=[
                 Action(
                     id="settings.google_calendar",
-                    label="🔗 Подключить Google Calendar",
+                    label="\U0001f4c5 Google Calendar \u2192 \u041f\u043e\u0434\u043a\u043b\u044e\u0447\u0438\u0442\u044c",
                     payload={"op": "google_calendar_settings"},
                 ),
                 Action(

@@ -37,7 +37,7 @@ def load_google_oauth_config() -> GoogleOAuthConfig | None:
     client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
     client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
     public_base_url = os.getenv("PUBLIC_BASE_URL")
-    redirect_path = os.getenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
+    redirect_path = os.getenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth2/callback")
     if not client_id or not client_secret or not public_base_url:
         return None
     return GoogleOAuthConfig(
@@ -131,32 +131,37 @@ def handle_oauth_callback(
     token_store: GoogleTokenStore,
     state_store: OAuthStateStore,
     query_params: Mapping[str, str],
-) -> tuple[int, str]:
+) -> tuple[int, str, int | None]:
+    """Process the OAuth callback.
+
+    Returns ``(http_status, message, user_id | None)``.
+    ``user_id`` is set only on success so the caller can send a Telegram notification.
+    """
     if "error" in query_params:
         error_value = query_params.get("error", "")
         description = query_params.get("error_description", "")
-        message = f"Google вернул ошибку: {error_value}"
+        message = f"Google \u0432\u0435\u0440\u043d\u0443\u043b \u043e\u0448\u0438\u0431\u043a\u0443: {error_value}"
         if description:
             message = f"{message}. {description}"
-        return 400, message
+        return 400, message, None
     code = query_params.get("code")
     state = query_params.get("state")
     if not code or not state:
-        return 400, "Не хватает параметров OAuth (code/state)."
+        return 400, "\u041d\u0435 \u0445\u0432\u0430\u0442\u0430\u0435\u0442 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 OAuth (code/state).", None
     user_id = state_store.consume_state(state)
     if user_id is None:
-        return 400, "Неверный или просроченный state."
+        return 400, "\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u0438\u043b\u0438 \u043f\u0440\u043e\u0441\u0440\u043e\u0447\u0435\u043d\u043d\u044b\u0439 state.", None
     try:
         token_payload = exchange_code_for_tokens(config, code=code)
-    except httpx.HTTPError as exc:
-        LOGGER.exception("OAuth exchange failed: %s", exc)
-        return 500, "Не удалось обменять код на токены. Проверьте настройки OAuth."
+    except httpx.HTTPError:
+        LOGGER.exception("OAuth token exchange failed for user_id=%s", user_id)
+        return 500, "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0431\u043c\u0435\u043d\u044f\u0442\u044c \u043a\u043e\u0434 \u043d\u0430 \u0442\u043e\u043a\u0435\u043d\u044b. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 OAuth.", None
     access_token = token_payload.get("access_token")
     refresh_token = token_payload.get("refresh_token")
     expires_in = token_payload.get("expires_in")
     if not isinstance(access_token, str) or not isinstance(refresh_token, str):
-        LOGGER.error("OAuth exchange missing tokens: payload=%s", token_payload)
-        return 500, "Google не вернул refresh_token. Попробуйте подключить заново."
+        LOGGER.error("OAuth exchange missing tokens for user_id=%s", user_id)
+        return 500, "Google \u043d\u0435 \u0432\u0435\u0440\u043d\u0443\u043b refresh_token. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0437\u0430\u043d\u043e\u0432\u043e.", None
     expires_at = time.time() + float(expires_in) if isinstance(expires_in, (int, float)) else None
     token_store.set_tokens(
         user_id,
@@ -168,4 +173,4 @@ def handle_oauth_callback(
             scope=token_payload.get("scope") if isinstance(token_payload.get("scope"), str) else None,
         ),
     )
-    return 200, "✅ Календарь подключён. Можно вернуться в Telegram."
+    return 200, "\u2705 \u041a\u0430\u043b\u0435\u043d\u0434\u0430\u0440\u044c \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0451\u043d. \u041c\u043e\u0436\u043d\u043e \u0432\u0435\u0440\u043d\u0443\u0442\u044c\u0441\u044f \u0432 Telegram.", user_id

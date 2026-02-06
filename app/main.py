@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
-import urllib.parse
 import warnings
 from collections import defaultdict, deque
 
@@ -198,17 +198,17 @@ def main() -> None:
             public_base_url=settings.public_base_url,
             redirect_path=settings.google_oauth_redirect_path,
         )
-        parsed = urllib.parse.urlparse(settings.public_base_url)
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        oauth_port = int(os.getenv("OAUTH_SERVER_PORT", "8000"))
         try:
             start_google_oauth_server(
-                host="0.0.0.0",
-                port=port,
+                host="127.0.0.1",
+                port=oauth_port,
                 config=oauth_config,
                 token_store=google_token_store,
+                bot_token=settings.bot_token,
             )
         except OSError:
-            logging.getLogger(__name__).exception("Failed to start Google OAuth server on port %s", port)
+            logging.getLogger(__name__).exception("Failed to start Google OAuth server on port %s", oauth_port)
     if not application.job_queue:
         logging.getLogger(__name__).warning("JobQueue not configured; reminders will run without it.")
 

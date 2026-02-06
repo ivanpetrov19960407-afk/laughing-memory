@@ -12,7 +12,7 @@ from app.stores.google_tokens import GoogleTokenStore, GoogleTokens
 def test_calendar_tool_refuses_when_not_connected(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-    tokens_path = tmp_path / "google_tokens.json"
+    tokens_path = tmp_path / "google_tokens.db"
     monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
 
     result = asyncio.run(
@@ -33,14 +33,13 @@ def test_calendar_tool_refuses_when_not_connected(tmp_path, monkeypatch) -> None
 def test_calendar_tool_refreshes_token_when_expired(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-    tokens_path = tmp_path / "google_tokens.json"
+    tokens_path = tmp_path / "google_tokens.db"
     monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:8080")
-    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth2/callback")
     store = GoogleTokenStore(tokens_path)
-    store.load()
     store.set_tokens(
         1,
         GoogleTokens(
@@ -73,7 +72,6 @@ def test_calendar_tool_refreshes_token_when_expired(tmp_path, monkeypatch) -> No
     assert result.status == "ok"
     assert "Событие добавлено" in result.text
     assert captured["access_token"] == "new-token"
-    store.load()
     updated = store.get_tokens(1)
     assert updated is not None
     assert updated.access_token == "new-token"
@@ -82,14 +80,13 @@ def test_calendar_tool_refreshes_token_when_expired(tmp_path, monkeypatch) -> No
 def test_calendar_tool_calls_google_api(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-    tokens_path = tmp_path / "google_tokens.json"
+    tokens_path = tmp_path / "google_tokens.db"
     monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:8080")
-    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth2/callback")
     store = GoogleTokenStore(tokens_path)
-    store.load()
     store.set_tokens(
         1,
         GoogleTokens(

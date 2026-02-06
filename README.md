@@ -10,6 +10,7 @@ Telegram-бот на архитектуре **Orchestrator v2**.
 - Напоминания (список, snooze, перенос, отключение).
 - Режим фактов (`/facts_on`, `/facts_off`) и контекст диалога.
 - Веб-поиск `/search <запрос>` с ответом по источникам и списком источников внизу.
+- Google Calendar OAuth (публичный HTTPS через nginx → локальный web-сервис).
 
 ## Команды
 - `/start`
@@ -48,20 +49,45 @@ python bot.py
 Добавьте в `.env`:
 - `GOOGLE_OAUTH_CLIENT_ID`
 - `GOOGLE_OAUTH_CLIENT_SECRET`
-- `PUBLIC_BASE_URL` (публичный базовый URL, например `https://your-domain` или `http://host:8080`)
-- `GOOGLE_OAUTH_REDIRECT_PATH` (например `/oauth/google/callback`)
+- `PUBLIC_BASE_URL` (публичный базовый URL, например `https://vanekpetrov1997.fvds.ru`)
+- `GOOGLE_OAUTH_REDIRECT_PATH` (по умолчанию `/oauth2/callback`)
+- `GOOGLE_TOKENS_PATH` (по умолчанию `data/google_tokens.db`)
+- `OAUTH_SERVER_PORT` (по умолчанию `8000`)
+- `BOT_TOKEN` (нужен также для best-effort Telegram-уведомления при подключении)
 
 ## Подключение Google Calendar
-1. В Google Cloud Console создайте OAuth Client (тип “Web application”).
-2. В “Authorized redirect URIs” укажите:
-   - `${PUBLIC_BASE_URL}${GOOGLE_OAUTH_REDIRECT_PATH}`  
-     (например `https://your-domain/oauth/google/callback`).
+1. В Google Cloud Console создайте OAuth Client (тип "Web application").
+2. В "Authorized redirect URIs" укажите:
+   - `${PUBLIC_BASE_URL}/oauth2/callback`
+     (например `https://vanekpetrov1997.fvds.ru/oauth2/callback`).
 3. Заполните переменные окружения из секции выше.
-4. Убедитесь, что бот доступен по `PUBLIC_BASE_URL` (через прямой порт или reverse proxy).
-5. В Telegram откройте **Menu → Settings → 🔗 Подключить Google Calendar**, пройдите авторизацию.
+4. Запустите OAuth web-сервер (встроенный вместе с ботом или отдельный: `python oauth_server.py`).
+5. Настройте nginx (пример: `deploy/nginx-oauth.conf`) для проксирования `/oauth2/` и `/health` → `http://127.0.0.1:8000`.
+6. В Telegram откройте **Menu → Settings → 📅 Google Calendar → Подключить**, пройдите авторизацию.
 
-> Файл токенов хранится на диске (по умолчанию `data/google_tokens.json`).
+> Токены хранятся в SQLite (по умолчанию `data/google_tokens.db`).
 > При деплое задайте права `chmod 600` для защиты.
+
+## Деплой OAuth web-сервиса
+```bash
+# Установить systemd unit
+sudo cp deploy/telegram-bot-web.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable telegram-bot-web
+sudo systemctl start telegram-bot-web
+
+# Настроить nginx
+sudo cp deploy/nginx-oauth.conf /etc/nginx/sites-available/telegram-bot-oauth
+sudo ln -sf /etc/nginx/sites-available/telegram-bot-oauth /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### Эндпоинты OAuth web-сервиса
+| Метод | Путь | Описание |
+|-------|------|----------|
+| GET | `/health` | Проверка работоспособности → `200 ok` |
+| GET | `/oauth2/start?state=<user_id>` | Редирект на Google OAuth |
+| GET | `/oauth2/callback?code=...&state=...` | Обмен code→token, сохранение refresh token |
 
 ## Тесты
 ```bash
