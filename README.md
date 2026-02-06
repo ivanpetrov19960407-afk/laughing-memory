@@ -44,8 +44,15 @@ python bot.py
 ## Переменные окружения
 См. `.env.example` — в файле оставлены только актуальные переменные.
 
-### Google Calendar OAuth
+### CalDAV (основной способ подключения календаря)
 Добавьте в `.env`:
+- `CALDAV_URL` (URL календаря, например `https://nextcloud.example.com/remote.php/dav/calendars/user/default/`)
+- `CALDAV_USERNAME`
+- `CALDAV_PASSWORD` (app password)
+- `CALDAV_CALENDAR_NAME` (необязательно; если не задан, берётся первый доступный)
+
+### Google Calendar OAuth (опционально)
+Добавьте в `.env`, если хотите оставить экспериментальную интеграцию:
 - `GOOGLE_OAUTH_CLIENT_ID`
 - `GOOGLE_OAUTH_CLIENT_SECRET`
 - `PUBLIC_BASE_URL` (публичный базовый URL, например `https://your-domain` или `http://host:8080`)
@@ -53,14 +60,19 @@ python bot.py
 - `GOOGLE_TOKENS_DB_PATH` (по умолчанию `data/google_tokens.db`)
 - `GOOGLE_OAUTH_SERVER_PORT` (по умолчанию `8000`)
 
-## Подключение Google Calendar
+## Подключение CalDAV
+1. Создайте app password в вашем сервере (Nextcloud или совместимый).
+2. Заполните `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD`.
+3. В Telegram откройте **Menu → Settings → 📅 CalDAV → Подключить**, нажмите **Проверить подключение**.
+
+## Подключение Google Calendar (опционально)
 1. В Google Cloud Console создайте OAuth Client (тип “Web application”).
 2. В “Authorized redirect URIs” укажите:
    - `${PUBLIC_BASE_URL}${GOOGLE_OAUTH_REDIRECT_PATH}`  
      (например `https://your-domain/oauth2/callback`).
 3. Заполните переменные окружения из секции выше.
 4. Настройте reverse proxy на `/oauth2/` и `/health` → `http://127.0.0.1:8000`.
-5. В Telegram откройте **Menu → Settings → 📅 Google Calendar → Подключить**, пройдите авторизацию.
+5. В Telegram откройте **Menu → Settings → 📅 CalDAV → Подключить**, пройдите авторизацию (если включали Google OAuth).
 
 > Токены хранятся в SQLite (таблица `google_tokens`).  
 > При деплое задайте права на файл БД `chmod 600`.
