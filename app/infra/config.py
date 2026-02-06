@@ -118,8 +118,11 @@ def load_settings() -> Settings:
     google_oauth_client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID") or None
     google_oauth_client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or None
     public_base_url = os.getenv("PUBLIC_BASE_URL") or None
-    google_oauth_redirect_path = os.getenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
-    google_tokens_path = Path(os.getenv("GOOGLE_TOKENS_PATH", "data/google_tokens.json"))
+    google_oauth_redirect_path = os.getenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth2/callback")
+    google_tokens_path = Path(
+        os.getenv("GOOGLE_TOKENS_DB_PATH")
+        or os.getenv("GOOGLE_TOKENS_PATH", "data/google_tokens.db")
+    )
 
     return Settings(
         bot_token=token,

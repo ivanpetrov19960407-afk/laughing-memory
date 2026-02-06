@@ -38,7 +38,7 @@ def test_calendar_tool_refreshes_token_when_expired(tmp_path, monkeypatch) -> No
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:8080")
-    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth2/callback")
     store = GoogleTokenStore(tokens_path)
     store.load()
     store.set_tokens(
@@ -87,7 +87,7 @@ def test_calendar_tool_calls_google_api(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:8080")
-    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth2/callback")
     store = GoogleTokenStore(tokens_path)
     store.load()
     store.set_tokens(

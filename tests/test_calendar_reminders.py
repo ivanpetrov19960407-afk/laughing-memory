@@ -133,7 +133,7 @@ def test_calendar_command_add_does_not_create_reminder(calendar_path, monkeypatc
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:8080")
-    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth2/callback")
     token_store = GoogleTokenStore(tokens_path)
     token_store.load()
     token_store.set_tokens(

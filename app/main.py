@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-import urllib.parse
 import warnings
 from collections import defaultdict, deque
 
@@ -17,8 +16,6 @@ from app.core.dialog_memory import DialogMemory
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.config import load_settings
-from app.infra.google_oauth import GoogleOAuthConfig
-from app.infra.google_oauth_server import start_google_oauth_server
 from app.infra.llm import OpenAIClient, PerplexityClient
 from app.infra.rate_limit import RateLimiter as LLMRateLimiter
 from app.infra.rate_limiter import RateLimiter
@@ -32,6 +29,7 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("help", handlers.help_command))
     application.add_handler(CommandHandler("ping", handlers.ping))
+    application.add_handler(CommandHandler("gcal", handlers.gcal))
     application.add_handler(CommandHandler("tasks", handlers.tasks))
     application.add_handler(CommandHandler("task", handlers.task))
     application.add_handler(CommandHandler("last", handlers.last))
@@ -191,24 +189,7 @@ def main() -> None:
         reminder_scheduler=reminder_scheduler,
         settings=settings,
     )
-    if settings.google_oauth_client_id and settings.google_oauth_client_secret and settings.public_base_url:
-        oauth_config = GoogleOAuthConfig(
-            client_id=settings.google_oauth_client_id,
-            client_secret=settings.google_oauth_client_secret,
-            public_base_url=settings.public_base_url,
-            redirect_path=settings.google_oauth_redirect_path,
-        )
-        parsed = urllib.parse.urlparse(settings.public_base_url)
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        try:
-            start_google_oauth_server(
-                host="0.0.0.0",
-                port=port,
-                config=oauth_config,
-                token_store=google_token_store,
-            )
-        except OSError:
-            logging.getLogger(__name__).exception("Failed to start Google OAuth server on port %s", port)
+    # OAuth web server runs as a separate service (see `app/infra/google_oauth_web.py`).
     if not application.job_queue:
         logging.getLogger(__name__).warning("JobQueue not configured; reminders will run without it.")
 

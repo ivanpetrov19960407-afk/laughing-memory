@@ -37,7 +37,7 @@ def load_google_oauth_config() -> GoogleOAuthConfig | None:
     client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
     client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
     public_base_url = os.getenv("PUBLIC_BASE_URL")
-    redirect_path = os.getenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
+    redirect_path = os.getenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth2/callback")
     if not client_id or not client_secret or not public_base_url:
         return None
     return GoogleOAuthConfig(
@@ -129,7 +129,6 @@ def handle_oauth_callback(
     *,
     config: GoogleOAuthConfig,
     token_store: GoogleTokenStore,
-    state_store: OAuthStateStore,
     query_params: Mapping[str, str],
 ) -> tuple[int, str]:
     if "error" in query_params:
@@ -143,9 +142,9 @@ def handle_oauth_callback(
     state = query_params.get("state")
     if not code or not state:
         return 400, "Не хватает параметров OAuth (code/state)."
-    user_id = state_store.consume_state(state)
-    if user_id is None:
-        return 400, "Неверный или просроченный state."
+    if not state.isdigit():
+        return 400, "Некорректный state (ожидается user_id)."
+    user_id = int(state)
     try:
         token_payload = exchange_code_for_tokens(config, code=code)
     except httpx.HTTPError as exc:
@@ -155,14 +154,13 @@ def handle_oauth_callback(
     refresh_token = token_payload.get("refresh_token")
     expires_in = token_payload.get("expires_in")
     if not isinstance(access_token, str) or not isinstance(refresh_token, str):
-        LOGGER.error("OAuth exchange missing tokens: payload=%s", token_payload)
         return 500, "Google не вернул refresh_token. Попробуйте подключить заново."
     expires_at = time.time() + float(expires_in) if isinstance(expires_in, (int, float)) else None
     token_store.set_tokens(
         user_id,
         GoogleTokens(
-            access_token=access_token,
             refresh_token=refresh_token,
+            access_token=access_token,
             expires_at=expires_at,
             token_type=token_payload.get("token_type") if isinstance(token_payload.get("token_type"), str) else None,
             scope=token_payload.get("scope") if isinstance(token_payload.get("scope"), str) else None,
