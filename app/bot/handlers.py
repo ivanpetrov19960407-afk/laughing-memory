@@ -573,7 +573,7 @@ async def send_result(
         context.chat_data[sent_key] = True
     _log_orchestrator_result(user_id, public_result, request_id=request_id)
     guarded_text = public_result.text
-    if _strict_no_pseudo_sources(context):
+    if _strict_no_pseudo_sources(context) and not public_result.sources:
         guarded_text = _apply_strict_pseudo_source_guard(public_result.text)
     final_text = _render_text_with_sources(guarded_text, public_result.sources)
     output_preview = final_text.replace("\n", " ").strip()
