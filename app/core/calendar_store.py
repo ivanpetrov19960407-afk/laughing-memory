@@ -577,6 +577,9 @@ async def disable_reminder(reminder_id: str) -> bool:
         updated = False
         for item in reminders:
             if isinstance(item, dict) and item.get("reminder_id") == reminder_id:
+                status = _normalize_status(item)
+                if not item.get("enabled", True) or status == "disabled":
+                    return False
                 item["enabled"] = False
                 item["status"] = "disabled"
                 updated = True
