@@ -1,14 +1,32 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from app.core import calendar_store, tools_calendar_caldav
+from app.core.calendar_backend import (
+    CalDAVCalendarBackend,
+    CalendarBackend,
+    CalendarCreateResult,
+    LocalCalendarBackend,
+    get_backend,
+)
 from app.core.result import Action, OrchestratorResult, ensure_valid, ok, refused
 
 LOGGER = logging.getLogger(__name__)
 
 _NOT_CONNECTED_TEXT = "Календарь не подключён: задайте CALDAV_URL/USERNAME/PASSWORD."
+
+# Regex to redact passwords from error messages (safety net)
+_PASSWORD_RE = re.compile(r"(password|passwd|pwd|secret|token)=\S+", re.IGNORECASE)
+
+
+def _safe_error_class(exc: Exception) -> str:
+    """Return class name of exception — never include password/secret."""
+    text = exc.__class__.__name__
+    # Extra caution: strip any query params that might contain secrets
+    return _PASSWORD_RE.sub(r"\1=***", text)
 
 
 async def create_event(
@@ -18,7 +36,7 @@ async def create_event(
     chat_id: int,
     user_id: int,
     request_id: str | None = None,
-    intent: str = "utility_calendar.add",
+    intent: str = "calendar.add",
 ) -> OrchestratorResult:
     request_label = request_id or "-"
     LOGGER.info(
@@ -28,55 +46,128 @@ async def create_event(
         start_at.isoformat(),
         title,
     )
-    config = tools_calendar_caldav.load_caldav_config()
-    if config is None:
-        LOGGER.info(
-            "calendar.create refused: request_id=%s user_id=%s reason=calendar_not_connected",
+
+    backend = get_backend()
+    end_at = start_at + timedelta(hours=1)
+
+    # --- Attempt primary backend ---
+    result: CalendarCreateResult | None = None
+    used_fallback = False
+    caldav_error: str | None = None
+
+    try:
+        result = await backend.create_event(
+            title,
+            start_at,
+            end_at,
+            description=None,
+        )
+    except Exception as exc:
+        caldav_error = _safe_error_class(exc)
+        LOGGER.error(
+            "calendar.create caldav error: request_id=%s user_id=%s error=%s",
+            request_label,
+            user_id,
+            caldav_error,
+        )
+
+    # --- Fallback: if CalDAV backend failed, try local ---
+    if result is None or not result.success:
+        if isinstance(backend, CalDAVCalendarBackend):
+            LOGGER.info(
+                "calendar.create fallback to local: request_id=%s user_id=%s",
+                request_label,
+                user_id,
+            )
+            used_fallback = True
+            try:
+                local_backend = LocalCalendarBackend()
+                result = await local_backend.create_event(
+                    title,
+                    start_at,
+                    end_at,
+                    description=None,
+                )
+            except Exception as exc2:
+                LOGGER.error(
+                    "calendar.create local fallback error: request_id=%s user_id=%s error=%s",
+                    request_label,
+                    user_id,
+                    exc2.__class__.__name__,
+                )
+                return ensure_valid(
+                    refused(
+                        "Не удалось создать событие.",
+                        intent=intent,
+                        mode="tool",
+                        debug={"reason": "error"},
+                    )
+                )
+
+    if result is None or not result.success:
+        error_reason = result.error if result else "unknown"
+        LOGGER.error(
+            "calendar.create failed: request_id=%s user_id=%s reason=%s",
+            request_label,
+            user_id,
+            error_reason,
+        )
+        return ensure_valid(
+            refused(
+                "Не удалось создать событие.",
+                intent=intent,
+                mode="tool",
+                debug={"reason": error_reason or "error"},
+            )
+        )
+
+    # --- Always persist locally (for reminders, local list, etc.) ---
+    event_id = result.event_id or result.uid
+    if event_id:
+        try:
+            await calendar_store.add_item(
+                dt=start_at,
+                title=title,
+                chat_id=chat_id,
+                remind_at=None,
+                user_id=user_id,
+                reminders_enabled=False,
+                event_id=event_id,
+            )
+        except Exception:
+            pass  # local persistence is best-effort
+
+    if not isinstance(event_id, str) or not event_id:
+        LOGGER.error(
+            "calendar.create error: request_id=%s user_id=%s reason=missing_event_id",
             request_label,
             user_id,
         )
         return ensure_valid(
             refused(
-                _NOT_CONNECTED_TEXT,
+                "Не удалось создать событие.",
                 intent=intent,
                 mode="tool",
-                debug={"reason": "calendar_not_connected"},
+                debug={"reason": "missing_event_id"},
             )
         )
-    try:
-        created_remote = await tools_calendar_caldav.create_event(
-            config,
-            start_at=start_at,
-            title=title,
-            description=None,
-        )
-        event_id = created_remote.uid
-        created = await calendar_store.add_item(
-            dt=start_at,
-            title=title,
-            chat_id=chat_id,
-            remind_at=None,
-            user_id=user_id,
-            reminders_enabled=False,
-            event_id=event_id,
-        )
-    except Exception as exc:
-        LOGGER.error(
-            "calendar.create error: request_id=%s user_id=%s error=%s",
-            request_label,
-            user_id,
-            exc.__class__.__name__,
-        )
-        return ensure_valid(refused("Не удалось создать событие.", intent=intent, mode="tool", debug={"reason": "error"}))
-    event = created.get("event") if isinstance(created, dict) else None
-    event_id = event.get("event_id") if isinstance(event, dict) else None
-    if not isinstance(event_id, str):
-        LOGGER.error("calendar.create error: request_id=%s user_id=%s reason=missing_event_id", request_label, user_id)
-        return ensure_valid(refused("Не удалось создать событие.", intent=intent, mode="tool", debug={"reason": "missing_event_id"}))
-    LOGGER.info("calendar.create ok: event_id=%s", event_id)
+
+    LOGGER.info("calendar.create ok: event_id=%s backend=%s", event_id, result.backend)
     dt_label = start_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-    text = f"Событие добавлено: {event_id} | {dt_label} | {title}"
-    return ensure_valid(ok(text, intent=intent, mode="tool", debug={"event_id": event_id}))
+    text = f"Событие создано: {title} ({dt_label})"
+
+    # Build debug
+    debug: dict[str, object] = {"event_id": event_id}
+    if used_fallback:
+        debug["calendar_backend"] = "local_fallback"
+        if caldav_error:
+            debug["caldav_error"] = caldav_error
+    elif result.debug:
+        debug.update(result.debug)
+    else:
+        debug["calendar_backend"] = result.backend
+
+    return ensure_valid(ok(text, intent=intent, mode="tool", debug=debug))
 
 
 async def delete_event(

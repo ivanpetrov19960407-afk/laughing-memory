@@ -8,12 +8,14 @@ from app.core import tools_calendar_caldav
 from app.core.tools_calendar import create_event, list_calendar_items
 
 
-def test_calendar_tool_refuses_when_not_connected(tmp_path, monkeypatch) -> None:
+def test_calendar_tool_uses_local_when_not_connected(tmp_path, monkeypatch) -> None:
+    """When CalDAV is not configured, local backend is used (default)."""
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
     monkeypatch.delenv("CALDAV_URL", raising=False)
     monkeypatch.delenv("CALDAV_USERNAME", raising=False)
     monkeypatch.delenv("CALDAV_PASSWORD", raising=False)
+    monkeypatch.delenv("CALENDAR_BACKEND", raising=False)
 
     result = asyncio.run(
         create_event(
@@ -26,13 +28,14 @@ def test_calendar_tool_refuses_when_not_connected(tmp_path, monkeypatch) -> None
         )
     )
 
-    assert result.status == "refused"
-    assert "CALDAV_URL/USERNAME/PASSWORD" in result.text
+    assert result.status == "ok"
+    assert "Событие создано" in result.text
 
 
 def test_calendar_tool_creates_event_with_caldav(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    monkeypatch.setenv("CALENDAR_BACKEND", "caldav")
     monkeypatch.setenv("CALDAV_URL", "https://caldav.example.com")
     monkeypatch.setenv("CALDAV_USERNAME", "user")
     monkeypatch.setenv("CALDAV_PASSWORD", "pass")
@@ -54,7 +57,7 @@ def test_calendar_tool_creates_event_with_caldav(tmp_path, monkeypatch) -> None:
     )
 
     assert result.status == "ok"
-    assert "Событие добавлено" in result.text
+    assert "Событие создано" in result.text
     store = calendar_store.load_store()
     events = store.get("events") or []
     assert any(event.get("event_id") == "evt-1" for event in events)
