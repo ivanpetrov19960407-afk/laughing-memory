@@ -17,7 +17,7 @@ from telegram.ext import ContextTypes
 
 from app.bot import menu, routing, wizard
 from app.bot.actions import ActionStore, StoredAction, build_inline_keyboard, parse_callback_token
-from app.core import calendar_store, tools_calendar_caldav
+from app.core import calendar_store
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMemory, DialogMessage
 from app.core.orchestrator import Orchestrator
@@ -137,8 +137,7 @@ async def _handle_caldav_settings(
             mode="local",
             actions=[_menu_action()],
         )
-    config = tools_calendar_caldav.load_caldav_config()
-    status = "CalDAV подключён." if config is not None else "CalDAV не подключён."
+    status = "CalDAV подключён."
     return ok(
         status,
         intent="settings.caldav.status",
@@ -155,15 +154,17 @@ async def _handle_caldav_settings(
 
 
 async def _handle_caldav_check(context: ContextTypes.DEFAULT_TYPE) -> OrchestratorResult:
-    config = tools_calendar_caldav.load_caldav_config()
-    if config is None:
+    if not _caldav_configured(context):
         return refused(
             "CalDAV не подключён. Укажите CALDAV_URL/USERNAME/PASSWORD.",
             intent="settings.caldav.check",
             mode="local",
             actions=[_menu_action()],
         )
-    ok_status, calendar_name = await tools_calendar_caldav.check_connection(config)
+    # CalDAV connectivity check is implemented as a tool call.
+    from app.core.tools_calendar import caldav_check_connection
+
+    ok_status, calendar_name = await caldav_check_connection()
     if ok_status:
         name_suffix = f" ({calendar_name})" if calendar_name else ""
         return ok(

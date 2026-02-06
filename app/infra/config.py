@@ -49,6 +49,7 @@ class Settings:
     wizard_store_path: Path
     wizard_timeout_seconds: int
     feature_web_search: bool
+    calendar_backend: str
     caldav_url: str | None
     caldav_username: str | None
     caldav_password: str | None
@@ -120,6 +121,9 @@ def load_settings() -> Settings:
     feature_web_search = _parse_optional_bool(os.getenv("FEATURE_WEB_SEARCH"))
     if feature_web_search is None:
         feature_web_search = True
+    calendar_backend = (os.getenv("CALENDAR_BACKEND") or "local").strip().lower()
+    if calendar_backend not in {"local", "caldav"}:
+        calendar_backend = "local"
     caldav_url = os.getenv("CALDAV_URL") or None
     caldav_username = os.getenv("CALDAV_USERNAME") or None
     caldav_password = os.getenv("CALDAV_PASSWORD") or None
@@ -168,6 +172,7 @@ def load_settings() -> Settings:
         wizard_store_path=wizard_store_path,
         wizard_timeout_seconds=wizard_timeout_seconds,
         feature_web_search=feature_web_search,
+        calendar_backend=calendar_backend,
         caldav_url=caldav_url,
         caldav_username=caldav_username,
         caldav_password=caldav_password,
