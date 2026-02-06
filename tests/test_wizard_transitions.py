@@ -7,33 +7,20 @@ from datetime import datetime, timedelta, timezone
 from app.bot.wizard import WizardManager, WIZARD_CALENDAR_ADD
 from app.storage.wizard_store import WizardStore, WizardState
 from app.core import calendar_store
-from app.stores.google_tokens import GoogleTokenStore, GoogleTokens
+from app.core import tools_calendar_caldav
 
 
 def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-    tokens_path = tmp_path / "google_tokens.db"
-    monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
-    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
-    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
-    monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:8080")
-    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth2/callback")
-    store = GoogleTokenStore(tokens_path)
-    store.load()
-    store.set_tokens(
-        1,
-        GoogleTokens(
-            access_token="token",
-            refresh_token="refresh",
-            expires_at=time.time() + 3600,
-        ),
-    )
+    monkeypatch.setenv("CALDAV_URL", "https://caldav.example.com")
+    monkeypatch.setenv("CALDAV_USERNAME", "user")
+    monkeypatch.setenv("CALDAV_PASSWORD", "pass")
 
-    async def fake_create_event(*, access_token: str, start_at: datetime, title: str) -> dict[str, object]:
-        return {"id": "evt-1"}
+    async def fake_create_event(*args, **kwargs) -> tools_calendar_caldav.CreatedEvent:
+        return tools_calendar_caldav.CreatedEvent(uid="evt-1", href="https://caldav.example.com/e/1")
 
-    monkeypatch.setattr("app.core.tools_calendar._create_google_event", fake_create_event)
+    monkeypatch.setattr("app.core.tools_calendar_caldav.create_event", fake_create_event)
     store = WizardStore(tmp_path / "wizards", timeout_seconds=600)
     manager = WizardManager(store)
 
@@ -106,7 +93,7 @@ def test_wizard_calendar_refuses_without_connection(tmp_path, monkeypatch) -> No
         )
     )
     assert confirm.status == "refused"
-    assert "Календарь не подключён" in confirm.text
+    assert "CALDAV_URL/USERNAME/PASSWORD" in confirm.text
     assert "Событие добавлено" not in confirm.text
 
 

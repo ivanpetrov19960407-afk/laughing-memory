@@ -49,6 +49,10 @@ class Settings:
     wizard_store_path: Path
     wizard_timeout_seconds: int
     feature_web_search: bool
+    caldav_url: str | None
+    caldav_username: str | None
+    caldav_password: str | None
+    caldav_calendar_name: str | None
     google_oauth_client_id: str | None
     google_oauth_client_secret: str | None
     public_base_url: str | None
@@ -116,6 +120,10 @@ def load_settings() -> Settings:
     feature_web_search = _parse_optional_bool(os.getenv("FEATURE_WEB_SEARCH"))
     if feature_web_search is None:
         feature_web_search = True
+    caldav_url = os.getenv("CALDAV_URL") or None
+    caldav_username = os.getenv("CALDAV_USERNAME") or None
+    caldav_password = os.getenv("CALDAV_PASSWORD") or None
+    caldav_calendar_name = os.getenv("CALDAV_CALENDAR_NAME") or None
     google_oauth_client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID") or None
     google_oauth_client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or None
     public_base_url = os.getenv("PUBLIC_BASE_URL") or None
@@ -160,6 +168,10 @@ def load_settings() -> Settings:
         wizard_store_path=wizard_store_path,
         wizard_timeout_seconds=wizard_timeout_seconds,
         feature_web_search=feature_web_search,
+        caldav_url=caldav_url,
+        caldav_username=caldav_username,
+        caldav_password=caldav_password,
+        caldav_calendar_name=caldav_calendar_name,
         google_oauth_client_id=google_oauth_client_id,
         google_oauth_client_secret=google_oauth_client_secret,
         public_base_url=public_base_url,

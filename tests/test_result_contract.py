@@ -18,10 +18,10 @@ from app.core.result import (
     ok,
     ratelimited,
 )
+from app.core import tools_calendar_caldav
 from app.core.tools_calendar import list_calendar_items, list_reminders
 from app.infra.rate_limiter import RateLimiter
 from app.infra.storage import TaskStorage
-from app.stores.google_tokens import GoogleTokenStore, GoogleTokens
 
 
 class FakeLLMClient:
@@ -70,18 +70,13 @@ def test_ratelimited_result_is_valid() -> None:
 def test_tool_calendar_returns_result(tmp_path, monkeypatch) -> None:
     path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(path))
-    tokens_path = tmp_path / "google_tokens.db"
-    monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
-    token_store = GoogleTokenStore(tokens_path)
-    token_store.load()
-    token_store.set_tokens(
-        1,
-        GoogleTokens(
-            access_token="token",
-            refresh_token="refresh",
-            expires_at=None,
-        ),
-    )
+    monkeypatch.setenv("CALDAV_URL", "https://caldav.example.com")
+    monkeypatch.setenv("CALDAV_USERNAME", "user")
+    monkeypatch.setenv("CALDAV_PASSWORD", "pass")
+    async def fake_list_events(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr("app.core.tools_calendar_caldav.list_events", fake_list_events)
     calendar_store.save_store_atomic({"events": [], "reminders": [], "updated_at": datetime.now().isoformat()})
     result = asyncio.run(list_calendar_items(None, None, user_id=1))
     assert isinstance(result, OrchestratorResult)

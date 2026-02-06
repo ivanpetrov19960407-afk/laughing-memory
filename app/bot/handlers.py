@@ -17,7 +17,7 @@ from telegram.ext import ContextTypes
 
 from app.bot import menu, routing, wizard
 from app.bot.actions import ActionStore, StoredAction, build_inline_keyboard, parse_callback_token
-from app.core import calendar_store
+from app.core import calendar_store, tools_calendar_caldav
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMemory, DialogMessage
 from app.core.orchestrator import Orchestrator
@@ -39,7 +39,6 @@ from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limiter import RateLimiter
 from app.infra.request_context import get_request_context, log_request, set_input_text, set_status, start_request
 from app.infra.storage import TaskStorage
-from app.stores.google_tokens import GoogleTokenStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -102,15 +101,6 @@ def _get_action_store(context: ContextTypes.DEFAULT_TYPE) -> ActionStore:
     return store
 
 
-def _get_google_token_store(context: ContextTypes.DEFAULT_TYPE) -> GoogleTokenStore:
-    store = context.application.bot_data.get("google_token_store")
-    if isinstance(store, GoogleTokenStore):
-        return store
-    store = GoogleTokenStore.from_env()
-    context.application.bot_data["google_token_store"] = store
-    return store
-
-
 def _wizards_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
     settings = _get_settings(context)
     return bool(getattr(settings, "enable_wizards", False))
@@ -126,66 +116,65 @@ def _strict_no_pseudo_sources(context: ContextTypes.DEFAULT_TYPE) -> bool:
     return bool(getattr(settings, "strict_no_pseudo_sources", False))
 
 
-def _build_google_oauth_url(context: ContextTypes.DEFAULT_TYPE, *, user_id: int) -> str | None:
+def _caldav_configured(context: ContextTypes.DEFAULT_TYPE) -> bool:
     settings = _get_settings(context)
-    base = getattr(settings, "public_base_url", None)
-    if not isinstance(base, str) or not base:
-        return None
-    base = base.rstrip("/")
-    return f"{base}/oauth2/start?state={user_id}"
+    return bool(
+        getattr(settings, "caldav_url", None)
+        and getattr(settings, "caldav_username", None)
+        and getattr(settings, "caldav_password", None)
+    )
 
 
-async def _handle_google_calendar_settings(
+async def _handle_caldav_settings(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     user_id: int,
 ) -> OrchestratorResult:
-    token_store = _get_google_token_store(context)
-    tokens = token_store.get_tokens(user_id)
-    if tokens is not None:
-        return ok(
-            "✅ Календарь подключён.",
-            intent="settings.google_calendar.status",
+    if not _caldav_configured(context):
+        return refused(
+            "CalDAV не подключён. Укажите CALDAV_URL/USERNAME/PASSWORD в окружении.",
+            intent="settings.caldav.status",
             mode="local",
-            actions=[
-                Action(
-                    id="settings.google_calendar.disconnect",
-                    label="Отключить",
-                    payload={"op": "google_calendar_disconnect"},
-                ),
-                _menu_action(),
-            ],
+            actions=[_menu_action()],
         )
-    url = _build_google_oauth_url(context, user_id=user_id)
-    if not url:
-        return error(
-            "OAuth для Google Calendar не настроен. Проверь переменные окружения.",
-            intent="settings.google_calendar",
-            mode="local",
-        )
-    text = (
-        "Чтобы подключить Google Calendar, открой ссылку авторизации:\n"
-        f"{url}\n\n"
-        "После подтверждения вернись в Telegram."
-    )
+    config = tools_calendar_caldav.load_caldav_config()
+    status = "CalDAV подключён." if config is not None else "CalDAV не подключён."
     return ok(
-        text,
-        intent="settings.google_calendar.connect",
+        status,
+        intent="settings.caldav.status",
         mode="local",
-        actions=[_menu_action()],
+        actions=[
+            Action(
+                id="settings.caldav.check",
+                label="Проверить подключение",
+                payload={"op": "caldav_check"},
+            ),
+            _menu_action(),
+        ],
     )
 
 
-async def _handle_google_calendar_disconnect(
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    user_id: int,
-) -> OrchestratorResult:
-    token_store = _get_google_token_store(context)
-    token_store.delete_tokens(user_id)
-    return ok(
-        "Google Calendar отключён.",
-        intent="settings.google_calendar.disconnect",
+async def _handle_caldav_check(context: ContextTypes.DEFAULT_TYPE) -> OrchestratorResult:
+    config = tools_calendar_caldav.load_caldav_config()
+    if config is None:
+        return refused(
+            "CalDAV не подключён. Укажите CALDAV_URL/USERNAME/PASSWORD.",
+            intent="settings.caldav.check",
+            mode="local",
+            actions=[_menu_action()],
+        )
+    ok_status, calendar_name = await tools_calendar_caldav.check_connection(config)
+    if ok_status:
+        name_suffix = f" ({calendar_name})" if calendar_name else ""
+        return ok(
+            f"✅ CalDAV подключён{name_suffix}.",
+            intent="settings.caldav.check",
+            mode="local",
+            actions=[_menu_action()],
+        )
+    return refused(
+        "❌ Не удалось подключиться к CalDAV. Проверьте URL/логин/пароль.",
+        intent="settings.caldav.check",
         mode="local",
         actions=[_menu_action()],
     )
@@ -258,11 +247,11 @@ def _with_error_handling(
 
 
 @_with_error_handling
-async def google_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def caldav_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context, bucket="ui"):
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    result = await _handle_google_calendar_settings(context, user_id=user_id)
+    result = await _handle_caldav_settings(context, user_id=user_id)
     await send_result(update, context, result)
 
 
@@ -1435,15 +1424,16 @@ async def _handle_menu_section(
             ],
         )
     if section == "settings":
+        caldav_status = "подключён" if _caldav_configured(context) else "не подключён"
         return ok(
-            "Настройки режимов и поведения.",
+            f"Настройки режимов и поведения.\nCalDAV: {caldav_status}.",
             intent="menu.settings",
             mode="local",
             actions=[
                 Action(
-                    id="settings.google_calendar",
-                    label="📅 Google Calendar → Подключить",
-                    payload={"op": "google_calendar_settings"},
+                    id="settings.caldav",
+                    label="📅 CalDAV → Подключить",
+                    payload={"op": "caldav_settings"},
                 ),
                 Action(
                     id="settings.facts",
@@ -1844,10 +1834,10 @@ async def _dispatch_action_payload(
             )
         minutes_value = minutes if isinstance(minutes, int) else 10
         return await _handle_reminder_add_offset(context, event_id=event_id, minutes=minutes_value)
-    if op_value == "google_calendar_settings":
-        return await _handle_google_calendar_settings(context, user_id=user_id)
-    if op_value == "google_calendar_disconnect":
-        return await _handle_google_calendar_disconnect(context, user_id=user_id)
+    if op_value == "caldav_settings":
+        return await _handle_caldav_settings(context, user_id=user_id)
+    if op_value == "caldav_check":
+        return await _handle_caldav_check(context)
     if intent == "task.execute":
         task_name = payload.get("name")
         task_payload = payload.get("payload")
