@@ -1,3 +1,4 @@
+"""DEPRECATED: Legacy wizard manager. Use app.bot.wizard.WizardManager instead."""
 from __future__ import annotations
 
 from dataclasses import dataclass
