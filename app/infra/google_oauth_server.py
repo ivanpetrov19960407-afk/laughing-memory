@@ -33,10 +33,13 @@ class GoogleOAuthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path == "/oauth/google/start":
+        if parsed.path == "/health":
+            self._handle_health()
+            return
+        if parsed.path == "/oauth2/start":
             self._handle_start(parsed.query)
             return
-        if parsed.path == "/oauth/google/callback":
+        if parsed.path == "/oauth2/callback":
             self._handle_callback(parsed.query)
             return
         self.send_response(HTTPStatus.NOT_FOUND)
@@ -46,13 +49,16 @@ class GoogleOAuthHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:  # noqa: A003
         LOGGER.info("OAuthServer: " + format, *args)
 
+    def _handle_health(self) -> None:
+        self._send_text(HTTPStatus.OK, "ok")
+
     def _handle_start(self, query: str) -> None:
         params = parse_qs(query)
-        user_id_raw = params.get("user_id", [None])[0]
-        if not user_id_raw or not user_id_raw.isdigit():
-            self._send_text(HTTPStatus.BAD_REQUEST, "user_id обязателен.")
+        state_raw = params.get("state", [None])[0]
+        if not state_raw or not state_raw.isdigit():
+            self._send_text(HTTPStatus.BAD_REQUEST, "state parameter is required and must be a user_id.")
             return
-        user_id = int(user_id_raw)
+        user_id = int(state_raw)
         state = self.server.state_store.issue_state(user_id)
         redirect_url = build_authorization_url(self.server.config, state=state)
         self.send_response(HTTPStatus.FOUND)

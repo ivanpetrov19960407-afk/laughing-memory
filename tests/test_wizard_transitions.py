@@ -13,12 +13,12 @@ from app.stores.google_tokens import GoogleTokenStore, GoogleTokens
 def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-    tokens_path = tmp_path / "google_tokens.json"
-    monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
+    tokens_path = tmp_path / "google_tokens.db"
+    monkeypatch.setenv("GOOGLE_TOKENS_DB_PATH", str(tokens_path))
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:8080")
-    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth2/callback")
     store = GoogleTokenStore(tokens_path)
     store.load()
     store.set_tokens(
@@ -82,8 +82,8 @@ def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
 def test_wizard_calendar_refuses_without_connection(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-    tokens_path = tmp_path / "google_tokens.json"
-    monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
+    tokens_path = tmp_path / "google_tokens.db"
+    monkeypatch.setenv("GOOGLE_TOKENS_DB_PATH", str(tokens_path))
     store = WizardStore(tmp_path / "wizards", timeout_seconds=600)
     manager = WizardManager(store)
 

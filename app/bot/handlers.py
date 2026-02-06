@@ -132,7 +132,7 @@ def _build_google_oauth_url(context: ContextTypes.DEFAULT_TYPE, *, user_id: int)
     if not isinstance(base, str) or not base:
         return None
     base = base.rstrip("/")
-    return f"{base}/oauth/google/start?user_id={user_id}"
+    return f"{base}/oauth2/start?state={user_id}"
 
 
 async def _handle_google_calendar_settings(

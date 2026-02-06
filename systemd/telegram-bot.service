@@ -1,0 +1,24 @@
+[Unit]
+Description=Telegram Bot with Google Calendar OAuth
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/laughing-memory
+EnvironmentFile=/home/ubuntu/laughing-memory/.env
+ExecStart=/usr/bin/python3 /home/ubuntu/laughing-memory/bot.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/laughing-memory/data
+
+[Install]
+WantedBy=multi-user.target

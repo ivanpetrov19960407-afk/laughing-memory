@@ -2,19 +2,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.infra.google_oauth import GoogleOAuthConfig, OAuthStateStore, handle_oauth_callback
+from app.infra.google_oauth import GoogleOAuthConfig, OAuthStateStore, build_authorization_url, handle_oauth_callback
 from app.stores.google_tokens import GoogleTokenStore
 
 
 def test_oauth_callback_saves_tokens(tmp_path, monkeypatch) -> None:
-    tokens_path = tmp_path / "google_tokens.json"
+    tokens_path = tmp_path / "google_tokens.db"
     store = GoogleTokenStore(Path(tokens_path))
     store.load()
     config = GoogleOAuthConfig(
         client_id="client-id",
         client_secret="client-secret",
-        public_base_url="http://localhost:8080",
-        redirect_path="/oauth/google/callback",
+        public_base_url="https://vanekpetrov1997.fvds.ru",
+        redirect_path="/oauth2/callback",
     )
     state_store = OAuthStateStore()
     state = state_store.issue_state(42)
@@ -35,3 +35,56 @@ def test_oauth_callback_saves_tokens(tmp_path, monkeypatch) -> None:
     tokens = store.get_tokens(42)
     assert tokens is not None
     assert tokens.refresh_token == "ref"
+
+
+def test_build_authorization_url() -> None:
+    config = GoogleOAuthConfig(
+        client_id="test-client-id",
+        client_secret="test-secret",
+        public_base_url="https://vanekpetrov1997.fvds.ru",
+        redirect_path="/oauth2/callback",
+    )
+    state = "test-state-123"
+    url = build_authorization_url(config, state=state)
+    
+    assert "https://accounts.google.com/o/oauth2/v2/auth" in url
+    assert "client_id=test-client-id" in url
+    assert f"state={state}" in url
+    assert "redirect_uri=https%3A%2F%2Fvanekpetrov1997.fvds.ru%2Foauth2%2Fcallback" in url
+    assert "scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar" in url
+
+
+def test_token_store_sqlite(tmp_path) -> None:
+    """Test SQLite token storage operations."""
+    tokens_path = tmp_path / "test_tokens.db"
+    store = GoogleTokenStore(Path(tokens_path))
+    
+    from app.stores.google_tokens import GoogleTokens
+    
+    # Test set and get
+    tokens = GoogleTokens(
+        access_token="access123",
+        refresh_token="refresh456",
+        expires_at=1234567890.0,
+        token_type="Bearer",
+        scope="calendar",
+    )
+    store.set_tokens(100, tokens)
+    
+    retrieved = store.get_tokens(100)
+    assert retrieved is not None
+    assert retrieved.access_token == "access123"
+    assert retrieved.refresh_token == "refresh456"
+    assert retrieved.expires_at == 1234567890.0
+    
+    # Test update
+    store.update_access_token(100, access_token="new_access", expires_at=9876543210.0)
+    updated = store.get_tokens(100)
+    assert updated is not None
+    assert updated.access_token == "new_access"
+    assert updated.refresh_token == "refresh456"  # Should remain unchanged
+    
+    # Test delete
+    store.delete_tokens(100)
+    deleted = store.get_tokens(100)
+    assert deleted is None
