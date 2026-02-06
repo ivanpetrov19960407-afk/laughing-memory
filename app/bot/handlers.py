@@ -468,12 +468,17 @@ def _render_text_with_sources(text: str, sources: list[Any]) -> str:
     for source in sources:
         if isinstance(source, dict):
             url = str(source.get("url") or "").strip()
+            title = str(source.get("title") or "").strip()
         else:
             url = str(getattr(source, "url", "") or "").strip()
+            title = str(getattr(source, "title", "") or "").strip()
         if not url:
             continue
         index = len(lines) + 1
-        lines.append(f"{index}) {url}")
+        if title and title != url:
+            lines.append(f"{index}) {title} — {url}")
+        else:
+            lines.append(f"{index}) {url}")
     if not lines:
         return base
     return f"{base}\n\nИсточники:\n" + "\n".join(lines)
