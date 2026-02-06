@@ -142,7 +142,7 @@ def test_callback_logs_single_orchestrator_result(monkeypatch, caplog) -> None:
     async def fake_answer():
         return None
 
-    async def fake_dispatch_action(update, context, stored):
+    async def fake_dispatch_action(update, context, op, payload, intent):
         return ok("Health: OK", intent="menu.status", mode="local")
 
     update = DummyUpdate()
@@ -154,12 +154,51 @@ def test_callback_logs_single_orchestrator_result(monkeypatch, caplog) -> None:
 
     caplog.set_level("INFO")
     monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
-    monkeypatch.setattr(handlers, "_dispatch_action", fake_dispatch_action)
+    monkeypatch.setattr(handlers, "_dispatch_action_payload", fake_dispatch_action)
     monkeypatch.setattr(handlers, "_send_text", fake_send_text)
 
     asyncio.run(handlers.action_callback(update, context))
     matches = [record for record in caplog.records if "Orchestrator result:" in record.getMessage()]
     assert len(matches) == 1
+
+
+def test_callback_aliases_calendar_list_intent(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_send_result(update, context, result, reply_markup=None):
+        captured["result"] = result
+
+    async def fake_guard_access(update, context, bucket="default"):
+        return True
+
+    async def fake_answer():
+        return None
+
+    async def fake_dispatch_action(update, context, op, payload, intent):
+        captured["dispatch_intent"] = intent
+        return ok("List", intent="menu.calendar", mode="local")
+
+    def fake_set_input_text(context, text):
+        captured["input_text"] = text
+
+    update = DummyUpdate()
+    context = DummyContext()
+    store = context.application.bot_data["action_store"]
+    action = Action(id="calendar.list", label="List", payload={"op": "run_command", "command": "/calendar list", "args": ""})
+    action_id = store.store_action(action=action, user_id=1, chat_id=10)
+    update.callback_query = SimpleNamespace(data=f"a:{action_id}", answer=fake_answer)
+
+    monkeypatch.setattr(handlers, "send_result", fake_send_result)
+    monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
+    monkeypatch.setattr(handlers, "_dispatch_action_payload", fake_dispatch_action)
+    monkeypatch.setattr(handlers, "set_input_text", fake_set_input_text)
+
+    asyncio.run(handlers.action_callback(update, context))
+
+    result = captured["result"]
+    assert captured["dispatch_intent"] == "utility_calendar.list"
+    assert captured["input_text"] == "<callback:utility_calendar.list>"
+    assert result.intent == "utility_calendar.list"
 
 
 def test_send_result_deduplicates(monkeypatch) -> None:
