@@ -16,14 +16,11 @@ class FakeEvent:
 
 
 class FakeCalendar:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, url: str) -> None:
         self.name = name
+        self.url = url
         self.added: str | None = None
         self._events: list[FakeEvent] = []
-
-    def add_event(self, ical: str) -> FakeEvent:
-        self.added = ical
-        return FakeEvent(url="https://caldav.example.com/event/1.ics")
 
     def date_search(self, start, end):
         return list(self._events)
@@ -73,34 +70,43 @@ def test_create_event_uses_named_calendar(monkeypatch) -> None:
     monkeypatch.setenv("CALDAV_USERNAME", "user")
     monkeypatch.setenv("CALDAV_PASSWORD", "pass")
     monkeypatch.setenv("CALDAV_CALENDAR_NAME", "Work")
-    personal = FakeCalendar("Personal")
-    work = FakeCalendar("Work")
+    personal = FakeCalendar("Personal", "https://caldav.example.com/calendars/personal/")
+    work = FakeCalendar("Work", "https://caldav.example.com/calendars/work/")
     fake_client = FakeClient([personal, work])
 
     monkeypatch.setattr("app.core.tools_calendar_caldav.caldav.DAVClient", lambda *args, **kwargs: fake_client)
+    captured: dict[str, str] = {}
+
+    def fake_put_event(url: str, ical: str, config) -> None:
+        captured["url"] = url
+        captured["ical"] = ical
+
+    monkeypatch.setattr("app.core.tools_calendar_caldav._put_event", fake_put_event)
 
     config = tools_calendar_caldav.load_caldav_config()
     created = asyncio.run(
         tools_calendar_caldav.create_event(
             config,
             start_at=datetime(2026, 2, 5, 18, 30, tzinfo=timezone.utc),
+            end_at=datetime(2026, 2, 5, 19, 30, tzinfo=timezone.utc),
             title="Standup",
             description="Daily",
         )
     )
 
     assert created.uid
-    assert created.href == "https://caldav.example.com/event/1.ics"
-    assert work.added is not None
-    assert personal.added is None
-    assert "SUMMARY:Standup" in work.added
+    assert created.href and created.href.endswith(".ics")
+    assert created.calendar_name == "Work"
+    assert created.calendar_url_base == "https://caldav.example.com/calendars/work/"
+    assert captured["url"].startswith("https://caldav.example.com/calendars/work/")
+    assert "SUMMARY:Standup" in captured["ical"]
 
 
 def test_list_events_parses_items(monkeypatch) -> None:
     monkeypatch.setenv("CALDAV_URL", "https://caldav.example.com")
     monkeypatch.setenv("CALDAV_USERNAME", "user")
     monkeypatch.setenv("CALDAV_PASSWORD", "pass")
-    calendar = FakeCalendar("Default")
+    calendar = FakeCalendar("Default", "https://caldav.example.com/calendars/default/")
     calendar._events = [
         FakeEvent(
             data=_event_payload("evt-1", "Врач", "20260205T180000Z"),
@@ -129,7 +135,7 @@ def test_check_connection_returns_calendar_name(monkeypatch) -> None:
     monkeypatch.setenv("CALDAV_URL", "https://caldav.example.com")
     monkeypatch.setenv("CALDAV_USERNAME", "user")
     monkeypatch.setenv("CALDAV_PASSWORD", "pass")
-    calendar = FakeCalendar("Primary")
+    calendar = FakeCalendar("Primary", "https://caldav.example.com/calendars/primary/")
     fake_client = FakeClient([calendar])
     monkeypatch.setattr("app.core.tools_calendar_caldav.caldav.DAVClient", lambda *args, **kwargs: fake_client)
 

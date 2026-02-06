@@ -1,14 +1,39 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 from app.core import calendar_store, tools_calendar_caldav
+from app.core.calendar_backend import CalDAVCalendarBackend, LocalCalendarBackend
 from app.core.result import Action, OrchestratorResult, ensure_valid, ok, refused
 
 LOGGER = logging.getLogger(__name__)
 
-_NOT_CONNECTED_TEXT = "Календарь не подключён: задайте CALDAV_URL/USERNAME/PASSWORD."
+_CALENDAR_BACKEND_ENV = "CALENDAR_BACKEND"
+_DEFAULT_BACKEND = "local"
+
+
+def _resolve_backend_mode() -> str:
+    raw = os.getenv(_CALENDAR_BACKEND_ENV, _DEFAULT_BACKEND)
+    normalized = raw.strip().lower() if isinstance(raw, str) else _DEFAULT_BACKEND
+    if normalized in {"local", "caldav"}:
+        return normalized
+    if normalized:
+        LOGGER.warning("calendar.backend.invalid: value=%r fallback=local", normalized)
+    return _DEFAULT_BACKEND
+
+
+def _safe_caldav_error_label(exc: Exception) -> str:
+    if isinstance(exc, tools_calendar_caldav.CalDAVRequestError):
+        return f"{exc.__class__.__name__}:{exc.status_code}"
+    return exc.__class__.__name__
+
+
+def _ensure_aware_for_label(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=calendar_store.BOT_TZ)
+    return value
 
 
 async def create_event(
@@ -18,7 +43,7 @@ async def create_event(
     chat_id: int,
     user_id: int,
     request_id: str | None = None,
-    intent: str = "utility_calendar.add",
+    intent: str = "calendar.add",
 ) -> OrchestratorResult:
     request_label = request_id or "-"
     LOGGER.info(
@@ -28,55 +53,119 @@ async def create_event(
         start_at.isoformat(),
         title,
     )
-    config = tools_calendar_caldav.load_caldav_config()
-    if config is None:
-        LOGGER.info(
-            "calendar.create refused: request_id=%s user_id=%s reason=calendar_not_connected",
-            request_label,
-            user_id,
-        )
-        return ensure_valid(
-            refused(
-                _NOT_CONNECTED_TEXT,
-                intent=intent,
-                mode="tool",
-                debug={"reason": "calendar_not_connected"},
+    backend_mode = _resolve_backend_mode()
+    end_at = start_at + timedelta(hours=1)
+    if backend_mode == "caldav":
+        config = tools_calendar_caldav.load_caldav_config()
+        if config is None:
+            LOGGER.info(
+                "calendar.create fallback: request_id=%s user_id=%s reason=caldav_missing_config",
+                request_label,
+                user_id,
             )
-        )
+            return await _create_event_local_fallback(
+                start_at=start_at,
+                end_at=end_at,
+                title=title,
+                chat_id=chat_id,
+                user_id=user_id,
+                intent=intent,
+                caldav_error="missing_config",
+            )
+        try:
+            backend = CalDAVCalendarBackend(config, chat_id=chat_id, user_id=user_id)
+            created = await backend.create_event(title=title, start_dt=start_at, end_dt=end_at)
+            return _build_create_result(
+                created,
+                start_at=start_at,
+                title=title,
+                intent=intent,
+                calendar_backend="caldav",
+            )
+        except Exception as exc:
+            LOGGER.error(
+                "calendar.create caldav error: request_id=%s user_id=%s error=%s",
+                request_label,
+                user_id,
+                exc.__class__.__name__,
+            )
+            return await _create_event_local_fallback(
+                start_at=start_at,
+                end_at=end_at,
+                title=title,
+                chat_id=chat_id,
+                user_id=user_id,
+                intent=intent,
+                caldav_error=_safe_caldav_error_label(exc),
+            )
     try:
-        created_remote = await tools_calendar_caldav.create_event(
-            config,
-            start_at=start_at,
-            title=title,
-            description=None,
-        )
-        event_id = created_remote.uid
-        created = await calendar_store.add_item(
-            dt=start_at,
-            title=title,
-            chat_id=chat_id,
-            remind_at=None,
-            user_id=user_id,
-            reminders_enabled=False,
-            event_id=event_id,
-        )
+        backend = LocalCalendarBackend(chat_id=chat_id, user_id=user_id, reminders_enabled=False)
+        created = await backend.create_event(title=title, start_dt=start_at, end_dt=end_at)
     except Exception as exc:
         LOGGER.error(
-            "calendar.create error: request_id=%s user_id=%s error=%s",
+            "calendar.create local error: request_id=%s user_id=%s error=%s",
             request_label,
             user_id,
             exc.__class__.__name__,
         )
         return ensure_valid(refused("Не удалось создать событие.", intent=intent, mode="tool", debug={"reason": "error"}))
-    event = created.get("event") if isinstance(created, dict) else None
-    event_id = event.get("event_id") if isinstance(event, dict) else None
-    if not isinstance(event_id, str):
-        LOGGER.error("calendar.create error: request_id=%s user_id=%s reason=missing_event_id", request_label, user_id)
+    return _build_create_result(created, start_at=start_at, title=title, intent=intent, calendar_backend="local")
+
+
+def _build_create_result(
+    created,
+    *,
+    start_at: datetime,
+    title: str,
+    intent: str,
+    calendar_backend: str,
+    caldav_error: str | None = None,
+) -> OrchestratorResult:
+    event_id = getattr(created, "event_id", None)
+    if not isinstance(event_id, str) or not event_id:
         return ensure_valid(refused("Не удалось создать событие.", intent=intent, mode="tool", debug={"reason": "missing_event_id"}))
-    LOGGER.info("calendar.create ok: event_id=%s", event_id)
-    dt_label = start_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-    text = f"Событие добавлено: {event_id} | {dt_label} | {title}"
-    return ensure_valid(ok(text, intent=intent, mode="tool", debug={"event_id": event_id}))
+    start_value = _ensure_aware_for_label(start_at)
+    dt_label = start_value.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+    text = f"Событие создано: {dt_label} | {title}"
+    debug: dict[str, str] = {"event_id": event_id, "calendar_backend": calendar_backend}
+    created_debug = getattr(created, "debug", None)
+    if isinstance(created_debug, dict):
+        for key, value in created_debug.items():
+            if isinstance(key, str) and isinstance(value, str):
+                debug[key] = value
+    if caldav_error:
+        debug["caldav_error"] = caldav_error
+    return ensure_valid(ok(text, intent=intent, mode="tool", debug=debug))
+
+
+async def _create_event_local_fallback(
+    *,
+    start_at: datetime,
+    end_at: datetime,
+    title: str,
+    chat_id: int,
+    user_id: int,
+    intent: str,
+    caldav_error: str,
+) -> OrchestratorResult:
+    try:
+        backend = LocalCalendarBackend(chat_id=chat_id, user_id=user_id, reminders_enabled=False)
+        created = await backend.create_event(title=title, start_dt=start_at, end_dt=end_at)
+    except Exception as exc:
+        LOGGER.error(
+            "calendar.create local fallback error: user_id=%s error=%s",
+            user_id,
+            exc.__class__.__name__,
+        )
+        return ensure_valid(refused("Не удалось создать событие.", intent=intent, mode="tool", debug={"reason": "error"}))
+    return _build_create_result(
+        created,
+        start_at=start_at,
+        title=title,
+        intent=intent,
+        calendar_backend="local_fallback",
+        caldav_error=caldav_error,
+    )
 
 
 async def delete_event(
@@ -85,27 +174,30 @@ async def delete_event(
     user_id: int,
     intent: str = "utility_calendar.del",
 ) -> OrchestratorResult:
-    config = tools_calendar_caldav.load_caldav_config()
-    if config is None:
-        LOGGER.info("calendar.delete refused: reason=calendar_not_connected user_id=%s", user_id)
-        return ensure_valid(
-            refused(_NOT_CONNECTED_TEXT, intent=intent, mode="tool", debug={"reason": "calendar_not_connected"})
-        )
-    try:
-        deleted_remote = await tools_calendar_caldav.delete_event(config, event_id=item_id)
-    except Exception as exc:
-        LOGGER.error("calendar.delete error: user_id=%s error=%s", user_id, exc.__class__.__name__)
-        return ensure_valid(refused("Не удалось удалить событие.", intent=intent, mode="tool", debug={"reason": "error"}))
+    backend_mode = _resolve_backend_mode()
+    deleted_remote = False
+    caldav_error: str | None = None
+    if backend_mode == "caldav":
+        config = tools_calendar_caldav.load_caldav_config()
+        if config is None:
+            caldav_error = "missing_config"
+            LOGGER.info("calendar.delete fallback: user_id=%s reason=caldav_missing_config", user_id)
+        else:
+            try:
+                deleted_remote = await tools_calendar_caldav.delete_event(config, event_id=item_id)
+            except Exception as exc:
+                caldav_error = _safe_caldav_error_label(exc)
+                LOGGER.error("calendar.delete caldav error: user_id=%s error=%s", user_id, exc.__class__.__name__)
     removed, reminder_id = await calendar_store.delete_item(item_id)
     deleted = deleted_remote or removed
     text = f"Удалено: {item_id}" if deleted else f"Не найдено: {item_id}"
-    result = ok(text, intent=intent, mode="tool") if deleted else refused(text, intent=intent, mode="tool")
+    debug: dict[str, object] = {}
     if reminder_id:
-        return ensure_valid(
-            ok(text, intent=intent, mode="tool", debug={"reminder_id": reminder_id})
-            if removed
-            else refused(text, intent=intent, mode="tool", debug={"reminder_id": reminder_id})
-        )
+        debug["reminder_id"] = reminder_id
+    if caldav_error:
+        debug["calendar_backend"] = "local_fallback"
+        debug["caldav_error"] = caldav_error
+    result = ok(text, intent=intent, mode="tool", debug=debug) if deleted else refused(text, intent=intent, mode="tool", debug=debug)
     return ensure_valid(result)
 
 
@@ -116,26 +208,56 @@ async def list_calendar_items(
     user_id: int,
     intent: str = "utility_calendar.list",
 ) -> OrchestratorResult:
-    config = tools_calendar_caldav.load_caldav_config()
-    if config is None:
-        LOGGER.info("calendar.list refused: reason=calendar_not_connected user_id=%s", user_id)
-        return ensure_valid(
-            refused(_NOT_CONNECTED_TEXT, intent=intent, mode="tool", debug={"reason": "calendar_not_connected"})
-        )
+    backend_mode = _resolve_backend_mode()
     start_value = start or datetime.now(tz=timezone.utc)
     end_value = end or (start_value + timedelta(days=7))
-    try:
-        events = await tools_calendar_caldav.list_events(config, start=start_value, end=end_value, limit=20)
-    except Exception as exc:
-        LOGGER.error("calendar.list error: user_id=%s error=%s", user_id, exc.__class__.__name__)
-        return ensure_valid(refused("Не удалось получить список событий.", intent=intent, mode="tool", debug={"reason": "error"}))
-    if not events:
-        return ensure_valid(ok("Нет событий.", intent=intent, mode="tool"))
+    if backend_mode == "caldav":
+        config = tools_calendar_caldav.load_caldav_config()
+        if config is None:
+            LOGGER.info("calendar.list fallback: user_id=%s reason=caldav_missing_config", user_id)
+            return await _list_local_items(
+                start_value,
+                end_value,
+                intent=intent,
+                caldav_error="missing_config",
+            )
+        try:
+            events = await tools_calendar_caldav.list_events(config, start=start_value, end=end_value, limit=20)
+        except Exception as exc:
+            LOGGER.error("calendar.list caldav error: user_id=%s error=%s", user_id, exc.__class__.__name__)
+            return await _list_local_items(
+                start_value,
+                end_value,
+                intent=intent,
+                caldav_error=_safe_caldav_error_label(exc),
+            )
+        if not events:
+            return ensure_valid(ok("Нет событий.", intent=intent, mode="tool"))
+        lines = []
+        for item in events:
+            dt_label = item.start_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+            lines.append(f"{item.uid} | {dt_label} | {item.summary}")
+        return ensure_valid(ok("\n".join(lines), intent=intent, mode="tool"))
+    return await _list_local_items(start_value, end_value, intent=intent)
+
+
+async def _list_local_items(
+    start: datetime,
+    end: datetime,
+    *,
+    intent: str,
+    caldav_error: str | None = None,
+) -> OrchestratorResult:
+    items = await calendar_store.list_items(start=start, end=end)
+    if not items:
+        debug = {"calendar_backend": "local_fallback", "caldav_error": caldav_error} if caldav_error else {}
+        return ensure_valid(ok("Нет событий.", intent=intent, mode="tool", debug=debug))
     lines = []
-    for item in events:
-        dt_label = item.start_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-        lines.append(f"{item.uid} | {dt_label} | {item.summary}")
-    return ensure_valid(ok("\n".join(lines), intent=intent, mode="tool"))
+    for item in items:
+        dt_label = item.dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+        lines.append(f"{item.id} | {dt_label} | {item.title}")
+    debug = {"calendar_backend": "local_fallback", "caldav_error": caldav_error} if caldav_error else {}
+    return ensure_valid(ok("\n".join(lines), intent=intent, mode="tool", debug=debug))
 
 
 async def list_reminders(
@@ -180,3 +302,19 @@ async def list_reminders(
         )
     actions.append(Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}))
     return ensure_valid(ok("\n".join(lines), intent=intent, mode="tool", actions=actions))
+
+
+def is_caldav_configured(settings: object | None = None) -> bool:
+    if settings is not None:
+        url = getattr(settings, "caldav_url", None)
+        username = getattr(settings, "caldav_username", None)
+        password = getattr(settings, "caldav_password", None)
+        return bool(url and username and password)
+    return tools_calendar_caldav.load_caldav_config() is not None
+
+
+async def check_caldav_connection() -> tuple[bool, str | None]:
+    config = tools_calendar_caldav.load_caldav_config()
+    if config is None:
+        return False, None
+    return await tools_calendar_caldav.check_connection(config)

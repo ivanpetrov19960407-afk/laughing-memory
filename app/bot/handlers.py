@@ -17,7 +17,7 @@ from telegram.ext import ContextTypes
 
 from app.bot import menu, routing, wizard
 from app.bot.actions import ActionStore, StoredAction, build_inline_keyboard, parse_callback_token
-from app.core import calendar_store, tools_calendar_caldav
+from app.core import calendar_store, tools_calendar
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMemory, DialogMessage
 from app.core.orchestrator import Orchestrator
@@ -118,11 +118,7 @@ def _strict_no_pseudo_sources(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 def _caldav_configured(context: ContextTypes.DEFAULT_TYPE) -> bool:
     settings = _get_settings(context)
-    return bool(
-        getattr(settings, "caldav_url", None)
-        and getattr(settings, "caldav_username", None)
-        and getattr(settings, "caldav_password", None)
-    )
+    return tools_calendar.is_caldav_configured(settings)
 
 
 async def _handle_caldav_settings(
@@ -137,8 +133,7 @@ async def _handle_caldav_settings(
             mode="local",
             actions=[_menu_action()],
         )
-    config = tools_calendar_caldav.load_caldav_config()
-    status = "CalDAV подключён." if config is not None else "CalDAV не подключён."
+    status = "CalDAV подключён."
     return ok(
         status,
         intent="settings.caldav.status",
@@ -155,15 +150,14 @@ async def _handle_caldav_settings(
 
 
 async def _handle_caldav_check(context: ContextTypes.DEFAULT_TYPE) -> OrchestratorResult:
-    config = tools_calendar_caldav.load_caldav_config()
-    if config is None:
+    if not _caldav_configured(context):
         return refused(
             "CalDAV не подключён. Укажите CALDAV_URL/USERNAME/PASSWORD.",
             intent="settings.caldav.check",
             mode="local",
             actions=[_menu_action()],
         )
-    ok_status, calendar_name = await tools_calendar_caldav.check_connection(config)
+    ok_status, calendar_name = await tools_calendar.check_caldav_connection()
     if ok_status:
         name_suffix = f" ({calendar_name})" if calendar_name else ""
         return ok(
@@ -2397,7 +2391,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id=chat_id,
             user_id=user_id,
             request_id=request_context.request_id if request_context else None,
-            intent="utility_calendar.add",
+            intent="calendar.add",
         )
         result = replace(tool_result, mode="local")
         await send_result(update, context, result)
