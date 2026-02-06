@@ -39,6 +39,7 @@ from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limiter import RateLimiter
 from app.infra.request_context import get_request_context, log_request, set_input_text, set_status, start_request
 from app.infra.storage import TaskStorage
+from app.stores.google_tokens import GoogleTokenStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -101,6 +102,15 @@ def _get_action_store(context: ContextTypes.DEFAULT_TYPE) -> ActionStore:
     return store
 
 
+def _get_google_token_store(context: ContextTypes.DEFAULT_TYPE) -> GoogleTokenStore:
+    store = context.application.bot_data.get("google_token_store")
+    if isinstance(store, GoogleTokenStore):
+        return store
+    store = GoogleTokenStore.from_env()
+    context.application.bot_data["google_token_store"] = store
+    return store
+
+
 def _wizards_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
     settings = _get_settings(context)
     return bool(getattr(settings, "enable_wizards", False))
@@ -114,6 +124,71 @@ def _menu_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
 def _strict_no_pseudo_sources(context: ContextTypes.DEFAULT_TYPE) -> bool:
     settings = _get_settings(context)
     return bool(getattr(settings, "strict_no_pseudo_sources", False))
+
+
+def _build_google_oauth_url(context: ContextTypes.DEFAULT_TYPE, *, user_id: int) -> str | None:
+    settings = _get_settings(context)
+    base = getattr(settings, "public_base_url", None)
+    if not isinstance(base, str) or not base:
+        return None
+    base = base.rstrip("/")
+    return f"{base}/oauth/google/start?user_id={user_id}"
+
+
+async def _handle_google_calendar_settings(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+) -> OrchestratorResult:
+    token_store = _get_google_token_store(context)
+    tokens = token_store.get_tokens(user_id)
+    if tokens is not None:
+        return ok(
+            "✅ Календарь подключён.",
+            intent="settings.google_calendar.status",
+            mode="local",
+            actions=[
+                Action(
+                    id="settings.google_calendar.disconnect",
+                    label="Отключить",
+                    payload={"op": "google_calendar_disconnect"},
+                ),
+                _menu_action(),
+            ],
+        )
+    url = _build_google_oauth_url(context, user_id=user_id)
+    if not url:
+        return error(
+            "OAuth для Google Calendar не настроен. Проверь переменные окружения.",
+            intent="settings.google_calendar",
+            mode="local",
+        )
+    text = (
+        "Чтобы подключить Google Calendar, открой ссылку авторизации:\n"
+        f"{url}\n\n"
+        "После подтверждения вернись в Telegram."
+    )
+    return ok(
+        text,
+        intent="settings.google_calendar.connect",
+        mode="local",
+        actions=[_menu_action()],
+    )
+
+
+async def _handle_google_calendar_disconnect(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+) -> OrchestratorResult:
+    token_store = _get_google_token_store(context)
+    token_store.delete_tokens(user_id)
+    return ok(
+        "Google Calendar отключён.",
+        intent="settings.google_calendar.disconnect",
+        mode="local",
+        actions=[_menu_action()],
+    )
 
 
 async def _get_active_modes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -1357,6 +1432,11 @@ async def _handle_menu_section(
             mode="local",
             actions=[
                 Action(
+                    id="settings.google_calendar",
+                    label="🔗 Подключить Google Calendar",
+                    payload={"op": "google_calendar_settings"},
+                ),
+                Action(
                     id="settings.facts",
                     label=f"📌 Факты {'off' if facts_enabled else 'on'}",
                     payload={"op": "run_command", "command": facts_command, "args": ""},
@@ -1755,6 +1835,10 @@ async def _dispatch_action_payload(
             )
         minutes_value = minutes if isinstance(minutes, int) else 10
         return await _handle_reminder_add_offset(context, event_id=event_id, minutes=minutes_value)
+    if op_value == "google_calendar_settings":
+        return await _handle_google_calendar_settings(context, user_id=user_id)
+    if op_value == "google_calendar_disconnect":
+        return await _handle_google_calendar_disconnect(context, user_id=user_id)
     if intent == "task.execute":
         task_name = payload.get("name")
         task_payload = payload.get("payload")
@@ -2343,20 +2427,26 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             await send_result(update, context, result)
             return
-        tool_result = await list_calendar_items(start, end, intent="utility_calendar.list")
+        tool_result = await list_calendar_items(start, end, intent="utility_calendar.list", user_id=user_id)
         result = replace(tool_result, mode="local")
         await send_result(update, context, result)
         return
     if command == "today":
         today = datetime.now(tz=calendar_store.MOSCOW_TZ).date()
         start, end = calendar_store.day_bounds(today)
-        result = replace(await list_calendar_items(start, end, intent="utility_calendar.today"), mode="local")
+        result = replace(
+            await list_calendar_items(start, end, intent="utility_calendar.today", user_id=user_id),
+            mode="local",
+        )
         await send_result(update, context, result)
         return
     if command == "week":
         today = datetime.now(tz=calendar_store.MOSCOW_TZ).date()
         start, end = calendar_store.week_bounds(today)
-        result = replace(await list_calendar_items(start, end, intent="utility_calendar.week"), mode="local")
+        result = replace(
+            await list_calendar_items(start, end, intent="utility_calendar.week", user_id=user_id),
+            mode="local",
+        )
         await send_result(update, context, result)
         return
     if command == "del":
@@ -2373,7 +2463,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             result = refused("Укажите id для удаления.", intent="utility_calendar.del", mode="local")
             await send_result(update, context, result)
             return
-        tool_result = await delete_event(item_id, intent="utility_calendar.del")
+        tool_result = await delete_event(item_id, intent="utility_calendar.del", user_id=user_id)
         reminder_id = tool_result.debug.get("reminder_id") if isinstance(tool_result.debug, dict) else None
         scheduler = _get_reminder_scheduler(context)
         if reminder_id and scheduler:

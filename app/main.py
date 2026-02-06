@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import urllib.parse
 import warnings
 from collections import defaultdict, deque
 
@@ -16,10 +17,13 @@ from app.core.dialog_memory import DialogMemory
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.config import load_settings
+from app.infra.google_oauth import GoogleOAuthConfig
+from app.infra.google_oauth_server import start_google_oauth_server
 from app.infra.llm import OpenAIClient, PerplexityClient
 from app.infra.rate_limit import RateLimiter as LLMRateLimiter
 from app.infra.rate_limiter import RateLimiter
 from app.infra.storage import TaskStorage
+from app.stores.google_tokens import GoogleTokenStore
 from app.tools import NullSearchClient, PerplexityWebSearchClient
 from app.storage.wizard_store import WizardStore
 
@@ -82,6 +86,8 @@ def main() -> None:
 
 
     settings = load_settings()
+    google_token_store = GoogleTokenStore(settings.google_tokens_path)
+    google_token_store.load()
     config = load_orchestrator_config(settings.orchestrator_config_path)
     if settings.facts_only_default is not None:
         config["facts_only_default"] = settings.facts_only_default
@@ -168,6 +174,7 @@ def main() -> None:
     application.bot_data["history_size"] = settings.history_size
     application.bot_data["message_limit"] = settings.telegram_message_limit
     application.bot_data["settings"] = settings
+    application.bot_data["google_token_store"] = google_token_store
     application.bot_data["openai_client"] = openai_client
     application.bot_data["start_time"] = time.monotonic()
     application.bot_data["dialog_memory"] = dialog_memory
@@ -184,6 +191,24 @@ def main() -> None:
         reminder_scheduler=reminder_scheduler,
         settings=settings,
     )
+    if settings.google_oauth_client_id and settings.google_oauth_client_secret and settings.public_base_url:
+        oauth_config = GoogleOAuthConfig(
+            client_id=settings.google_oauth_client_id,
+            client_secret=settings.google_oauth_client_secret,
+            public_base_url=settings.public_base_url,
+            redirect_path=settings.google_oauth_redirect_path,
+        )
+        parsed = urllib.parse.urlparse(settings.public_base_url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        try:
+            start_google_oauth_server(
+                host="0.0.0.0",
+                port=port,
+                config=oauth_config,
+                token_store=google_token_store,
+            )
+        except OSError:
+            logging.getLogger(__name__).exception("Failed to start Google OAuth server on port %s", port)
     if not application.job_queue:
         logging.getLogger(__name__).warning("JobQueue not configured; reminders will run without it.")
 

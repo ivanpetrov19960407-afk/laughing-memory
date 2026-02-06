@@ -1,17 +1,39 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 
 from app.bot.wizard import WizardManager, WIZARD_CALENDAR_ADD
 from app.storage.wizard_store import WizardStore, WizardState
 from app.core import calendar_store
+from app.stores.google_tokens import GoogleTokenStore, GoogleTokens
 
 
 def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-    monkeypatch.setenv("CALENDAR_CONNECTED", "1")
+    tokens_path = tmp_path / "google_tokens.json"
+    monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:8080")
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
+    store = GoogleTokenStore(tokens_path)
+    store.load()
+    store.set_tokens(
+        1,
+        GoogleTokens(
+            access_token="token",
+            refresh_token="refresh",
+            expires_at=time.time() + 3600,
+        ),
+    )
+
+    async def fake_create_event(*, access_token: str, start_at: datetime, title: str) -> dict[str, object]:
+        return {"id": "evt-1"}
+
+    monkeypatch.setattr("app.core.tools_calendar._create_google_event", fake_create_event)
     store = WizardStore(tmp_path / "wizards", timeout_seconds=600)
     manager = WizardManager(store)
 
@@ -60,7 +82,8 @@ def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
 def test_wizard_calendar_refuses_without_connection(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-    monkeypatch.delenv("CALENDAR_CONNECTED", raising=False)
+    tokens_path = tmp_path / "google_tokens.json"
+    monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
     store = WizardStore(tmp_path / "wizards", timeout_seconds=600)
     manager = WizardManager(store)
 

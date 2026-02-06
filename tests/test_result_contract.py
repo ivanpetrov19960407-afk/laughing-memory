@@ -21,6 +21,7 @@ from app.core.result import (
 from app.core.tools_calendar import list_calendar_items, list_reminders
 from app.infra.rate_limiter import RateLimiter
 from app.infra.storage import TaskStorage
+from app.stores.google_tokens import GoogleTokenStore, GoogleTokens
 
 
 class FakeLLMClient:
@@ -69,9 +70,20 @@ def test_ratelimited_result_is_valid() -> None:
 def test_tool_calendar_returns_result(tmp_path, monkeypatch) -> None:
     path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(path))
-    monkeypatch.setenv("CALENDAR_CONNECTED", "1")
+    tokens_path = tmp_path / "google_tokens.json"
+    monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
+    token_store = GoogleTokenStore(tokens_path)
+    token_store.load()
+    token_store.set_tokens(
+        1,
+        GoogleTokens(
+            access_token="token",
+            refresh_token="refresh",
+            expires_at=None,
+        ),
+    )
     calendar_store.save_store_atomic({"events": [], "reminders": [], "updated_at": datetime.now().isoformat()})
-    result = asyncio.run(list_calendar_items(None, None))
+    result = asyncio.run(list_calendar_items(None, None, user_id=1))
     assert isinstance(result, OrchestratorResult)
     result.validate()
 

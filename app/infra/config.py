@@ -49,6 +49,11 @@ class Settings:
     wizard_store_path: Path
     wizard_timeout_seconds: int
     feature_web_search: bool
+    google_oauth_client_id: str | None
+    google_oauth_client_secret: str | None
+    public_base_url: str | None
+    google_oauth_redirect_path: str
+    google_tokens_path: Path
 
 
 def load_settings() -> Settings:
@@ -110,6 +115,11 @@ def load_settings() -> Settings:
     feature_web_search = _parse_optional_bool(os.getenv("FEATURE_WEB_SEARCH"))
     if feature_web_search is None:
         feature_web_search = True
+    google_oauth_client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID") or None
+    google_oauth_client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or None
+    public_base_url = os.getenv("PUBLIC_BASE_URL") or None
+    google_oauth_redirect_path = os.getenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
+    google_tokens_path = Path(os.getenv("GOOGLE_TOKENS_PATH", "data/google_tokens.json"))
 
     return Settings(
         bot_token=token,
@@ -146,6 +156,11 @@ def load_settings() -> Settings:
         wizard_store_path=wizard_store_path,
         wizard_timeout_seconds=wizard_timeout_seconds,
         feature_web_search=feature_web_search,
+        google_oauth_client_id=google_oauth_client_id,
+        google_oauth_client_secret=google_oauth_client_secret,
+        public_base_url=public_base_url,
+        google_oauth_redirect_path=google_oauth_redirect_path,
+        google_tokens_path=google_tokens_path,
     )
 
 
