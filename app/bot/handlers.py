@@ -176,15 +176,6 @@ async def _handle_google_calendar_settings(
     )
 
 
-@_with_error_handling
-async def google_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context, bucket="ui"):
-        return
-    user_id = update.effective_user.id if update.effective_user else 0
-    result = await _handle_google_calendar_settings(context, user_id=user_id)
-    await send_result(update, context, result)
-
-
 async def _handle_google_calendar_disconnect(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -264,6 +255,15 @@ def _with_error_handling(
             log_request(LOGGER, request_context)
 
     return wrapper
+
+
+@_with_error_handling
+async def google_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context, bucket="ui"):
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    result = await _handle_google_calendar_settings(context, user_id=user_id)
+    await send_result(update, context, result)
 
 
 async def _handle_exception(update: Update, context: ContextTypes.DEFAULT_TYPE, error: Exception) -> None:
