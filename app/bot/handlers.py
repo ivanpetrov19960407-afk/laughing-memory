@@ -31,7 +31,7 @@ from app.core.result import (
     ratelimited,
     refused,
 )
-from app.core.tools_calendar import list_calendar_items, list_reminders
+from app.core.tools_calendar import create_event, delete_event, list_calendar_items, list_reminders
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
 from app.infra.messaging import safe_edit_text, safe_send_text
@@ -2307,18 +2307,16 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await send_result(update, context, result)
             return
         chat_id = update.effective_chat.id if update.effective_chat else 0
-        result_item = await calendar_store.add_item(
-            dt,
-            title,
+        request_context = get_request_context(context)
+        tool_result = await create_event(
+            start_at=dt,
+            title=title,
             chat_id=chat_id,
-            remind_at=None,
             user_id=user_id,
-            reminders_enabled=False,
+            request_id=request_context.request_id if request_context else None,
+            intent="utility_calendar.add",
         )
-        event = result_item["event"]
-        dt_label = dt.strftime("%Y-%m-%d %H:%M")
-        text = f"Добавлено: {event['event_id']} | {dt_label} | {title}"
-        result = ok(text, intent="utility_calendar.add", mode="local")
+        result = replace(tool_result, mode="local")
         await send_result(update, context, result)
         return
     if command == "list":
@@ -2346,19 +2344,19 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await send_result(update, context, result)
             return
         tool_result = await list_calendar_items(start, end, intent="utility_calendar.list")
-        result = tool_result
+        result = replace(tool_result, mode="local")
         await send_result(update, context, result)
         return
     if command == "today":
         today = datetime.now(tz=calendar_store.MOSCOW_TZ).date()
         start, end = calendar_store.day_bounds(today)
-        result = await list_calendar_items(start, end, intent="utility_calendar.today")
+        result = replace(await list_calendar_items(start, end, intent="utility_calendar.today"), mode="local")
         await send_result(update, context, result)
         return
     if command == "week":
         today = datetime.now(tz=calendar_store.MOSCOW_TZ).date()
         start, end = calendar_store.week_bounds(today)
-        result = await list_calendar_items(start, end, intent="utility_calendar.week")
+        result = replace(await list_calendar_items(start, end, intent="utility_calendar.week"), mode="local")
         await send_result(update, context, result)
         return
     if command == "del":
@@ -2375,24 +2373,15 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             result = refused("Укажите id для удаления.", intent="utility_calendar.del", mode="local")
             await send_result(update, context, result)
             return
-        removed, reminder_id = await calendar_store.delete_item(item_id)
+        tool_result = await delete_event(item_id, intent="utility_calendar.del")
+        reminder_id = tool_result.debug.get("reminder_id") if isinstance(tool_result.debug, dict) else None
         scheduler = _get_reminder_scheduler(context)
         if reminder_id and scheduler:
             try:
                 await scheduler.cancel_reminder(reminder_id)
             except Exception:
                 LOGGER.exception("Failed to cancel reminder: reminder_id=%s", reminder_id)
-        if removed:
-            text = f"Удалено: {item_id}"
-            status = "ok"
-        else:
-            text = f"Не найдено: {item_id}"
-            status = "refused"
-        result = (
-            ok(text, intent="utility_calendar.del", mode="local")
-            if status == "ok"
-            else refused(text, intent="utility_calendar.del", mode="local")
-        )
+        result = replace(tool_result, mode="local")
         await send_result(update, context, result)
         return
     if command == "debug_due":

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.core import calendar_store
 from app.core.result import Action, OrchestratorResult, error, ok, refused
+from app.core.tools_calendar import create_event
 from app.storage.wizard_store import WizardState, WizardStore
 
 LOGGER = logging.getLogger(__name__)
@@ -282,29 +283,26 @@ class WizardManager:
             return refused("Дата повреждена, начни заново.", intent="wizard.calendar.confirm", mode="local")
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=calendar_store.BOT_TZ)
-        try:
-            created = await calendar_store.add_item(
-                dt=dt,
-                title=title.strip(),
-                chat_id=chat_id,
-                remind_at=None,
-                user_id=user_id,
-                reminders_enabled=False,
-            )
-        except Exception as exc:
-            LOGGER.exception("Failed to create calendar item: %s", exc)
-            return error(
-                "Не удалось создать событие. Попробуй позже.",
-                intent="wizard.calendar.confirm",
+        tool_result = await create_event(
+            start_at=dt,
+            title=title.strip(),
+            chat_id=chat_id,
+            user_id=user_id,
+            request_id=None,
+            intent="wizard.calendar.confirm",
+        )
+        if tool_result.status != "ok":
+            return replace(
+                tool_result,
                 mode="local",
+                intent="wizard.calendar.confirm",
+                actions=_confirm_actions(),
             )
         self._store.clear_state(user_id=user_id, chat_id=chat_id)
-        event = created.get("event") if isinstance(created, dict) else None
-        event_id = event.get("event_id") if isinstance(event, dict) else None
-        display_dt = dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+        event_id = tool_result.debug.get("event_id") if isinstance(tool_result.debug, dict) else None
         actions = _post_create_actions(event_id if isinstance(event_id, str) else "")
         return ok(
-            f"Готово! Событие добавлено: {display_dt} — {title.strip()}",
+            tool_result.text,
             intent="wizard.calendar.done",
             mode="local",
             actions=actions,
