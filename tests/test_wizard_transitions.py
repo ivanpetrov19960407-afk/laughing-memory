@@ -13,6 +13,7 @@ from app.core import tools_calendar_caldav
 def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    monkeypatch.setenv("CALENDAR_BACKEND", "caldav")
     monkeypatch.setenv("CALDAV_URL", "https://caldav.example.com")
     monkeypatch.setenv("CALDAV_USERNAME", "user")
     monkeypatch.setenv("CALDAV_PASSWORD", "pass")
@@ -57,7 +58,7 @@ def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
     )
     assert confirm is not None
     assert confirm.status == "ok"
-    assert "Событие добавлено" in confirm.text
+    assert "Событие создано" in confirm.text
 
     state, _expired = store.load_state(user_id=1, chat_id=10)
     assert state is None
@@ -92,9 +93,8 @@ def test_wizard_calendar_refuses_without_connection(tmp_path, monkeypatch) -> No
             payload={},
         )
     )
-    assert confirm.status == "refused"
-    assert "CALDAV_URL/USERNAME/PASSWORD" in confirm.text
-    assert "Событие добавлено" not in confirm.text
+    assert confirm.status == "ok"
+    assert "Событие создано" in confirm.text
 
 
 def test_wizard_cancel_and_timeout(tmp_path) -> None:

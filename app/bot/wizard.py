@@ -289,7 +289,7 @@ class WizardManager:
             chat_id=chat_id,
             user_id=user_id,
             request_id=None,
-            intent="wizard.calendar.confirm",
+            intent="calendar.add",
         )
         if tool_result.status != "ok":
             return replace(

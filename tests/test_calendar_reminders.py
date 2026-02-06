@@ -128,6 +128,7 @@ def test_add_creates_reminder(calendar_path) -> None:
 def test_calendar_command_add_does_not_create_reminder(calendar_path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     scheduled: dict[str, bool] = {"called": False}
+    monkeypatch.setenv("CALENDAR_BACKEND", "caldav")
     monkeypatch.setenv("CALDAV_URL", "https://caldav.example.com")
     monkeypatch.setenv("CALDAV_USERNAME", "user")
     monkeypatch.setenv("CALDAV_PASSWORD", "pass")
