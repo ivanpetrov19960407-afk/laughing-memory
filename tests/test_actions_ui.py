@@ -6,11 +6,12 @@ from types import SimpleNamespace
 
 import telegram
 
-from app.bot import actions, handlers, menu
+from app.bot import actions, handlers, menu, wizard
 from app.core import calendar_store
 from app.core.result import Action, ok
 from app.infra.request_context import start_request
 from app.infra.rate_limiter import RateLimiter
+from app.storage.wizard_store import WizardStore
 
 
 class DummyContext:
@@ -298,6 +299,58 @@ def test_callback_reminder_delete_disables_reminder(tmp_path, monkeypatch) -> No
     assert result.intent == "utility_reminders.delete"
     reminders = asyncio.run(calendar_store.list_reminders(datetime(2026, 2, 5, 11, 0, tzinfo=calendar_store.BOT_TZ), limit=10))
     assert all(item.id != reminder.id for item in reminders)
+
+
+def test_resume_prompt_restart_starts_reminder_wizard(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_send_result(update, context, result, reply_markup=None):
+        captured["result"] = result
+
+    async def fake_guard_access(update, context, bucket="default"):
+        return True
+
+    async def fake_answer(text=None):
+        return None
+
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+
+    store = WizardStore(tmp_path / "wizards")
+    manager = wizard.WizardManager(store, reminder_scheduler=None, settings=SimpleNamespace(reminders_enabled=True))
+
+    update = DummyUpdate()
+    context = DummyContext()
+    context.application.bot_data["wizard_manager"] = manager
+    context.application.bot_data["settings"] = SimpleNamespace(enable_menu=True, enable_wizards=True, strict_no_pseudo_sources=True)
+
+    asyncio.run(
+        manager.handle_action(user_id=1, chat_id=10, op="wizard_start", payload={"wizard_id": wizard.WIZARD_CALENDAR_ADD})
+    )
+    resume_prompt = asyncio.run(
+        handlers._dispatch_action_payload(
+            update,
+            context,
+            op="reminder.create",
+            payload={"op": "reminder.create"},
+            intent="utility_reminders.create",
+        )
+    )
+    restart_action = next(action for action in resume_prompt.actions if action.id == "wizard.restart")
+    action_id = context.application.bot_data["action_store"].store_action(action=restart_action, user_id=1, chat_id=10)
+    update.callback_query = SimpleNamespace(data=f"a:{action_id}", answer=fake_answer)
+
+    monkeypatch.setattr(handlers, "send_result", fake_send_result)
+    monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
+
+    asyncio.run(handlers.action_callback(update, context))
+
+    result = captured["result"]
+    assert result.intent.startswith("wizard.reminder_create.")
+    state, expired = manager.get_state(user_id=1, chat_id=10)
+    assert expired is False
+    assert state is not None
+    assert state.wizard_id == wizard.WIZARD_REMINDER_CREATE
 
 
 def test_send_result_deduplicates(monkeypatch) -> None:
