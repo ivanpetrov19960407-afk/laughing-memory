@@ -1538,6 +1538,12 @@ def _parse_static_callback(data: str) -> tuple[str, dict[str, object], str] | No
     return None
 
 
+def _normalize_callback_intent(intent: str) -> str:
+    if intent == "calendar.list":
+        return "utility_calendar.list"
+    return intent
+
+
 @_with_error_handling
 async def static_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -1641,9 +1647,18 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await send_result(update, context, result)
         return
     stored = lookup.action
-    LOGGER.info("Callback dispatch: action_id=%s intent=%s", action_id, stored.intent)
-    set_input_text(context, f"<callback:{stored.intent}>")
-    result = await _dispatch_action(update, context, stored)
+    normalized_intent = _normalize_callback_intent(stored.intent)
+    LOGGER.info("Callback dispatch: action_id=%s intent=%s", action_id, normalized_intent)
+    set_input_text(context, f"<callback:{normalized_intent}>")
+    result = await _dispatch_action_payload(
+        update,
+        context,
+        op=stored.payload.get("op"),
+        payload=stored.payload,
+        intent=normalized_intent,
+    )
+    if isinstance(result, OrchestratorResult) and result.intent != normalized_intent:
+        result = replace(result, intent=normalized_intent)
     await send_result(update, context, result)
 
 
