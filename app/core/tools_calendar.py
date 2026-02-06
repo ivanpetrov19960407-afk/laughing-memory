@@ -56,6 +56,8 @@ def _refresh_tokens_if_needed(
     token_store: GoogleTokenStore,
     force: bool = False,
 ) -> GoogleTokens:
+    if not tokens.access_token:
+        force = True
     if not force and not tokens.is_expired(now=time.time()):
         return tokens
     refreshed = refresh_access_token(config, refresh_token=tokens.refresh_token)

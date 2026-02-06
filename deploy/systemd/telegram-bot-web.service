@@ -1,0 +1,14 @@
+[Unit]
+Description=Telegram Bot OAuth Web Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/workspace/laughing-memory
+EnvironmentFile=/etc/telegram-bot-web.env
+ExecStart=/usr/bin/env uvicorn app.web.oauth_app:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -16,7 +16,7 @@ LOGGER = logging.getLogger(__name__)
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar"]
+DEFAULT_GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,7 @@ class GoogleOAuthConfig:
     client_secret: str
     public_base_url: str
     redirect_path: str
+    scopes: tuple[str, ...]
 
     @property
     def redirect_uri(self) -> str:
@@ -34,10 +35,11 @@ class GoogleOAuthConfig:
 
 
 def load_google_oauth_config() -> GoogleOAuthConfig | None:
-    client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
-    client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
+    client_id = os.getenv("GOOGLE_CLIENT_ID") or os.getenv("GOOGLE_OAUTH_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET") or os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
     public_base_url = os.getenv("PUBLIC_BASE_URL")
-    redirect_path = os.getenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth/google/callback")
+    redirect_path = os.getenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth2/callback")
+    scopes = _parse_scopes(os.getenv("GOOGLE_OAUTH_SCOPES"))
     if not client_id or not client_secret or not public_base_url:
         return None
     return GoogleOAuthConfig(
@@ -45,7 +47,15 @@ def load_google_oauth_config() -> GoogleOAuthConfig | None:
         client_secret=client_secret,
         public_base_url=public_base_url,
         redirect_path=redirect_path,
+        scopes=tuple(scopes),
     )
+
+
+def _parse_scopes(raw: str | None) -> list[str]:
+    if not raw:
+        return DEFAULT_GOOGLE_SCOPES
+    items = [item.strip() for item in raw.replace(",", " ").split() if item.strip()]
+    return items or DEFAULT_GOOGLE_SCOPES
 
 
 def build_authorization_url(config: GoogleOAuthConfig, *, state: str) -> str:
@@ -53,7 +63,7 @@ def build_authorization_url(config: GoogleOAuthConfig, *, state: str) -> str:
         "client_id": config.client_id,
         "redirect_uri": config.redirect_uri,
         "response_type": "code",
-        "scope": " ".join(GOOGLE_SCOPES),
+        "scope": " ".join(config.scopes),
         "access_type": "offline",
         "prompt": "consent",
         "state": state,
@@ -148,14 +158,14 @@ def handle_oauth_callback(
         return 400, "Неверный или просроченный state."
     try:
         token_payload = exchange_code_for_tokens(config, code=code)
-    except httpx.HTTPError as exc:
-        LOGGER.exception("OAuth exchange failed: %s", exc)
+    except httpx.HTTPError:
+        LOGGER.exception("OAuth exchange failed")
         return 500, "Не удалось обменять код на токены. Проверьте настройки OAuth."
     access_token = token_payload.get("access_token")
     refresh_token = token_payload.get("refresh_token")
     expires_in = token_payload.get("expires_in")
     if not isinstance(access_token, str) or not isinstance(refresh_token, str):
-        LOGGER.error("OAuth exchange missing tokens: payload=%s", token_payload)
+        LOGGER.error("OAuth exchange missing tokens")
         return 500, "Google не вернул refresh_token. Попробуйте подключить заново."
     expires_at = time.time() + float(expires_in) if isinstance(expires_in, (int, float)) else None
     token_store.set_tokens(
