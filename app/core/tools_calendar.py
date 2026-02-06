@@ -43,7 +43,7 @@ async def create_event(
     chat_id: int,
     user_id: int,
     request_id: str | None = None,
-    intent: str = "calendar.add",
+    intent: str = "utility_calendar.add",
 ) -> OrchestratorResult:
     request_label = request_id or "-"
     LOGGER.info(
@@ -172,7 +172,7 @@ async def delete_event(
     item_id: str,
     *,
     user_id: int,
-    intent: str = "utility_calendar.del",
+    intent: str = "utility_calendar.delete",
 ) -> OrchestratorResult:
     backend_mode = _resolve_backend_mode()
     deleted_remote = False
@@ -209,7 +209,7 @@ async def list_calendar_items(
     intent: str = "utility_calendar.list",
 ) -> OrchestratorResult:
     backend_mode = _resolve_backend_mode()
-    start_value = start or datetime.now(tz=timezone.utc)
+    start_value = start or datetime.now(tz=calendar_store.BOT_TZ)
     end_value = end or (start_value + timedelta(days=7))
     if backend_mode == "caldav":
         config = tools_calendar_caldav.load_caldav_config()
@@ -232,12 +232,30 @@ async def list_calendar_items(
                 caldav_error=_safe_caldav_error_label(exc),
             )
         if not events:
-            return ensure_valid(ok("Нет событий.", intent=intent, mode="tool"))
+            return ensure_valid(
+                ok(
+                    "Нет событий на ближайшие 7 дней.",
+                    intent=intent,
+                    mode="tool",
+                    actions=_calendar_list_actions([]),
+                )
+            )
         lines = []
+        event_ids: list[str] = []
+        event_titles: list[str] = []
         for item in events:
             dt_label = item.start_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
             lines.append(f"{item.uid} | {dt_label} | {item.summary}")
-        return ensure_valid(ok("\n".join(lines), intent=intent, mode="tool"))
+            event_ids.append(item.uid)
+            event_titles.append(item.summary)
+        return ensure_valid(
+            ok(
+                "\n".join(lines),
+                intent=intent,
+                mode="tool",
+                actions=_calendar_list_actions(event_ids, event_titles),
+            )
+        )
     return await _list_local_items(start_value, end_value, intent=intent)
 
 
@@ -251,13 +269,33 @@ async def _list_local_items(
     items = await calendar_store.list_items(start=start, end=end)
     if not items:
         debug = {"calendar_backend": "local_fallback", "caldav_error": caldav_error} if caldav_error else {}
-        return ensure_valid(ok("Нет событий.", intent=intent, mode="tool", debug=debug))
+        return ensure_valid(
+            ok(
+                "Нет событий на ближайшие 7 дней.",
+                intent=intent,
+                mode="tool",
+                debug=debug,
+                actions=_calendar_list_actions([]),
+            )
+        )
     lines = []
+    event_ids: list[str] = []
+    event_titles: list[str] = []
     for item in items:
         dt_label = item.dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         lines.append(f"{item.id} | {dt_label} | {item.title}")
+        event_ids.append(item.id)
+        event_titles.append(item.title)
     debug = {"calendar_backend": "local_fallback", "caldav_error": caldav_error} if caldav_error else {}
-    return ensure_valid(ok("\n".join(lines), intent=intent, mode="tool", debug=debug))
+    return ensure_valid(
+        ok(
+            "\n".join(lines),
+            intent=intent,
+            mode="tool",
+            debug=debug,
+            actions=_calendar_list_actions(event_ids, event_titles),
+        )
+    )
 
 
 async def list_reminders(
@@ -268,40 +306,98 @@ async def list_reminders(
 ) -> OrchestratorResult:
     items = await calendar_store.list_reminders(now, limit=limit)
     if not items:
-        return ensure_valid(ok("Нет запланированных напоминаний.", intent=intent, mode="tool"))
+        return ensure_valid(
+            ok(
+                "Нет запланированных напоминаний.",
+                intent=intent,
+                mode="tool",
+                actions=_reminder_list_actions([], limit),
+            )
+        )
     lines = []
-    actions: list[Action] = []
+    actions: list[Action] = _reminder_list_actions(items, limit)
     for item in items:
         when_label = item.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         lines.append(f"{item.id} | {when_label} | {item.text}")
-        actions.append(
-            Action(
-                id=f"reminder_snooze:{item.id}:10",
-                label="⏸ Отложить на 10 минут",
-                payload={
-                    "op": "reminder_snooze",
-                    "reminder_id": item.id,
-                    "minutes": 10,
-                    "base_trigger_at": item.trigger_at.isoformat(),
-                },
-            )
-        )
-        actions.append(
-            Action(
-                id=f"reminder_reschedule:{item.id}",
-                label="✏ Перенести",
-                payload={"op": "reminder_reschedule", "reminder_id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
-            )
-        )
-        actions.append(
-            Action(
-                id=f"reminder_disable:{item.id}",
-                label="🗑 Отключить",
-                payload={"op": "reminder_disable", "reminder_id": item.id},
-            )
-        )
-    actions.append(Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}))
+        actions.extend(_reminder_item_actions(item))
     return ensure_valid(ok("\n".join(lines), intent=intent, mode="tool", actions=actions))
+
+
+def _calendar_list_actions(event_ids: list[str], event_titles: list[str] | None = None) -> list[Action]:
+    actions = [
+        Action(id="utility_calendar.add", label="➕ Добавить", payload={"op": "calendar.add"}),
+        Action(id="utility_calendar.list", label="🔄 Обновить", payload={"op": "calendar.list"}),
+    ]
+    for index, event_id in enumerate(event_ids):
+        if not isinstance(event_id, str) or not event_id:
+            continue
+        title = None
+        if event_titles and index < len(event_titles):
+            title = event_titles[index]
+        label = f"🗑 Удалить: {_short_label(title or event_id)}"
+        actions.append(
+            Action(
+                id="utility_calendar.delete",
+                label=label,
+                payload={"op": "calendar.delete", "event_id": event_id},
+            )
+        )
+    return actions
+
+
+def _reminder_list_actions(items: list[calendar_store.ReminderItem], limit: int) -> list[Action]:
+    actions = [
+        Action(id="utility_reminders.create", label="➕ Создать", payload={"op": "reminder.create"}),
+        Action(id="utility_reminders.list", label="🔄 Обновить", payload={"op": "reminder.list"}),
+        Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}),
+    ]
+    return actions
+
+
+def _reminder_item_actions(item: calendar_store.ReminderItem) -> list[Action]:
+    actions: list[Action] = []
+    label = f"🗑 Удалить: {_short_label(item.text)}"
+    actions.append(
+        Action(
+            id="utility_reminders.delete",
+            label=label,
+            payload={"op": "reminder.delete", "reminder_id": item.id},
+        )
+    )
+    actions.append(
+        Action(
+            id=f"reminder_snooze:{item.id}:10",
+            label="⏸ Отложить на 10 минут",
+            payload={
+                "op": "reminder_snooze",
+                "reminder_id": item.id,
+                "minutes": 10,
+                "base_trigger_at": item.trigger_at.isoformat(),
+            },
+        )
+    )
+    actions.append(
+        Action(
+            id=f"reminder_reschedule:{item.id}",
+            label="✏ Перенести",
+            payload={"op": "reminder_reschedule", "reminder_id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
+        )
+    )
+    actions.append(
+        Action(
+            id=f"reminder_disable:{item.id}",
+            label="🗑 Отключить",
+            payload={"op": "reminder_disable", "reminder_id": item.id},
+        )
+    )
+    return actions
+
+
+def _short_label(value: str, limit: int = 24) -> str:
+    cleaned = value.strip().replace("\n", " ")
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 3)].rstrip() + "..."
 
 
 def is_caldav_configured(settings: object | None = None) -> bool:

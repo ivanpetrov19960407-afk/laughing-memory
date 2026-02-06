@@ -4,6 +4,7 @@ import asyncio
 import calendar
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -816,6 +817,20 @@ def parse_local_datetime(value: str) -> datetime:
 def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
     raw = value.strip()
     lowered = raw.lower()
+    current = (now or datetime.now(tz=VIENNA_TZ)).astimezone(VIENNA_TZ)
+    if lowered.startswith("через"):
+        fragment = lowered.removeprefix("через").strip()
+        hours = 0
+        minutes = 0
+        hours_match = re.search(r"(\d+)\s*(час|часа|часов|ч)\b", fragment)
+        minutes_match = re.search(r"(\d+)\s*(минут|минуты|мин|м)\b", fragment)
+        if hours_match:
+            hours = int(hours_match.group(1))
+        if minutes_match:
+            minutes = int(minutes_match.group(1))
+        if hours or minutes:
+            return current + timedelta(hours=hours, minutes=minutes)
+        raise ValueError("Формат: через 10 минут или через 2 часа")
     if lowered.startswith(("сегодня", "today", "завтра", "tomorrow")):
         parts = raw.split(maxsplit=1)
         if len(parts) < 2:
@@ -825,10 +840,19 @@ def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
             parsed_time = datetime.strptime(time_part, "%H:%M").time()
         except ValueError as exc:
             raise ValueError("Формат времени: HH:MM") from exc
-        base = (now or datetime.now(tz=VIENNA_TZ)).date()
+        base = current.date()
         if lowered.startswith(("завтра", "tomorrow")):
             base = base + timedelta(days=1)
         return _combine_local(base, parsed_time)
+    for fmt in ("%d.%m %H:%M", "%d-%m %H:%M", "%d/%m %H:%M"):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+        candidate = parsed.replace(year=current.year, tzinfo=VIENNA_TZ)
+        if candidate < current:
+            candidate = candidate.replace(year=current.year + 1)
+        return candidate
     return parse_local_datetime(raw)
 
 
