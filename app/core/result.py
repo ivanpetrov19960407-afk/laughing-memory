@@ -241,6 +241,8 @@ def ensure_valid(
         payload = {}
 
     status = payload.get("status")
+    if status == "ratelimited":
+        status = "refused"
     if status not in {"ok", "refused", "error"}:
         status = "error"
 
@@ -262,21 +264,67 @@ def ensure_valid(
     if not isinstance(request_id_value, str):
         request_id_value = ""
 
-    sources = payload.get("sources")
-    if not isinstance(sources, list):
-        sources = []
+    raw_sources = payload.get("sources")
+    sources: list[Source] = []
+    if isinstance(raw_sources, list):
+        for item in raw_sources:
+            if isinstance(item, Source):
+                sources.append(item)
+                continue
+            if isinstance(item, dict):
+                title = item.get("title")
+                url = item.get("url")
+                snippet = item.get("snippet")
+                if isinstance(title, str) and isinstance(url, str) and isinstance(snippet, str):
+                    sources.append(Source(title=title, url=url, snippet=snippet))
 
-    actions = payload.get("actions")
-    if not isinstance(actions, list):
-        actions = []
+    raw_actions = payload.get("actions")
+    actions: list[Action] = []
+    if isinstance(raw_actions, list):
+        for item in raw_actions:
+            if isinstance(item, Action):
+                actions.append(item)
+                continue
+            if isinstance(item, dict):
+                action_id = item.get("id")
+                label = item.get("label")
+                action_payload = item.get("payload")
+                if isinstance(action_id, str) and isinstance(label, str) and isinstance(action_payload, dict):
+                    actions.append(Action(id=action_id, label=label, payload=action_payload))
 
-    attachments = payload.get("attachments")
-    if not isinstance(attachments, list):
-        attachments = []
+    raw_attachments = payload.get("attachments")
+    attachments: list[Attachment] = []
+    if isinstance(raw_attachments, list):
+        for item in raw_attachments:
+            if isinstance(item, Attachment):
+                attachments.append(item)
+                continue
+            if isinstance(item, dict):
+                attachment_type = item.get("type")
+                name = item.get("name")
+                path = item.get("path")
+                payload_bytes = item.get("bytes")
+                url = item.get("url")
+                if _validate_attachment_fields(attachment_type, name, path, payload_bytes, url):
+                    attachments.append(
+                        Attachment(
+                            type=attachment_type,
+                            name=name,
+                            path=path,
+                            bytes=payload_bytes,
+                            url=url,
+                        )
+                    )
 
     debug = payload.get("debug")
     if not isinstance(debug, dict):
         debug = {}
+
+    if not sources:
+        text = _strip_pseudo_sources(text)
+
+    if not text.strip():
+        text = "Не удалось сформировать ответ." if status == "ok" else "Не могу выполнить запрос. Открой /menu."
 
     return OrchestratorResult(
         text=text,
