@@ -172,7 +172,7 @@ class ReminderScheduler:
         event = await self._store.get_event(reminder.event_id)
         event_dt = event.dt if event else reminder.trigger_at
         event_label = event_dt.astimezone(self._timezone).strftime("%Y-%m-%d %H:%M")
-        text = f"⏰ Напоминание: {reminder.text}\nКогда: {event_label} (МСК)"
+        text = f"⏰ Напоминание: {reminder.text}\nКогда: {event_label} (Вильнюс)"
         actions = _build_reminder_actions(reminder)
         action_store = self._application.bot_data.get("action_store")
         reply_markup = None

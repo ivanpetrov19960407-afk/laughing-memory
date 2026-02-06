@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.core import calendar_store
 from app.core import tools_calendar_caldav
-from app.core.tools_calendar import create_event, list_calendar_items
+from app.core.tools_calendar import create_event, list_calendar_items, list_reminders
 
 
 def test_calendar_tool_defaults_to_local_backend(tmp_path, monkeypatch) -> None:
@@ -102,6 +102,26 @@ def test_calendar_tool_lists_events(tmp_path, monkeypatch) -> None:
 
     assert result.status == "ok"
     assert "evt-2" in result.text
+
+
+def test_list_reminders_includes_delete_actions(tmp_path, monkeypatch) -> None:
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.BOT_TZ)
+    asyncio.run(
+        calendar_store.add_reminder(
+            trigger_at=now + timedelta(minutes=30),
+            text="Check",
+            chat_id=10,
+            user_id=1,
+            enabled=True,
+        )
+    )
+
+    result = asyncio.run(list_reminders(now, limit=5, intent="utility_reminders.list"))
+
+    assert result.status == "ok"
+    assert any(action.payload.get("op") == "reminder.delete" for action in result.actions)
 
 
 def test_calendar_tool_fallbacks_to_local_on_caldav_error(tmp_path, monkeypatch) -> None:

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from types import SimpleNamespace
 
 import telegram
 
 from app.bot import actions, handlers, menu
+from app.core import calendar_store
 from app.core.result import Action, ok
 from app.infra.request_context import start_request
 from app.infra.rate_limiter import RateLimiter
@@ -199,6 +201,103 @@ def test_callback_aliases_calendar_list_intent(monkeypatch) -> None:
     assert captured["dispatch_intent"] == "utility_calendar.list"
     assert captured["input_text"] == "<callback:utility_calendar.list>"
     assert result.intent == "utility_calendar.list"
+
+
+def test_callback_calendar_delete_removes_event(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_send_result(update, context, result, reply_markup=None):
+        captured["result"] = result
+
+    async def fake_guard_access(update, context, bucket="default"):
+        return True
+
+    async def fake_answer():
+        return None
+
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    monkeypatch.setenv("CALENDAR_BACKEND", "local")
+
+    event = asyncio.run(
+        calendar_store.add_item(
+            dt=datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.BOT_TZ),
+            title="Test",
+            chat_id=10,
+            user_id=1,
+            reminders_enabled=False,
+        )
+    )
+    event_id = event["event"]["event_id"]
+
+    update = DummyUpdate()
+    context = DummyContext()
+    store = context.application.bot_data["action_store"]
+    action = Action(
+        id="utility_calendar.delete",
+        label="Delete",
+        payload={"op": "calendar.delete", "event_id": event_id},
+    )
+    action_id = store.store_action(action=action, user_id=1, chat_id=10)
+    update.callback_query = SimpleNamespace(data=f"a:{action_id}", answer=fake_answer)
+
+    monkeypatch.setattr(handlers, "send_result", fake_send_result)
+    monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
+
+    asyncio.run(handlers.action_callback(update, context))
+
+    result = captured["result"]
+    assert result.status == "ok"
+    assert result.intent == "utility_calendar.delete"
+    removed = asyncio.run(calendar_store.get_event(event_id))
+    assert removed is None
+
+
+def test_callback_reminder_delete_disables_reminder(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_send_result(update, context, result, reply_markup=None):
+        captured["result"] = result
+
+    async def fake_guard_access(update, context, bucket="default"):
+        return True
+
+    async def fake_answer():
+        return None
+
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+
+    reminder = asyncio.run(
+        calendar_store.add_reminder(
+            trigger_at=datetime(2026, 2, 5, 12, 0, tzinfo=calendar_store.BOT_TZ),
+            text="Ping",
+            chat_id=10,
+            user_id=1,
+        )
+    )
+
+    update = DummyUpdate()
+    context = DummyContext()
+    store = context.application.bot_data["action_store"]
+    action = Action(
+        id="utility_reminders.delete",
+        label="Delete",
+        payload={"op": "reminder.delete", "reminder_id": reminder.id},
+    )
+    action_id = store.store_action(action=action, user_id=1, chat_id=10)
+    update.callback_query = SimpleNamespace(data=f"a:{action_id}", answer=fake_answer)
+
+    monkeypatch.setattr(handlers, "send_result", fake_send_result)
+    monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
+
+    asyncio.run(handlers.action_callback(update, context))
+
+    result = captured["result"]
+    assert result.status == "ok"
+    assert result.intent == "utility_reminders.delete"
+    reminders = asyncio.run(calendar_store.list_reminders(datetime(2026, 2, 5, 11, 0, tzinfo=calendar_store.BOT_TZ), limit=10))
+    assert all(item.id != reminder.id for item in reminders)
 
 
 def test_send_result_deduplicates(monkeypatch) -> None:

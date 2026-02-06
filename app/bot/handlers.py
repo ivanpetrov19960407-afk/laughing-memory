@@ -424,6 +424,22 @@ def _menu_action() -> Action:
     return Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_section", "section": "home"})
 
 
+def _calendar_list_controls_actions() -> list[Action]:
+    return [
+        Action(id="utility_calendar.add", label="➕ Добавить", payload={"op": "calendar.add"}),
+        Action(id="utility_calendar.list", label="🔄 Обновить", payload={"op": "calendar.list"}),
+        _menu_action(),
+    ]
+
+
+def _reminder_list_controls_actions() -> list[Action]:
+    return [
+        Action(id="utility_reminders.create", label="➕ Создать", payload={"op": "reminder.create"}),
+        Action(id="utility_reminders.list", label="🔄 Обновить", payload={"op": "reminder.list"}),
+        _menu_action(),
+    ]
+
+
 def _build_user_context_with_dialog(
     update: Update,
     *,
@@ -1386,14 +1402,14 @@ async def _handle_menu_section(
             mode="local",
             actions=[
                 Action(
-                    id="calendar.add",
+                    id="utility_calendar.add",
                     label="➕ Добавить",
                     payload={"op": "wizard_start", "wizard_id": wizard.WIZARD_CALENDAR_ADD},
                 ),
                 Action(
                     id="calendar.list",
                     label="📋 Список",
-                    payload={"op": "run_command", "command": "/calendar list", "args": ""},
+                    payload={"op": "calendar.list"},
                 ),
                 _menu_action(),
             ],
@@ -1405,14 +1421,14 @@ async def _handle_menu_section(
             mode="local",
             actions=[
                 Action(
-                    id="reminders.create",
+                    id="utility_reminders.create",
                     label="➕ Создать",
                     payload={"op": "wizard_start", "wizard_id": wizard.WIZARD_REMINDER_CREATE},
                 ),
                 Action(
-                    id="reminders.list",
+                    id="utility_reminders.list",
                     label="📋 Список",
-                    payload={"op": "reminders_list", "limit": 5},
+                    payload={"op": "reminder.list"},
                 ),
                 _menu_action(),
             ],
@@ -1746,6 +1762,102 @@ async def _dispatch_action_payload(
                 mode="local",
             )
         return result
+    if op_value == "calendar.add":
+        if not _wizards_enabled(context):
+            return refused("Сценарии отключены.", intent="wizard.disabled", mode="local")
+        manager = _get_wizard_manager(context)
+        if manager is None:
+            return error("Сценарии не настроены.", intent="wizard.missing", mode="local")
+        result = await manager.handle_action(
+            user_id=user_id,
+            chat_id=chat_id,
+            op="wizard_start",
+            payload={"wizard_id": wizard.WIZARD_CALENDAR_ADD},
+        )
+        return result if result is not None else refused("Сценарий не активен.", intent="wizard.inactive", mode="local")
+    if op_value == "calendar.list":
+        days = payload.get("days", 7)
+        days_value = days if isinstance(days, int) else 7
+        start = datetime.now(tz=calendar_store.BOT_TZ)
+        end = start + timedelta(days=max(1, days_value))
+        result = await list_calendar_items(start, end, intent="utility_calendar.list", user_id=user_id)
+        return replace(result, mode="local", intent="utility_calendar.list")
+    if op_value == "calendar.delete":
+        event_id = payload.get("event_id")
+        if not isinstance(event_id, str) or not event_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="utility_calendar.delete",
+                mode="local",
+                debug={"reason": "invalid_event_id"},
+            )
+        deleted = await delete_event(event_id, intent="utility_calendar.delete", user_id=user_id)
+        if deleted.status != "ok":
+            if deleted.status == "refused":
+                return refused(
+                    "Кнопка устарела, открой список заново.",
+                    intent="utility_calendar.delete",
+                    mode="local",
+                )
+            return replace(
+                deleted,
+                mode="local",
+                intent="utility_calendar.delete",
+                actions=_calendar_list_controls_actions(),
+            )
+        return replace(
+            deleted,
+            mode="local",
+            intent="utility_calendar.delete",
+            actions=_calendar_list_controls_actions(),
+        )
+    if op_value == "reminder.create":
+        if not _wizards_enabled(context):
+            return refused("Сценарии отключены.", intent="wizard.disabled", mode="local")
+        manager = _get_wizard_manager(context)
+        if manager is None:
+            return error("Сценарии не настроены.", intent="wizard.missing", mode="local")
+        result = await manager.handle_action(
+            user_id=user_id,
+            chat_id=chat_id,
+            op="wizard_start",
+            payload={"wizard_id": wizard.WIZARD_REMINDER_CREATE},
+        )
+        return result if result is not None else refused("Сценарий не активен.", intent="wizard.inactive", mode="local")
+    if op_value == "reminder.list":
+        limit = payload.get("limit", 5)
+        limit_value = limit if isinstance(limit, int) else 5
+        result = await _handle_reminders_list(context, limit=max(1, limit_value), intent="utility_reminders.list")
+        return replace(result, mode="local", intent="utility_reminders.list")
+    if op_value == "reminder.delete":
+        reminder_id = payload.get("reminder_id") or payload.get("id")
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="utility_reminders.delete",
+                mode="local",
+                debug={"reason": "invalid_reminder_id"},
+            )
+        result = await _handle_reminder_delete(context, reminder_id=reminder_id)
+        if result.status != "ok":
+            if result.status == "refused":
+                return refused(
+                    "Кнопка устарела, открой список заново.",
+                    intent="utility_reminders.delete",
+                    mode="local",
+                )
+            return replace(
+                result,
+                mode="local",
+                intent="utility_reminders.delete",
+                actions=_reminder_list_controls_actions(),
+            )
+        return replace(
+            result,
+            mode="local",
+            intent="utility_reminders.delete",
+            actions=_reminder_list_controls_actions(),
+        )
     if op_value == "run_command":
         command = payload.get("command")
         args = payload.get("args", "")
@@ -1920,7 +2032,7 @@ async def _dispatch_command_payload(
         return await orchestrator.handle(f"/search {query}", _build_user_context(update))
     if normalized == "/reminders":
         now = datetime.now(tz=calendar_store.BOT_TZ)
-        return await list_reminders(now, limit=5, intent="menu.reminders")
+        return await list_reminders(now, limit=5, intent="utility_reminders.list")
     if normalized in {"/facts_on", "/facts_off"}:
         user_id = update.effective_user.id if update.effective_user else 0
         enabled = normalized == "/facts_on"
@@ -1956,7 +2068,7 @@ async def _handle_reminders_list(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     limit: int = 5,
-    intent: str = "menu.reminders",
+    intent: str = "utility_reminders.list",
 ) -> OrchestratorResult:
     now = datetime.now(tz=calendar_store.BOT_TZ)
     return await list_reminders(now, limit=limit, intent=intent)
@@ -2406,7 +2518,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id=chat_id,
             user_id=user_id,
             request_id=request_context.request_id if request_context else None,
-            intent="calendar.add",
+            intent="utility_calendar.add",
         )
         result = replace(tool_result, mode="local")
         await send_result(update, context, result)
@@ -2443,7 +2555,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         today = datetime.now(tz=calendar_store.MOSCOW_TZ).date()
         start, end = calendar_store.day_bounds(today)
         result = replace(
-            await list_calendar_items(start, end, intent="utility_calendar.today", user_id=user_id),
+            await list_calendar_items(start, end, intent="utility_calendar.list", user_id=user_id),
             mode="local",
         )
         await send_result(update, context, result)
@@ -2452,7 +2564,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         today = datetime.now(tz=calendar_store.MOSCOW_TZ).date()
         start, end = calendar_store.week_bounds(today)
         result = replace(
-            await list_calendar_items(start, end, intent="utility_calendar.week", user_id=user_id),
+            await list_calendar_items(start, end, intent="utility_calendar.list", user_id=user_id),
             mode="local",
         )
         await send_result(update, context, result)
@@ -2461,17 +2573,17 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if len(args) < 2:
             result = refused(
                 "Использование: /calendar del <id>.",
-                intent="utility_calendar.del",
+                intent="utility_calendar.delete",
                 mode="local",
             )
             await send_result(update, context, result)
             return
         item_id = args[1].strip()
         if not item_id:
-            result = refused("Укажите id для удаления.", intent="utility_calendar.del", mode="local")
+            result = refused("Укажите id для удаления.", intent="utility_calendar.delete", mode="local")
             await send_result(update, context, result)
             return
-        tool_result = await delete_event(item_id, intent="utility_calendar.del", user_id=user_id)
+        tool_result = await delete_event(item_id, intent="utility_calendar.delete", user_id=user_id)
         reminder_id = tool_result.debug.get("reminder_id") if isinstance(tool_result.debug, dict) else None
         scheduler = _get_reminder_scheduler(context)
         if reminder_id and scheduler:
