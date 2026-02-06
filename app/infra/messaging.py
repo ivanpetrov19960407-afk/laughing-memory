@@ -91,6 +91,14 @@ async def safe_edit_text(
     except BadRequest as exc:
         msg = str(exc)
         # Нормально для устаревших кнопок (callback уже протух).
+        if "Message is not modified" in msg:
+            LOGGER.info("Telegram edit skipped (message not modified): %s", msg)
+            try:
+                await callback_query.answer("Сообщение уже актуально.")
+            except BadRequest as answer_exc:
+                LOGGER.debug("Failed to answer callback query after edit skip: %s", answer_exc)
+            add_response_size(context, len(payload))
+            return len(payload)
         if "Query is too old" in msg or "response timeout expired" in msg or "query id is invalid" in msg:
             LOGGER.info("Telegram rejected callback edit (expired): %s", msg)
         elif "Message is too long" in msg:

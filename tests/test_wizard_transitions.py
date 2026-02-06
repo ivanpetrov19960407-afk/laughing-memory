@@ -11,6 +11,7 @@ from app.core import calendar_store
 def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    monkeypatch.setenv("CALENDAR_CONNECTED", "1")
     store = WizardStore(tmp_path / "wizards", timeout_seconds=600)
     manager = WizardManager(store)
 
@@ -54,6 +55,36 @@ def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
 
     items = asyncio.run(calendar_store.list_items(None, None))
     assert any(item.title == "Врач" for item in items)
+
+
+def test_wizard_calendar_refuses_without_connection(tmp_path, monkeypatch) -> None:
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    monkeypatch.delenv("CALENDAR_CONNECTED", raising=False)
+    store = WizardStore(tmp_path / "wizards", timeout_seconds=600)
+    manager = WizardManager(store)
+
+    asyncio.run(
+        manager.handle_action(
+            user_id=2,
+            chat_id=20,
+            op="wizard_start",
+            payload={"wizard_id": WIZARD_CALENDAR_ADD},
+        )
+    )
+    asyncio.run(manager.handle_text(user_id=2, chat_id=20, text="2026-02-05 18:30"))
+    asyncio.run(manager.handle_text(user_id=2, chat_id=20, text="Врач"))
+    confirm = asyncio.run(
+        manager.handle_action(
+            user_id=2,
+            chat_id=20,
+            op="wizard_confirm",
+            payload={},
+        )
+    )
+    assert confirm.status == "refused"
+    assert "Календарь не подключён" in confirm.text
+    assert "Событие добавлено" not in confirm.text
 
 
 def test_wizard_cancel_and_timeout(tmp_path) -> None:

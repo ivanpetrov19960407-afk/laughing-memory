@@ -69,6 +69,7 @@ def test_ratelimited_result_is_valid() -> None:
 def test_tool_calendar_returns_result(tmp_path, monkeypatch) -> None:
     path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(path))
+    monkeypatch.setenv("CALENDAR_CONNECTED", "1")
     calendar_store.save_store_atomic({"events": [], "reminders": [], "updated_at": datetime.now().isoformat()})
     result = asyncio.run(list_calendar_items(None, None))
     assert isinstance(result, OrchestratorResult)

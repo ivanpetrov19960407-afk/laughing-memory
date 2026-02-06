@@ -105,7 +105,7 @@ def test_menu_command_returns_actions(monkeypatch) -> None:
     assert result.actions
 
 
-def test_callback_unknown_action_returns_refused(monkeypatch) -> None:
+def test_expired_action_returns_refused_text(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     async def fake_send_result(update, context, result, reply_markup=None):
