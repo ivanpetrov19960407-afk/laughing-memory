@@ -132,7 +132,7 @@ def _build_google_oauth_url(context: ContextTypes.DEFAULT_TYPE, *, user_id: int)
     if not isinstance(base, str) or not base:
         return None
     base = base.rstrip("/")
-    return f"{base}/oauth/google/start?user_id={user_id}"
+    return f"{base}/oauth2/start?state={user_id}"
 
 
 async def _handle_google_calendar_settings(
@@ -255,6 +255,15 @@ def _with_error_handling(
             log_request(LOGGER, request_context)
 
     return wrapper
+
+
+@_with_error_handling
+async def google_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context, bucket="ui"):
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    result = await _handle_google_calendar_settings(context, user_id=user_id)
+    await send_result(update, context, result)
 
 
 async def _handle_exception(update: Update, context: ContextTypes.DEFAULT_TYPE, error: Exception) -> None:
@@ -1433,7 +1442,7 @@ async def _handle_menu_section(
             actions=[
                 Action(
                     id="settings.google_calendar",
-                    label="🔗 Подключить Google Calendar",
+                    label="📅 Google Calendar → Подключить",
                     payload={"op": "google_calendar_settings"},
                 ),
                 Action(

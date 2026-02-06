@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import json
 import os
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+
+DEFAULT_TOKENS_DB_PATH = Path("data/google_tokens.db")
 
 
 @dataclass(frozen=True)
@@ -27,44 +30,42 @@ class GoogleTokenStore:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock = threading.Lock()
-        self._tokens: dict[str, dict[str, object]] = {}
+        self._ensure_parent()
+        self._init_db()
 
     @classmethod
     def from_env(cls) -> "GoogleTokenStore":
-        path = Path(os.getenv("GOOGLE_TOKENS_PATH", "data/google_tokens.json"))
+        raw = os.getenv("GOOGLE_TOKENS_DB_PATH") or os.getenv("GOOGLE_TOKENS_PATH")
+        path = Path(raw) if raw else DEFAULT_TOKENS_DB_PATH
         store = cls(path)
         store.load()
         return store
 
     def load(self) -> None:
         with self._lock:
-            if not self._path.exists():
-                self._tokens = {}
-                return
-            try:
-                with self._path.open("r", encoding="utf-8") as handle:
-                    raw = json.load(handle)
-            except json.JSONDecodeError:
-                self._tokens = {}
-                return
-            tokens = raw.get("tokens") if isinstance(raw, dict) else None
-            self._tokens = tokens if isinstance(tokens, dict) else {}
+            self._init_db()
 
     def get_tokens(self, user_id: int) -> GoogleTokens | None:
-        with self._lock:
-            entry = self._tokens.get(str(user_id))
-            if not isinstance(entry, dict):
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT access_token, refresh_token, expires_at, token_type, scope
+                FROM google_tokens
+                WHERE user_id = ?
+                """,
+                (str(user_id),),
+            ).fetchone()
+            if row is None:
                 return None
-            access_token = entry.get("access_token")
-            refresh_token = entry.get("refresh_token")
-            expires_at = entry.get("expires_at")
-            token_type = entry.get("token_type")
-            scope = entry.get("scope")
-            if not isinstance(access_token, str) or not isinstance(refresh_token, str):
+            access_token, refresh_token, expires_at, token_type, scope = row
+            if not isinstance(refresh_token, str) or not refresh_token:
+                return None
+            access_token_value = access_token if isinstance(access_token, str) else ""
+            if not access_token_value:
                 return None
             expires_at_value = expires_at if isinstance(expires_at, (int, float)) else None
             return GoogleTokens(
-                access_token=access_token,
+                access_token=access_token_value,
                 refresh_token=refresh_token,
                 expires_at=expires_at_value,
                 token_type=token_type if isinstance(token_type, str) else None,
@@ -72,16 +73,41 @@ class GoogleTokenStore:
             )
 
     def set_tokens(self, user_id: int, tokens: GoogleTokens) -> None:
-        with self._lock:
-            self._tokens[str(user_id)] = {
-                "access_token": tokens.access_token,
-                "refresh_token": tokens.refresh_token,
-                "expires_at": tokens.expires_at,
-                "token_type": tokens.token_type,
-                "scope": tokens.scope,
-                "updated_at": time.time(),
-            }
-            self._save()
+        now_iso = _utcnow_iso()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO google_tokens (
+                    user_id,
+                    refresh_token,
+                    access_token,
+                    expires_at,
+                    token_type,
+                    scope,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    refresh_token = excluded.refresh_token,
+                    access_token = excluded.access_token,
+                    expires_at = excluded.expires_at,
+                    token_type = excluded.token_type,
+                    scope = excluded.scope,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(user_id),
+                    tokens.refresh_token,
+                    tokens.access_token,
+                    tokens.expires_at,
+                    tokens.token_type,
+                    tokens.scope,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            conn.commit()
 
     def update_access_token(
         self,
@@ -92,28 +118,60 @@ class GoogleTokenStore:
         scope: str | None = None,
         token_type: str | None = None,
     ) -> None:
-        with self._lock:
-            entry = self._tokens.get(str(user_id))
-            if not isinstance(entry, dict):
-                return
-            entry["access_token"] = access_token
-            entry["expires_at"] = expires_at
-            if scope is not None:
-                entry["scope"] = scope
-            if token_type is not None:
-                entry["token_type"] = token_type
-            entry["updated_at"] = time.time()
-            self._save()
+        now_iso = _utcnow_iso()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE google_tokens
+                SET access_token = ?,
+                    expires_at = ?,
+                    scope = COALESCE(?, scope),
+                    token_type = COALESCE(?, token_type),
+                    updated_at = ?
+                WHERE user_id = ?
+                """,
+                (
+                    access_token,
+                    expires_at,
+                    scope,
+                    token_type,
+                    now_iso,
+                    str(user_id),
+                ),
+            )
+            conn.commit()
 
     def delete_tokens(self, user_id: int) -> None:
-        with self._lock:
-            self._tokens.pop(str(user_id), None)
-            self._save()
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM google_tokens WHERE user_id = ?", (str(user_id),))
+            conn.commit()
 
-    def _save(self) -> None:
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._path, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        return conn
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS google_tokens (
+                    user_id TEXT PRIMARY KEY,
+                    refresh_token TEXT NOT NULL,
+                    access_token TEXT,
+                    expires_at REAL,
+                    token_type TEXT,
+                    scope TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+                """
+            )
+            conn.commit()
+
+    def _ensure_parent(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"tokens": self._tokens, "updated_at": time.time()}
-        tmp_path = self._path.with_suffix(".tmp")
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-        tmp_path.replace(self._path)
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
