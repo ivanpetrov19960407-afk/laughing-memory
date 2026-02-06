@@ -45,6 +45,8 @@ class GoogleTokenStore:
     def load(self) -> None:
         with self._lock:
             self._init_db()
+            # Drop in-memory cache to reflect persistent state.
+            self._access_cache = {}
 
     def get_tokens(self, user_id: int) -> GoogleTokens | None:
         user_key = str(user_id)
