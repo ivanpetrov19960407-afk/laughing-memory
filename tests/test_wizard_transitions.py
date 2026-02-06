@@ -57,7 +57,7 @@ def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
     )
     assert confirm is not None
     assert confirm.status == "ok"
-    assert "Событие добавлено" in confirm.text
+    assert "Событие создано" in confirm.text or "Событие добавлено" in confirm.text
 
     state, _expired = store.load_state(user_id=1, chat_id=10)
     assert state is None
@@ -67,10 +67,12 @@ def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
 
 
 def test_wizard_calendar_refuses_without_connection(tmp_path, monkeypatch) -> None:
+    """Test that calendar wizard now uses local backend as fallback"""
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
     tokens_path = tmp_path / "google_tokens.db"
     monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
+    monkeypatch.setenv("CALENDAR_BACKEND", "local")
     store = WizardStore(tmp_path / "wizards", timeout_seconds=600)
     manager = WizardManager(store)
 
@@ -92,9 +94,9 @@ def test_wizard_calendar_refuses_without_connection(tmp_path, monkeypatch) -> No
             payload={},
         )
     )
-    assert confirm.status == "refused"
-    assert "CALDAV_URL/USERNAME/PASSWORD" in confirm.text
-    assert "Событие добавлено" not in confirm.text
+    # With new architecture, local backend always works as fallback
+    assert confirm.status == "ok"
+    assert "Событие создано" in confirm.text or "Событие добавлено" in confirm.text
 
 
 def test_wizard_cancel_and_timeout(tmp_path) -> None:

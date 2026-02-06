@@ -2426,15 +2426,17 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             await send_result(update, context, result)
             return
-        tool_result = await list_calendar_items(start, end, intent="utility_calendar.list", user_id=user_id)
+        chat_id = update.effective_chat.id if update.effective_chat else 0
+        tool_result = await list_calendar_items(start, end, intent="utility_calendar.list", user_id=user_id, chat_id=chat_id)
         result = replace(tool_result, mode="local")
         await send_result(update, context, result)
         return
     if command == "today":
         today = datetime.now(tz=calendar_store.MOSCOW_TZ).date()
         start, end = calendar_store.day_bounds(today)
+        chat_id = update.effective_chat.id if update.effective_chat else 0
         result = replace(
-            await list_calendar_items(start, end, intent="utility_calendar.today", user_id=user_id),
+            await list_calendar_items(start, end, intent="utility_calendar.today", user_id=user_id, chat_id=chat_id),
             mode="local",
         )
         await send_result(update, context, result)
@@ -2442,8 +2444,9 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if command == "week":
         today = datetime.now(tz=calendar_store.MOSCOW_TZ).date()
         start, end = calendar_store.week_bounds(today)
+        chat_id = update.effective_chat.id if update.effective_chat else 0
         result = replace(
-            await list_calendar_items(start, end, intent="utility_calendar.week", user_id=user_id),
+            await list_calendar_items(start, end, intent="utility_calendar.week", user_id=user_id, chat_id=chat_id),
             mode="local",
         )
         await send_result(update, context, result)
@@ -2462,7 +2465,8 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             result = refused("Укажите id для удаления.", intent="utility_calendar.del", mode="local")
             await send_result(update, context, result)
             return
-        tool_result = await delete_event(item_id, intent="utility_calendar.del", user_id=user_id)
+        chat_id = update.effective_chat.id if update.effective_chat else 0
+        tool_result = await delete_event(item_id, intent="utility_calendar.del", user_id=user_id, chat_id=chat_id)
         reminder_id = tool_result.debug.get("reminder_id") if isinstance(tool_result.debug, dict) else None
         scheduler = _get_reminder_scheduler(context)
         if reminder_id and scheduler:

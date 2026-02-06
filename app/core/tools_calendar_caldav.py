@@ -84,6 +84,7 @@ def _check_connection_sync(config: CalDAVConfig) -> tuple[bool, str | None]:
         name = _calendar_name(calendar)
         return True, name
     except Exception as exc:
+        # Log only error class name to avoid leaking credentials
         LOGGER.warning("CalDAV connection failed: %s", exc.__class__.__name__)
         return False, None
 

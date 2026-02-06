@@ -70,15 +70,9 @@ def test_ratelimited_result_is_valid() -> None:
 def test_tool_calendar_returns_result(tmp_path, monkeypatch) -> None:
     path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(path))
-    monkeypatch.setenv("CALDAV_URL", "https://caldav.example.com")
-    monkeypatch.setenv("CALDAV_USERNAME", "user")
-    monkeypatch.setenv("CALDAV_PASSWORD", "pass")
-    async def fake_list_events(*args, **kwargs):
-        return []
-
-    monkeypatch.setattr("app.core.tools_calendar_caldav.list_events", fake_list_events)
+    monkeypatch.setenv("CALENDAR_BACKEND", "local")
     calendar_store.save_store_atomic({"events": [], "reminders": [], "updated_at": datetime.now().isoformat()})
-    result = asyncio.run(list_calendar_items(None, None, user_id=1))
+    result = asyncio.run(list_calendar_items(None, None, user_id=1, chat_id=10))
     assert isinstance(result, OrchestratorResult)
     result.validate()
 
