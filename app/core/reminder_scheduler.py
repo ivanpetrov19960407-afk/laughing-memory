@@ -162,9 +162,9 @@ def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Actio
     )
     actions.append(
         Action(
-            id=f"reminder_delete:{reminder.id}",
+            id="utility_reminders.delete",
             label="🗑 Удалить",
-            payload={"op": "reminder_delete", "id": reminder.id},
+            payload={"op": "reminder.delete", "reminder_id": reminder.id},
         )
     )
     return actions
