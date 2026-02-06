@@ -1,0 +1,26 @@
+[Unit]
+Description=Telegram bot OAuth web service (Google Calendar)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/telegram-bot
+# Put your environment variables into this file (BOT_TOKEN, GOOGLE_OAUTH_*, PUBLIC_BASE_URL, GOOGLE_TOKENS_DB_PATH, OAUTH_WEB_PORT, ...)
+EnvironmentFile=/opt/telegram-bot/.env
+
+# Prefer running from a venv if you have one:
+# ExecStart=/opt/telegram-bot/venv/bin/python -m app.infra.google_oauth_web
+ExecStart=/usr/bin/python3 -m app.infra.google_oauth_web
+
+Restart=on-failure
+RestartSec=2
+
+# Hardening (safe defaults for a localhost-only web service)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+
