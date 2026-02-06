@@ -578,7 +578,10 @@ async def _send_reply_keyboard_remove(
 
 async def _safe_answer_callback(query: telegram.CallbackQuery, text: str | None = None) -> None:
     try:
-        await query.answer(text)
+        try:
+            await query.answer(text)
+        except TypeError:
+            await query.answer()
     except telegram.error.BadRequest as exc:
         message = str(exc)
         if "Query is too old" in message or "response timeout expired" in message or "query id is invalid" in message:
@@ -1700,7 +1703,6 @@ async def _dispatch_action_payload(
     payload: dict[str, object],
     intent: str,
 ) -> OrchestratorResult:
-    orchestrator = _get_orchestrator(context)
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else None
     if chat_id is None:
@@ -1959,6 +1961,7 @@ async def _dispatch_action_payload(
         return await _handle_caldav_settings(context, user_id=user_id)
     if op_value == "caldav_check":
         return await _handle_caldav_check(context)
+    orchestrator = _get_orchestrator(context)
     if intent == "task.execute":
         task_name = payload.get("name")
         task_payload = payload.get("payload")
