@@ -11,6 +11,8 @@ from app.core.actions_log import ActionLogEntry
 
 LOGGER = logging.getLogger(__name__)
 
+ACTION_LOG_SCHEMA_VERSION = 1
+
 
 class ActionsLogStore:
     def __init__(self, db_path: Path) -> None:
@@ -28,10 +30,17 @@ class ActionsLogStore:
                 ts TEXT NOT NULL,
                 action_type TEXT NOT NULL,
                 payload TEXT NOT NULL,
-                correlation_id TEXT
+                correlation_id TEXT,
+                schema_version INTEGER NOT NULL DEFAULT 1
             )
             """
         )
+        columns = self._connection.execute("PRAGMA table_info(user_actions)").fetchall()
+        column_names = {row[1] for row in columns}
+        if "schema_version" not in column_names:
+            self._connection.execute(
+                "ALTER TABLE user_actions ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
+            )
         self._connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_user_actions_user_ts ON user_actions (user_id, ts DESC)"
         )
@@ -50,10 +59,10 @@ class ActionsLogStore:
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         cursor = self._connection.execute(
             """
-            INSERT INTO user_actions (user_id, ts, action_type, payload, correlation_id)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO user_actions (user_id, ts, action_type, payload, correlation_id, schema_version)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (user_id, timestamp, action_type, encoded, correlation_id),
+            (user_id, timestamp, action_type, encoded, correlation_id, ACTION_LOG_SCHEMA_VERSION),
         )
         self._connection.commit()
         entry_id = cursor.lastrowid if cursor.lastrowid else 0
@@ -91,11 +100,14 @@ class ActionsLogStore:
             else:
                 sql += " AND (action_type LIKE ? OR payload LIKE ?)"
                 params.extend([f"%{normalized_query}%", f"%{normalized_query}%"])
-        sql += " ORDER BY id DESC LIMIT ?"
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
         params.append(limit)
         cursor = self._connection.execute(sql, params)
         rows = cursor.fetchall()
         return [_row_to_entry(row) for row in rows]
+
+    def list_recent(self, *, user_id: int, limit: int = 10) -> list[ActionLogEntry]:
+        return self.search(user_id=user_id, query=None, limit=limit)
 
     def close(self) -> None:
         try:
@@ -132,4 +144,3 @@ def _parse_datetime(value: str | None) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
-

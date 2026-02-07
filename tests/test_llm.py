@@ -4,9 +4,12 @@ from pathlib import Path
 
 from app.core.orchestrator import Orchestrator
 from app.core.models import TaskExecutionResult
+from app.core.memory_layers import UserProfileLayer, build_memory_layers_context
 from app.infra.access import AccessController
 from app.infra.rate_limit import RateLimiter
+from app.infra.request_context import RequestContext
 from app.infra.storage import TaskStorage
+from app.infra.user_profile_store import UserProfileStore
 
 
 class FakeLLMClient:
@@ -174,3 +177,36 @@ def test_orchestrator_context_appends_history(tmp_path: Path) -> None:
         {"role": "assistant", "content": "fine"},
         {"role": "user", "content": "new message"},
     ]
+
+
+def test_orchestrator_uses_memory_context(tmp_path: Path) -> None:
+    db_path = tmp_path / "bot.db"
+    storage = TaskStorage(db_path)
+    client = CaptureLLMClient()
+    orchestrator = Orchestrator(config={}, storage=storage, llm_client=client)
+    profile_store = UserProfileStore(tmp_path / "profiles.db")
+    profile_store.update(1, {"language": "en", "timezone": "Europe/London", "verbosity": "short"})
+    request_context = RequestContext(
+        correlation_id="corr-ctx",
+        user_id=1,
+        chat_id=2,
+        message_id=3,
+        timezone=None,
+        ts=datetime.now(timezone.utc),
+        env="dev",
+    )
+    memory_context = build_memory_layers_context(
+        request_context,
+        memory_store=None,
+        profile_layer=UserProfileLayer(profile_store),
+        actions_layer=None,
+        max_chars=500,
+    )
+
+    assert memory_context is not None
+    asyncio.run(orchestrator.handle("/ask Привет", {"user_id": 1, "memory_context": memory_context}))
+
+    last_message = client.last_messages[-1]["content"]
+    assert "Профиль пользователя" in last_message
+    assert "Europe/London" in last_message
+    assert last_message.endswith("Привет")

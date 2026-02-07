@@ -781,10 +781,10 @@ def _log_action_from_result(
         return
     intent = result.intent or ""
     mapping = {
-        "utility_calendar.add": "calendar.create",
-        "utility_calendar.delete": "calendar.delete",
-        "utility_calendar.update": "calendar.update",
-        "utility_calendar.move": "calendar.update",
+        "utility_calendar.add": "calendar.event.create",
+        "utility_calendar.delete": "calendar.event.delete",
+        "utility_calendar.update": "calendar.event.update",
+        "utility_calendar.move": "calendar.event.update",
         "utility_reminders.create": "reminder.create",
         "utility_reminders.add": "reminder.create",
         "utility_reminders.delete": "reminder.delete",
@@ -792,10 +792,13 @@ def _log_action_from_result(
         "utility_reminders.off": "reminder.disable",
         "utility_reminders.on": "reminder.enable",
         "utility_reminders.reschedule": "reminder.reschedule",
+        "utility_reminders.snooze": "reminder.snooze",
         "command.facts_on": "mode.facts_on",
         "command.facts_off": "mode.facts_off",
         "command.context_on": "mode.context_on",
         "command.context_off": "mode.context_off",
+        "command.context_clear": "mode.context_clear",
+        "wizard.profile.done": "profile.update",
     }
     action_type = mapping.get(intent)
     if not action_type:
@@ -2219,7 +2222,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    entries = actions_store.search(user_id=user_id, query=None, limit=10)
+    entries = actions_store.list_recent(user_id=user_id, limit=10)
     result = _build_simple_result(
         _format_actions_history(entries),
         intent="command.history",

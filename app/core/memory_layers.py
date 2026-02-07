@@ -161,15 +161,27 @@ def _render_actions(
     if not entries:
         return None
     cutoff = now - timedelta(days=max(1, days))
-    recent = [entry for entry in entries if entry.ts >= cutoff]
+    recent = [
+        entry
+        for entry in entries
+        if entry.ts >= cutoff and entry.action_type.startswith(("calendar.", "reminder."))
+    ]
     if not recent:
         return None
-    lines = []
-    for entry in recent[:limit]:
-        timestamp = entry.ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        summary = entry.to_summary()
-        lines.append(f"• {timestamp} — {summary}")
-    block = "Последние действия:\n" + "\n".join(lines)
+    recent = recent[: max(1, limit)]
+
+    def _render(entries_to_render: list[ActionLogEntry]) -> str:
+        lines = []
+        for entry in entries_to_render:
+            timestamp = entry.ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+            summary = entry.to_summary()
+            lines.append(f"• {timestamp} | {entry.action_type} | {summary}")
+        return "Последние действия:\n" + "\n".join(lines)
+
+    block = _render(recent)
+    while len(block) > max_chars and len(recent) > 1:
+        recent = recent[:-1]
+        block = _render(recent)
     if len(block) <= max_chars:
         return block
     return block[: max(1, max_chars - 1)].rstrip() + "…"
