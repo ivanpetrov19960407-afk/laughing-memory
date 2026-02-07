@@ -20,6 +20,7 @@ from app.bot.actions import ActionStore, StoredAction, build_inline_keyboard, pa
 from app.core import calendar_store, tools_calendar
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMemory, DialogMessage
+from app.core.last_state_resolver import ResolutionResult, resolve_short_message
 from app.core.memory_store import MemoryStore, build_llm_context
 from app.core.orchestrator import Orchestrator
 from app.core.result import (
@@ -36,6 +37,7 @@ from app.core.result import (
 from app.core.tools_calendar import create_event, delete_event, list_calendar_items, list_reminders
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
+from app.infra.last_state_store import LastStateStore
 from app.infra.messaging import safe_edit_text, safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limiter import RateLimiter
@@ -90,6 +92,13 @@ def _get_dialog_memory(context: ContextTypes.DEFAULT_TYPE) -> DialogMemory | Non
 def _get_memory_store(context: ContextTypes.DEFAULT_TYPE) -> MemoryStore | None:
     store = context.application.bot_data.get("memory_store")
     if isinstance(store, MemoryStore):
+        return store
+    return None
+
+
+def _get_last_state_store(context: ContextTypes.DEFAULT_TYPE) -> LastStateStore | None:
+    store = context.application.bot_data.get("last_state_store")
+    if isinstance(store, LastStateStore):
         return store
     return None
 
@@ -623,6 +632,102 @@ def _build_simple_result(
     return ensure_valid(error(text, intent=intent, mode=mode, debug=debug))
 
 
+def _extract_result_refs(result: OrchestratorResult) -> dict[str, str]:
+    refs: dict[str, str] = {}
+    debug = result.debug if isinstance(result.debug, dict) else {}
+    debug_refs = debug.get("refs")
+    if isinstance(debug_refs, dict):
+        for key, value in debug_refs.items():
+            if isinstance(key, str) and isinstance(value, str) and value.strip():
+                refs[key] = value
+    for key in ("event_id", "reminder_id", "calendar_id", "query"):
+        value = debug.get(key)
+        if isinstance(value, str) and value.strip():
+            refs[key] = value
+    return refs
+
+
+def _update_last_state(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    result: OrchestratorResult,
+    user_id: int,
+    chat_id: int,
+    request_context: RequestContext | None,
+) -> None:
+    if result.status != "ok" or not user_id or not chat_id:
+        return
+    store = _get_last_state_store(context)
+    if store is None:
+        return
+    refs = _extract_result_refs(result)
+    correlation_id = None
+    if request_context and request_context.correlation_id:
+        correlation_id = request_context.correlation_id
+    elif result.request_id:
+        correlation_id = result.request_id
+    store.update_state(
+        chat_id=chat_id,
+        user_id=user_id,
+        intent=result.intent,
+        correlation_id=correlation_id,
+        event_id=refs.get("event_id"),
+        reminder_id=refs.get("reminder_id"),
+        calendar_id=refs.get("calendar_id"),
+        query=refs.get("query"),
+    )
+
+
+def _build_last_state_actions(action: str) -> list[Action]:
+    return [
+        Action(
+            id="memory.last_event",
+            label="Последнее событие",
+            payload={"op": "last_state_action", "action": action, "ref": "event"},
+        ),
+        Action(
+            id="memory.last_reminder",
+            label="Последнее напоминание",
+            payload={"op": "last_state_action", "action": action, "ref": "reminder"},
+        ),
+        Action(
+            id="memory.last_search",
+            label="Последний поиск",
+            payload={"op": "last_state_action", "action": action, "ref": "search"},
+        ),
+        _menu_action(),
+    ]
+
+
+def _build_resolution_fallback(action: str, *, reason: str) -> OrchestratorResult:
+    return ok(
+        "Уточни, пожалуйста, что именно:",
+        intent="memory.resolve",
+        mode="local",
+        actions=_build_last_state_actions(action),
+        debug={"reason": reason},
+    )
+
+
+def _log_memory_resolution(
+    request_context: RequestContext | None,
+    *,
+    used: bool,
+    reason: str,
+    matched_ref: str | None,
+) -> None:
+    log_event(
+        LOGGER,
+        request_context,
+        component="memory",
+        event="memory.resolution",
+        status="ok",
+        used=used,
+        reason=reason,
+        matched_ref=matched_ref or "-",
+    )
+
+
 def _menu_action() -> Action:
     return Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_section", "section": "home"})
 
@@ -1029,6 +1134,13 @@ async def send_result(
                 env=request_context.env if request_context else "prod",
             )
     _log_orchestrator_result(user_id, public_result, request_context=request_context)
+    _update_last_state(
+        context,
+        result=public_result,
+        user_id=user_id,
+        chat_id=chat_id,
+        request_context=request_context,
+    )
     guarded_text = public_result.text
     if _strict_no_pseudo_sources(context):
         guarded_text = _apply_strict_pseudo_source_guard(public_result.text)
@@ -2245,6 +2357,61 @@ async def _dispatch_action_payload(
             chat_id=chat_id,
             use_last=True,
         )
+    if op_value == "last_state_action":
+        action = payload.get("action")
+        ref = payload.get("ref")
+        action_value = action if isinstance(action, str) else "resolve"
+        ref_value = ref if isinstance(ref, str) else ""
+        last_state_store = _get_last_state_store(context)
+        last_state = (
+            last_state_store.get_state(chat_id=chat_id, user_id=user_id) if last_state_store else None
+        )
+        if last_state is None:
+            return _build_resolution_fallback(action_value, reason="missing_last_state")
+        if action_value == "move_tomorrow" and ref_value == "event":
+            if last_state.last_event_id:
+                return await _handle_event_move_tomorrow(
+                    context,
+                    event_id=last_state.last_event_id,
+                    user_id=user_id,
+                    chat_id=chat_id,
+                )
+            return _build_resolution_fallback(action_value, reason="missing_last_event")
+        if action_value == "cancel":
+            if ref_value == "reminder":
+                if last_state.last_reminder_id:
+                    return await _handle_reminder_delete(
+                        context,
+                        reminder_id=last_state.last_reminder_id,
+                        user_id=user_id,
+                        chat_id=chat_id,
+                    )
+                return _build_resolution_fallback(action_value, reason="missing_last_reminder")
+            if ref_value == "event":
+                if last_state.last_event_id:
+                    return await _handle_event_delete(
+                        context,
+                        event_id=last_state.last_event_id,
+                        user_id=user_id,
+                    )
+                return _build_resolution_fallback(action_value, reason="missing_last_event")
+        if action_value == "repeat_search" and ref_value == "search":
+            if last_state.last_query:
+                orchestrator = _get_orchestrator(context)
+                return await orchestrator.handle(
+                    f"/search {last_state.last_query}",
+                    _build_user_context(update, context),
+                    request_context=request_context,
+                )
+            return _build_resolution_fallback(action_value, reason="missing_last_query")
+        if action_value == "move":
+            return ok(
+                "Укажи новую дату и время для переноса. Например: завтра 10:00.",
+                intent="memory.resolve",
+                mode="local",
+                actions=[_menu_action()],
+            )
+        return _build_resolution_fallback(action_value, reason="unsupported_action")
     if op_value == "menu_section":
         section = payload.get("section")
         if not isinstance(section, str):
@@ -2773,6 +2940,7 @@ async def _handle_reminder_snooze(
         f"Ок, отложил до {when_label}.",
         intent="utility_reminders.snooze",
         mode="local",
+        debug={"refs": {"reminder_id": reminder_id}},
     )
 
 
@@ -2813,6 +2981,7 @@ async def _handle_reminder_delete(
         f"Удалено: {reminder_id}",
         intent="utility_reminders.delete",
         mode="local",
+        debug={"refs": {"reminder_id": reminder_id}},
     )
 
 
@@ -2864,7 +3033,110 @@ async def _handle_reminder_disable(
         "Ок, отключил.",
         intent="utility_reminders.disable",
         mode="local",
+        debug={"refs": {"reminder_id": reminder_id}},
     )
+
+
+async def _handle_event_delete(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    event_id: str,
+    user_id: int,
+) -> OrchestratorResult:
+    request_context = get_request_context(context)
+    tool_result = await delete_event(
+        event_id,
+        intent="utility_calendar.delete",
+        user_id=user_id,
+        request_context=request_context,
+        circuit_breakers=_get_circuit_breakers(context),
+        retry_policy=_get_retry_policy(context),
+        timeouts=_get_timeouts(context),
+    )
+    reminder_id = tool_result.debug.get("reminder_id") if isinstance(tool_result.debug, dict) else None
+    scheduler = _get_reminder_scheduler(context)
+    if reminder_id and scheduler:
+        try:
+            await scheduler.cancel_reminder(reminder_id)
+        except Exception:
+            LOGGER.exception("Failed to cancel reminder: reminder_id=%s", reminder_id)
+    return replace(tool_result, mode="local", intent="utility_calendar.delete")
+
+
+async def _handle_event_move_tomorrow(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    event_id: str,
+    user_id: int,
+    chat_id: int,
+) -> OrchestratorResult:
+    event = await calendar_store.get_event(event_id)
+    if event is None or event.user_id != user_id or event.chat_id != chat_id:
+        return refused("Событие не найдено.", intent="utility_calendar.move", mode="local")
+    new_dt = event.dt + timedelta(days=1)
+    updated, reminder_id = await calendar_store.update_event_dt(event_id, new_dt)
+    if updated is None:
+        return refused("Событие не найдено.", intent="utility_calendar.move", mode="local")
+    scheduler = _get_reminder_scheduler(context)
+    settings = _get_settings(context)
+    if reminder_id and scheduler and settings is not None and settings.reminders_enabled:
+        try:
+            reminder = await calendar_store.get_reminder(reminder_id)
+            if reminder is not None:
+                await scheduler.schedule_reminder(reminder)
+        except Exception:
+            LOGGER.exception("Failed to reschedule reminder: reminder_id=%s", reminder_id)
+            return error("Не удалось перенести событие.", intent="utility_calendar.move", mode="local")
+    when_label = updated.dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+    return ok(
+        f"Ок, перенёс на {when_label}.",
+        intent="utility_calendar.move",
+        mode="local",
+        debug={
+            "refs": {"event_id": updated.id},
+            "reminder_id": reminder_id,
+        },
+    )
+
+
+async def _execute_resolution(
+    resolution: ResolutionResult,
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    chat_id: int,
+    request_context: RequestContext | None,
+    user_context: dict[str, object],
+) -> OrchestratorResult:
+    if resolution.action == "move_tomorrow" and resolution.target_id:
+        return await _handle_event_move_tomorrow(
+            context,
+            event_id=resolution.target_id,
+            user_id=user_id,
+            chat_id=chat_id,
+        )
+    if resolution.action == "cancel" and resolution.target_id:
+        if resolution.target == "reminder":
+            return await _handle_reminder_delete(
+                context,
+                reminder_id=resolution.target_id,
+                user_id=user_id,
+                chat_id=chat_id,
+            )
+        if resolution.target == "event":
+            return await _handle_event_delete(
+                context,
+                event_id=resolution.target_id,
+                user_id=user_id,
+            )
+    if resolution.action == "repeat_search" and resolution.query:
+        orchestrator = _get_orchestrator(context)
+        return await orchestrator.handle(
+            f"/search {resolution.query}",
+            user_context,
+            request_context=request_context,
+        )
+    return _build_resolution_fallback(resolution.action or "resolve", reason=resolution.reason)
 
 
 async def _handle_reminder_reschedule_start(
@@ -3452,17 +3724,45 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     request_context = get_request_context(context)
     request_id = request_context.correlation_id if request_context else None
     memory_context = _build_memory_context(context)
+    user_context = _build_user_context_with_dialog(
+        update,
+        dialog_context=dialog_context,
+        dialog_message_count=dialog_count,
+        memory_context=memory_context,
+        request_id=request_id,
+        request_context=request_context,
+    )
+    last_state_store = _get_last_state_store(context)
+    last_state = (
+        last_state_store.get_state(chat_id=chat_id, user_id=user_id) if last_state_store else None
+    )
+    resolution = resolve_short_message(prompt, last_state)
+    if resolution.status != "skip":
+        _log_memory_resolution(
+            request_context,
+            used=resolution.status == "matched",
+            reason=resolution.reason,
+            matched_ref=resolution.matched_ref,
+        )
+        if resolution.status == "matched":
+            result = await _execute_resolution(
+                resolution,
+                context=context,
+                user_id=user_id,
+                chat_id=chat_id,
+                request_context=request_context,
+                user_context=user_context,
+            )
+        else:
+            result = _build_resolution_fallback(resolution.action or "resolve", reason=resolution.reason)
+        await send_result(update, context, result)
+        if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
+            await dialog_memory.add_assistant(user_id, chat_id, result.text)
+        return
     try:
         result = await orchestrator.handle(
             prompt,
-            _build_user_context_with_dialog(
-                update,
-                dialog_context=dialog_context,
-                dialog_message_count=dialog_count,
-                memory_context=memory_context,
-                request_id=request_id,
-                request_context=request_context,
-            ),
+            user_context,
         )
     except Exception as exc:
         set_status(context, "error")

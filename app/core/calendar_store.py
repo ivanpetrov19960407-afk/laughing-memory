@@ -572,6 +572,34 @@ async def get_event(event_id: str) -> CalendarItem | None:
     return None
 
 
+async def update_event_dt(event_id: str, new_dt: datetime) -> tuple[CalendarItem | None, str | None]:
+    if new_dt.tzinfo is None:
+        new_dt = new_dt.replace(tzinfo=VIENNA_TZ)
+    async with _STORE_LOCK:
+        store = load_store()
+        events = list(store.get("events") or [])
+        reminders = list(store.get("reminders") or [])
+        updated_event: dict[str, object] | None = None
+        for item in events:
+            if isinstance(item, dict) and item.get("event_id") == event_id:
+                item["dt_start"] = new_dt.astimezone(VIENNA_TZ).isoformat()
+                updated_event = item
+                break
+        if updated_event is None:
+            return None, None
+        reminder_id: str | None = None
+        for item in reminders:
+            if isinstance(item, dict) and item.get("event_id") == event_id:
+                item["trigger_at"] = new_dt.astimezone(VIENNA_TZ).isoformat()
+                reminder_id = item.get("reminder_id") if isinstance(item.get("reminder_id"), str) else None
+                break
+        store["events"] = events
+        store["reminders"] = reminders
+        store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
+        save_store_atomic(store)
+    return await get_event(event_id), reminder_id
+
+
 async def disable_reminder(reminder_id: str) -> bool:
     async with _STORE_LOCK:
         store = load_store()

@@ -29,6 +29,7 @@ from app.infra.resilience import (
     load_timeouts,
 )
 from app.infra.storage import TaskStorage
+from app.infra.last_state_store import LastStateStore
 from app.infra.trace_store import TraceStore
 from app.stores.google_tokens import GoogleTokenStore
 from app.tools import NullSearchClient, PerplexityWebSearchClient
@@ -203,6 +204,7 @@ def main() -> None:
     application.bot_data["start_time"] = time.monotonic()
     application.bot_data["dialog_memory"] = dialog_memory
     application.bot_data["memory_store"] = memory_store
+    application.bot_data["last_state_store"] = LastStateStore(ttl_seconds=7 * 24 * 3600)
     application.bot_data["action_store"] = actions.ActionStore(
         ttl_seconds=settings.action_ttl_seconds,
         max_items=settings.action_max_size,

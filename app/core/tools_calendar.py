@@ -533,6 +533,7 @@ async def delete_event(
     deleted = deleted_remote or removed
     text = f"Удалено: {item_id}" if deleted else f"Не найдено: {item_id}"
     debug: dict[str, object] = {}
+    debug["event_id"] = item_id
     if reminder_id:
         debug["reminder_id"] = reminder_id
     if caldav_error:
