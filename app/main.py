@@ -29,6 +29,7 @@ from app.infra.version import resolve_app_version
 from app.infra.llm import OpenAIClient, PerplexityClient
 from app.infra.rate_limit import RateLimiter as LLMRateLimiter
 from app.infra.rate_limiter import RateLimiter
+from app.infra.document_session_store import DocumentSessionStore
 from app.infra.resilience import (
     CircuitBreakerRegistry,
     load_circuit_breaker_config,
@@ -89,6 +90,7 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("config", handlers.config_command))
     application.add_handler(CallbackQueryHandler(handlers.static_callback, pattern="^cb:"))
     application.add_handler(CallbackQueryHandler(handlers.action_callback))
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handlers.document_upload))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
     application.add_handler(MessageHandler(filters.COMMAND, handlers.unknown_command))
 
@@ -196,6 +198,10 @@ def main() -> None:
         max_turns=settings.context_max_turns,
     )
     asyncio.run(dialog_memory.load())
+    settings.uploads_path.mkdir(parents=True, exist_ok=True)
+    settings.document_texts_path.mkdir(parents=True, exist_ok=True)
+    document_store = DocumentSessionStore(settings.document_sessions_path)
+    document_store.load()
     memory_store = MemoryStore()
     profile_store = UserProfileStore(settings.db_path)
     actions_log_store = ActionsLogStore(settings.db_path)
@@ -228,11 +234,13 @@ def main() -> None:
     application.bot_data["circuit_breakers"] = circuit_breakers
     application.bot_data["google_token_store"] = google_token_store
     application.bot_data["openai_client"] = openai_client
+    application.bot_data["llm_client"] = llm_client
     application.bot_data["start_time"] = time.monotonic()
     application.bot_data["dialog_memory"] = dialog_memory
     application.bot_data["memory_store"] = memory_store
     application.bot_data["profile_store"] = profile_store
     application.bot_data["actions_log_store"] = actions_log_store
+    application.bot_data["document_store"] = document_store
     application.bot_data["last_state_store"] = LastStateStore(ttl_seconds=7 * 24 * 3600)
     application.bot_data["action_store"] = actions.ActionStore(
         ttl_seconds=settings.action_ttl_seconds,
