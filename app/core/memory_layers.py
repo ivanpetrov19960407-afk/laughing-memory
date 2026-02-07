@@ -121,14 +121,21 @@ def _render_profile(profile: UserProfile, *, max_chars: int) -> str:
     notes = profile.notes[:5]
     reminder_defaults = profile.default_reminders
     note_lines = [f"• {note.text} (id: {note.id})" for note in notes]
+    reminder_offset = (
+        f"{reminder_defaults.offset_minutes} минут"
+        if reminder_defaults.offset_minutes is not None
+        else "не задано"
+    )
+    facts_label = "вкл" if profile.facts_mode_default else "выкл"
+    reminders_label = "вкл" if reminder_defaults.enabled else "выкл"
     blocks = [
         "Профиль пользователя:",
         f"• язык: {profile.language}",
         f"• таймзона: {profile.timezone}",
         f"• подробность: {profile.verbosity}",
-        f"• режим фактов по умолчанию: {'on' if profile.facts_mode_default else 'off'}",
-        f"• напоминания по умолчанию: {'on' if reminder_defaults.enabled else 'off'}",
-        f"• смещение напоминаний: {reminder_defaults.offset_minutes} минут",
+        f"• режим фактов по умолчанию: {facts_label}",
+        f"• напоминания по умолчанию: {reminders_label}",
+        f"• смещение напоминаний: {reminder_offset}",
     ]
     if profile.style:
         blocks.append(f"• стиль: {profile.style}")
@@ -166,4 +173,3 @@ def _render_actions(
     if len(block) <= max_chars:
         return block
     return block[: max(1, max_chars - 1)].rstrip() + "…"
-

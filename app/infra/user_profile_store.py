@@ -19,7 +19,7 @@ from app.core.user_profile import (
 
 LOGGER = logging.getLogger(__name__)
 
-PROFILE_SCHEMA_VERSION = 1
+PROFILE_SCHEMA_VERSION = 2
 
 
 class UserProfileStore:
@@ -45,22 +45,44 @@ class UserProfileStore:
     def get(self, user_id: int) -> UserProfile:
         row = self._fetch_row(user_id)
         if row is None:
-            return default_profile()
-        payload, schema_version = self._load_payload(row)
-        migrated_payload, updated_version, changed = self._migrate_payload(payload, schema_version)
+            return default_profile(user_id)
+        payload, schema_version, updated_at = self._load_payload(row)
+        migrated_payload, updated_version, changed = self._migrate_payload(
+            payload,
+            schema_version,
+            user_id,
+            updated_at,
+        )
         if changed:
             self._save_payload(user_id, migrated_payload, updated_version)
-        return UserProfile.from_dict(migrated_payload)
+        return UserProfile.from_dict(
+            migrated_payload,
+            user_id=user_id,
+            created_at=updated_at,
+            updated_at=updated_at,
+        )
 
     def update(self, user_id: int, patch: dict[str, Any]) -> UserProfile:
         profile = self.get(user_id)
         updated = apply_profile_patch(profile, patch)
+        now = datetime.now(timezone.utc).isoformat()
+        updated = replace(
+            updated,
+            updated_at=now,
+            created_at=updated.created_at or now,
+        )
         self._save_payload(user_id, updated.to_dict(), PROFILE_SCHEMA_VERSION)
         return updated
 
     def add_note(self, user_id: int, text: str) -> UserProfile:
         profile = self.get(user_id)
         updated = add_profile_note(profile, text)
+        now = datetime.now(timezone.utc).isoformat()
+        updated = replace(
+            updated,
+            updated_at=now,
+            created_at=updated.created_at or now,
+        )
         self._save_payload(user_id, updated.to_dict(), PROFILE_SCHEMA_VERSION)
         return updated
 
@@ -68,11 +90,19 @@ class UserProfileStore:
         profile = self.get(user_id)
         updated, removed = remove_profile_note(profile, key)
         if removed:
+            now = datetime.now(timezone.utc).isoformat()
+            updated = replace(
+                updated,
+                updated_at=now,
+                created_at=updated.created_at or now,
+            )
             self._save_payload(user_id, updated.to_dict(), PROFILE_SCHEMA_VERSION)
         return updated, removed
 
     def set_defaults(self, user_id: int, profile: UserProfile) -> None:
-        self._save_payload(user_id, profile.to_dict(), PROFILE_SCHEMA_VERSION)
+        now = datetime.now(timezone.utc).isoformat()
+        updated = replace(profile, updated_at=now, created_at=profile.created_at or now)
+        self._save_payload(user_id, updated.to_dict(), PROFILE_SCHEMA_VERSION)
 
     def close(self) -> None:
         try:
@@ -91,9 +121,10 @@ class UserProfileStore:
         )
         return cursor.fetchone()
 
-    def _load_payload(self, row: sqlite3.Row) -> tuple[dict[str, Any], int]:
+    def _load_payload(self, row: sqlite3.Row) -> tuple[dict[str, Any], int, str | None]:
         schema_version = row["schema_version"]
         raw_payload = row["payload"]
+        updated_at = row["updated_at"] if isinstance(row["updated_at"], str) else None
         if not isinstance(schema_version, int):
             schema_version = 0
         try:
@@ -102,10 +133,16 @@ class UserProfileStore:
             payload = {}
         if not isinstance(payload, dict):
             payload = {}
-        return payload, schema_version
+        return payload, schema_version, updated_at
 
     def _save_payload(self, user_id: int, payload: dict[str, Any], schema_version: int) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        normalized = dict(payload)
+        normalized.setdefault("user_id", user_id)
+        created_at = normalized.get("created_at")
+        if not isinstance(created_at, str) or not created_at:
+            normalized["created_at"] = now
+        normalized["updated_at"] = now
         self._connection.execute(
             """
             INSERT INTO user_profiles (user_id, schema_version, payload, updated_at)
@@ -118,7 +155,7 @@ class UserProfileStore:
             (
                 user_id,
                 schema_version,
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(normalized, ensure_ascii=False, separators=(",", ":")),
                 now,
             ),
         )
@@ -128,8 +165,15 @@ class UserProfileStore:
         self,
         payload: dict[str, Any],
         schema_version: int,
+        user_id: int,
+        updated_at: str | None,
     ) -> tuple[dict[str, Any], int, bool]:
-        normalized = normalize_profile_payload(payload)
+        normalized = normalize_profile_payload(
+            payload,
+            user_id=user_id,
+            created_at=updated_at,
+            updated_at=updated_at,
+        )
         changed = schema_version != PROFILE_SCHEMA_VERSION or normalized != payload
         if schema_version > PROFILE_SCHEMA_VERSION:
             LOGGER.warning(
@@ -139,4 +183,3 @@ class UserProfileStore:
             )
             return payload, schema_version, False
         return normalized, PROFILE_SCHEMA_VERSION, changed
-

@@ -633,14 +633,17 @@ def _format_history(history: list[tuple[datetime, str, str]]) -> str:
 
 def _format_profile(profile: UserProfile) -> str:
     reminders = profile.default_reminders
+    reminder_offset = f"{reminders.offset_minutes} минут" if reminders.offset_minutes is not None else "не задано"
+    facts_label = "вкл" if profile.facts_mode_default else "выкл"
+    reminders_label = "вкл" if reminders.enabled else "выкл"
     lines = [
         "Профиль пользователя:",
         f"- язык: {profile.language}",
         f"- таймзона: {profile.timezone}",
         f"- подробность: {profile.verbosity}",
-        f"- режим фактов по умолчанию: {'on' if profile.facts_mode_default else 'off'}",
-        f"- напоминания по умолчанию: {'on' if reminders.enabled else 'off'}",
-        f"- смещение напоминаний: {reminders.offset_minutes} минут",
+        f"- режим фактов по умолчанию: {facts_label}",
+        f"- напоминания по умолчанию: {reminders_label}",
+        f"- смещение напоминаний: {reminder_offset}",
     ]
     if profile.style:
         lines.append(f"- стиль: {profile.style}")
