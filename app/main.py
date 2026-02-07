@@ -2,23 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 import warnings
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from telegram.warnings import PTBUserWarning
 
 from app.bot import actions, handlers, wizard
+from app.core import calendar_store
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
 from app.core.reminders import ReminderScheduler
 from app.core.dialog_memory import DialogMemory
 from app.core.memory_store import MemoryStore
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
-from app.infra.config import load_settings
+from app.infra.config import load_settings, resolve_env_label, validate_startup_env
 from app.infra.google_oauth import GoogleOAuthConfig
 from app.infra.google_oauth_server import start_google_oauth_server
+from app.infra.request_context import RequestContext, log_event
+from app.infra.version import resolve_app_version
 from app.infra.llm import OpenAIClient, PerplexityClient
 from app.infra.rate_limit import RateLimiter as LLMRateLimiter
 from app.infra.rate_limiter import RateLimiter
@@ -72,6 +77,7 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("reminder_on", handlers.reminder_on))
     application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
     application.add_handler(CommandHandler("health", handlers.health))
+    application.add_handler(CommandHandler("config", handlers.config_command))
     application.add_handler(CallbackQueryHandler(handlers.static_callback, pattern="^cb:"))
     application.add_handler(CallbackQueryHandler(handlers.action_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
@@ -97,7 +103,17 @@ def main() -> None:
 
 
 
-    settings = load_settings()
+    env_label = resolve_env_label()
+    try:
+        settings = load_settings()
+    except RuntimeError as exc:
+        logging.getLogger(__name__).exception("Startup failed: %s", exc)
+        raise SystemExit(str(exc)) from exc
+    startup_features = validate_startup_env(
+        settings,
+        env_label=env_label,
+        logger=logging.getLogger(__name__),
+    )
     google_token_store = GoogleTokenStore(settings.google_tokens_path)
     google_token_store.load()
     config = load_orchestrator_config(settings.orchestrator_config_path)
@@ -219,7 +235,31 @@ def main() -> None:
         reminder_scheduler=reminder_scheduler,
         settings=settings,
     )
-    if settings.google_oauth_client_id and settings.google_oauth_client_secret and settings.public_base_url:
+    startup_context = RequestContext(
+        correlation_id="startup",
+        user_id=0,
+        chat_id=0,
+        message_id=0,
+        timezone=None,
+        ts=datetime.now(timezone.utc),
+        env=env_label,
+    )
+    log_event(
+        logging.getLogger(__name__),
+        startup_context,
+        component="startup",
+        event="startup.check",
+        status="ok",
+        python_version=sys.version.split()[0],
+        app_version=resolve_app_version(config.get("system_metadata", {})),
+        timezone=calendar_store.BOT_TZ.key,
+        integrations={
+            "caldav": startup_features.caldav_enabled,
+            "google": startup_features.google_enabled,
+            "llm": startup_features.llm_enabled,
+        },
+    )
+    if startup_features.google_enabled:
         oauth_config = GoogleOAuthConfig(
             client_id=settings.google_oauth_client_id,
             client_secret=settings.google_oauth_client_secret,

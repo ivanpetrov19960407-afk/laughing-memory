@@ -119,6 +119,15 @@ class MemoryStore:
             return
         self._data.pop(key, None)
 
+    def count_entries(self) -> int:
+        total = 0
+        for key in list(self._data.keys()):
+            self._cleanup(key, now=self._now())
+            items = self._data.get(key)
+            if items:
+                total += len(items)
+        return total
+
     def _key(self, chat_id: int, user_id: int) -> tuple[int, int] | None:
         if not chat_id or not user_id:
             return None

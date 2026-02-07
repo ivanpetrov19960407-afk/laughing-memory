@@ -62,6 +62,73 @@ class Settings:
     google_oauth_server_port: int
 
 
+@dataclass(frozen=True)
+class StartupFeatures:
+    caldav_enabled: bool
+    google_enabled: bool
+    llm_enabled: bool
+
+
+_DEV_ENVS = {"dev", "development", "local"}
+
+
+def resolve_env_label(raw_env: dict[str, str] | None = None) -> str:
+    source = raw_env if raw_env is not None else os.environ
+    env = source.get("APP_ENV", "prod").strip().lower()
+    return "dev" if env in _DEV_ENVS else "prod"
+
+
+def validate_startup_env(
+    settings: Settings,
+    *,
+    env_label: str | None = None,
+    raw_env: dict[str, str] | None = None,
+    logger: logging.Logger | None = None,
+) -> StartupFeatures:
+    log = logger or LOGGER
+    label = env_label or resolve_env_label(raw_env)
+    if not settings.bot_token:
+        log.error("startup.env invalid: BOT_TOKEN missing")
+        raise SystemExit("BOT_TOKEN is not set")
+    if not settings.orchestrator_config_path.exists():
+        log.error("startup.env invalid: config missing path=%s", settings.orchestrator_config_path)
+        raise SystemExit("ORCHESTRATOR_CONFIG_PATH is invalid")
+
+    env_source = raw_env if raw_env is not None else os.environ
+    dev_mode = _parse_optional_bool(env_source.get("DEV_MODE"))
+    if label == "prod" and dev_mode is True:
+        log.error("startup.env mismatch: prod env with DEV_MODE=true")
+        raise SystemExit("DEV_MODE cannot be enabled in prod")
+    if label == "dev" and dev_mode is False:
+        log.error("startup.env mismatch: dev env with DEV_MODE=false")
+        raise SystemExit("DEV_MODE must be enabled in dev")
+
+    caldav_configured = bool(settings.caldav_url and settings.caldav_username and settings.caldav_password)
+    caldav_enabled = settings.calendar_backend == "caldav" and caldav_configured
+    if settings.calendar_backend == "caldav" and not caldav_configured:
+        log.warning("startup.env caldav disabled: missing CALDAV_URL/USERNAME/PASSWORD")
+        os.environ["CALENDAR_BACKEND"] = "local"
+
+    google_fields = (
+        settings.google_oauth_client_id,
+        settings.google_oauth_client_secret,
+        settings.public_base_url,
+    )
+    google_enabled = all(google_fields)
+    if any(google_fields) and not google_enabled:
+        log.warning("startup.env google disabled: missing oauth config")
+
+    llm_enabled = bool(settings.openai_api_key or settings.perplexity_api_key)
+    if not llm_enabled:
+        log.warning("startup.env llm disabled: no API key configured")
+
+    return StartupFeatures(
+        caldav_enabled=caldav_enabled,
+        google_enabled=google_enabled,
+        llm_enabled=llm_enabled,
+    )
+
+
 def load_settings() -> Settings:
     _load_dotenv()
 
