@@ -21,6 +21,7 @@ class ResolutionResult:
     query: str | None = None
     matched_ref: str | None = None
     scope: RecurrenceScope | None = None
+    text: str | None = None
 
 
 _TRIGGER_TOKENS = {
@@ -34,6 +35,10 @@ _TRIGGER_TOKENS = {
     "отменить",
     "перенеси",
     "перенести",
+    "сдвинь",
+    "сдвинуть",
+    "сделай",
+    "поставь",
     "повтори",
     "повторить",
 }
@@ -75,7 +80,21 @@ def resolve_short_message(text: str, last_state: LastState | None) -> Resolution
             )
         return ResolutionResult(status="fallback", reason="missing_last_query", action=action, scope=scope)
     if action == "move":
-        return ResolutionResult(status="fallback", reason="missing_date", action=action, scope=scope)
+        if last_state is None:
+            return ResolutionResult(status="fallback", reason="missing_last_state", action=action, scope=scope, text=text)
+        event_id = last_state.last_event_id
+        if isinstance(event_id, str) and event_id.strip():
+            return ResolutionResult(
+                status="matched",
+                reason="matched_last_event",
+                action=action,
+                target="event",
+                target_id=event_id,
+                matched_ref="last_event_id",
+                scope=scope,
+                text=text,
+            )
+        return ResolutionResult(status="fallback", reason="missing_last_event", action=action, scope=scope, text=text)
     if action == "move_tomorrow":
         event_id = last_state.last_event_id
         if isinstance(event_id, str) and event_id.strip():
@@ -117,9 +136,11 @@ def resolve_short_message(text: str, last_state: LastState | None) -> Resolution
 
 
 def _infer_action(lowered: str) -> str | None:
-    if "перенеси" in lowered or "перенести" in lowered:
+    if "перенеси" in lowered or "перенести" in lowered or "сдвинь" in lowered or "сдвинуть" in lowered:
         if "завтра" in lowered:
             return "move_tomorrow"
+        return "move"
+    if "сделай" in lowered or "поставь" in lowered:
         return "move"
     if "отмени" in lowered or "отменить" in lowered:
         return "cancel"
