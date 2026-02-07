@@ -14,6 +14,8 @@ LOGGER = logging.getLogger(__name__)
 
 
 STRICT_REFUSAL_TEXT = "Не могу приводить источники/ссылки без поиска. Открой /menu → Поиск."
+STRICT_NO_SOURCES_TEXT = "Не могу ответить без источников. Открой /menu → Поиск."
+TEXT_LENGTH_LIMIT = 4000
 
 _PSEUDO_SOURCE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("bracket_citation", re.compile(r"\[\s*\d+\s*\]")),
@@ -94,8 +96,11 @@ class OrchestratorResult:
             errors.append("status must be ok/refused/error/ratelimited")
         if self.mode not in {"local", "llm", "tool"}:
             errors.append("mode must be local/llm/tool")
-        if self.intent is not None and (not isinstance(self.intent, str) or not self.intent.strip()):
-            errors.append("intent must be non-empty str or None")
+        if self.intent is not None:
+            if not isinstance(self.intent, str) or not self.intent.strip():
+                errors.append("intent must be non-empty str or None")
+            elif "." not in self.intent:
+                errors.append("intent must include namespace.action")
         if not isinstance(self.request_id, str):
             errors.append("request_id must be str")
         if not isinstance(self.sources, list) or any(not _is_valid_source(item) for item in self.sources):
@@ -252,22 +257,19 @@ def ensure_valid(
         payload = {}
 
     status = payload.get("status")
-    if status == "ratelimited":
-        status = "refused"
+    if status not in {"ok", "refused", "error", "ratelimited"}:
+        status = None
     text = payload.get("text")
-    if status not in {"ok", "refused", "error"}:
+    if status is None:
         status = "ok" if isinstance(text, str) and text.strip() else "error"
 
     if text is None:
         text = ""
     elif not isinstance(text, str):
         text = str(text)
+    text = text.strip("\n")
 
-    intent_value = payload.get("intent")
-    if intent_value is None:
-        intent_value = fallback_intent or "unknown"
-    elif not isinstance(intent_value, str) or not intent_value.strip():
-        intent_value = fallback_intent or "unknown"
+    intent_value = _normalize_intent(payload.get("intent"), fallback_intent=fallback_intent)
 
     mode_value = payload.get("mode")
     if mode_value not in {"local", "llm", "tool"}:
@@ -286,14 +288,28 @@ def ensure_valid(
     if isinstance(raw_sources, list):
         for item in raw_sources:
             if isinstance(item, Source):
-                sources.append(item)
+                if item.url.strip():
+                    snippet_value = item.snippet or ""
+                    sources.append(
+                        Source(
+                            title=item.title or item.url,
+                            url=item.url.strip(),
+                            snippet=snippet_value,
+                        )
+                    )
                 continue
             if isinstance(item, dict):
                 title = item.get("title")
                 url = item.get("url")
                 snippet = item.get("snippet")
-                if isinstance(title, str) and isinstance(url, str) and isinstance(snippet, str):
-                    sources.append(Source(title=title, url=url, snippet=snippet))
+                if isinstance(url, str) and url.strip():
+                    sources.append(
+                        Source(
+                            title=title.strip() if isinstance(title, str) and title.strip() else url.strip(),
+                            url=url.strip(),
+                            snippet=snippet.strip() if isinstance(snippet, str) else "",
+                        )
+                    )
                 else:
                     invalid_sources.append(item)
             else:
@@ -311,13 +327,22 @@ def ensure_valid(
                 payload_copy = dict(item.payload)
                 if "debug" in payload_copy:
                     action_debug.append({"id": item.id, "debug": payload_copy.pop("debug")})
-                actions.append(Action(id=item.id, label=item.label, payload=payload_copy))
+                if item.id.strip() and item.label.strip():
+                    actions.append(Action(id=item.id, label=item.label, payload=payload_copy))
+                else:
+                    invalid_actions.append(item)
                 continue
             if isinstance(item, dict):
                 action_id = item.get("id")
                 label = item.get("label")
                 action_payload = item.get("payload")
-                if isinstance(action_id, str) and isinstance(label, str) and isinstance(action_payload, dict):
+                if (
+                    isinstance(action_id, str)
+                    and action_id.strip()
+                    and isinstance(label, str)
+                    and label.strip()
+                    and isinstance(action_payload, dict)
+                ):
                     payload_copy = dict(action_payload)
                     if "debug" in payload_copy:
                         action_debug.append({"id": action_id, "debug": payload_copy.pop("debug")})
@@ -385,8 +410,16 @@ def ensure_valid(
     if not sources:
         text = _strip_pseudo_sources(text)
 
+    if text and len(text) > TEXT_LENGTH_LIMIT:
+        original_length = len(text)
+        text = text[: max(0, TEXT_LENGTH_LIMIT - 1)].rstrip() + "…"
+        debug.setdefault("text_truncated", True)
+        debug.setdefault("text_original_length", original_length)
+
     if not text.strip():
-        text = "Не удалось сформировать ответ." if status == "ok" else "Не могу выполнить запрос. Открой /menu."
+        text = "Не могу выполнить запрос. Открой /menu."
+        if status == "ok":
+            status = "refused"
 
     return OrchestratorResult(
         text=text,
@@ -407,6 +440,45 @@ def ensure_safe_text_strict(
     *,
     allow_sources_in_text: bool = False,
 ) -> OrchestratorResult:
+    if facts_enabled and not result.sources:
+        return OrchestratorResult(
+            text=STRICT_NO_SOURCES_TEXT,
+            status="refused",
+            mode=result.mode,
+            intent=result.intent,
+            request_id=result.request_id,
+            sources=[],
+            attachments=[],
+            actions=result.actions,
+            debug=result.debug,
+        )
+    if facts_enabled and result.sources:
+        numbers = _extract_citation_numbers(result.text or "")
+        if not numbers:
+            return OrchestratorResult(
+                text=STRICT_NO_SOURCES_TEXT,
+                status="refused",
+                mode=result.mode,
+                intent=result.intent,
+                request_id=result.request_id,
+                sources=[],
+                attachments=[],
+                actions=result.actions,
+                debug={**result.debug, "reason": "facts_no_citations"},
+            )
+        invalid = [num for num in numbers if num < 1 or num > len(result.sources)]
+        if invalid:
+            return OrchestratorResult(
+                text=STRICT_NO_SOURCES_TEXT,
+                status="refused",
+                mode=result.mode,
+                intent=result.intent,
+                request_id=result.request_id,
+                sources=[],
+                attachments=[],
+                actions=result.actions,
+                debug={**result.debug, "reason": "facts_invalid_citations", "invalid": invalid},
+            )
     if allow_sources_in_text or bool(result.sources):
         return result
     text = result.text or ""
@@ -447,6 +519,26 @@ def ensure_safe_text_strict(
         actions=result.actions,
         debug=result.debug,
     )
+
+
+def _normalize_intent(value: object, *, fallback_intent: str | None = None) -> str:
+    fallback = fallback_intent or "unknown.unknown"
+    if not isinstance(value, str):
+        return fallback
+    cleaned = value.strip()
+    if not cleaned or "." not in cleaned:
+        return fallback
+    return cleaned
+
+
+def _extract_citation_numbers(text: str) -> list[int]:
+    numbers: list[int] = []
+    for match in re.findall(r"\[\s*(\d+)\s*\]", text or ""):
+        try:
+            numbers.append(int(match))
+        except ValueError:
+            continue
+    return numbers
 
 
 def _strip_pseudo_sources(text: str) -> str:
@@ -498,9 +590,17 @@ def _is_json_safe(payload: Any) -> bool:
 
 def _is_valid_source(item: Source | dict[str, Any]) -> bool:
     if isinstance(item, Source):
-        return all(isinstance(value, str) for value in (item.title, item.url, item.snippet))
+        return (
+            all(isinstance(value, str) for value in (item.title, item.url, item.snippet))
+            and item.url.strip() != ""
+        )
     if isinstance(item, dict):
-        return all(isinstance(item.get(key), str) for key in ("title", "url", "snippet"))
+        url = item.get("url")
+        return (
+            all(isinstance(item.get(key), str) for key in ("title", "url", "snippet"))
+            and isinstance(url, str)
+            and url.strip() != ""
+        )
     return False
 
 

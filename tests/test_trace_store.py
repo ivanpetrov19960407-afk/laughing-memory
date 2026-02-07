@@ -9,7 +9,7 @@ def _entry(correlation_id: str, ts: datetime) -> TraceEntry:
     return TraceEntry(
         correlation_id=correlation_id,
         ts=ts,
-        intent="test",
+        intent="test.example",
         mode="local",
         status="ok",
         total_duration_ms=12.5,

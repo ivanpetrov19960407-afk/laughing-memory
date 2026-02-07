@@ -66,12 +66,12 @@ _DESTRUCTIVE_REFUSAL = "Не могу выполнить разрушитель�
 def detect_intent(text: str) -> str:
     trimmed = text.strip()
     if not trimmed:
-        return "unknown"
+        return "intent.unknown"
     lowered = trimmed.lower()
     if lowered.startswith("summary:") or lowered.startswith("/summary"):
-        return "utility_summary"
+        return "utility.summary"
     if trimmed.startswith("/"):
-        return "command"
+        return "command.raw"
     smalltalk_markers = (
         "привет",
         "здравств",
@@ -87,8 +87,8 @@ def detect_intent(text: str) -> str:
         "goodbye",
     )
     if any(marker in lowered for marker in smalltalk_markers):
-        return "smalltalk"
-    return "question"
+        return "smalltalk.local"
+    return "question.general"
 
 
 def _tool_debug_payload(
@@ -194,7 +194,7 @@ class Orchestrator:
             result = ensure_valid(
                 refused(
                     error_message,
-                    intent="command",
+                    intent="command.access_denied",
                     mode="local",
                     debug={"reason": "access_denied"},
                 )
@@ -213,7 +213,7 @@ class Orchestrator:
             result = ensure_valid(self._result_from_decision(decision))
             return self._finalize_request(request_context, start_time, result)
 
-        if decision.intent == "smalltalk":
+        if decision.intent == "smalltalk.local":
             response = self._smalltalk_response(trimmed)
             result = ensure_valid(
                 ok(
@@ -225,7 +225,7 @@ class Orchestrator:
             )
             return self._finalize_request(request_context, start_time, result)
 
-        if decision.intent == "utility_summary":
+        if decision.intent == "utility.summary":
             result = await self._handle_summary(user_id, trimmed)
             return self._finalize_request(request_context, start_time, result)
 
@@ -815,7 +815,7 @@ class Orchestrator:
             return ensure_valid(
                 refused(
                     error_message,
-                    intent="text",
+                    intent="text.access_denied",
                     mode="local",
                     debug={"reason": "access_denied"},
                 )
@@ -826,7 +826,7 @@ class Orchestrator:
             return ensure_valid(
                 refused(
                     "Запрос пустой.",
-                    intent="text",
+                    intent="text.empty",
                     mode="local",
                     debug={"reason": "empty_prompt"},
                 )
@@ -835,7 +835,7 @@ class Orchestrator:
             return ensure_valid(
                 refused(
                     "Слишком длинный запрос. Попробуйте короче.",
-                    intent="text",
+                    intent="text.too_long",
                     mode="local",
                     debug={"reason": "input_too_long"},
                 )
@@ -850,7 +850,7 @@ class Orchestrator:
                 return ensure_valid(
                     error(
                         "Формат: task <name> <payload>",
-                        intent="task",
+                        intent="task.run",
                         mode="tool",
                         debug={"reason": "missing_payload"},
                     )
@@ -860,7 +860,7 @@ class Orchestrator:
                 return ensure_valid(
                     error(
                         "Формат: task <name> <payload>",
-                        intent="task",
+                        intent="task.run",
                         mode="tool",
                         debug={"reason": "missing_payload"},
                     )
@@ -870,7 +870,7 @@ class Orchestrator:
                 return ensure_valid(
                     error(
                         "Формат: task <name> <payload>",
-                        intent="task",
+                        intent="task.run",
                         mode="tool",
                         debug={"reason": "missing_payload"},
                     )
@@ -884,7 +884,7 @@ class Orchestrator:
                 return ensure_valid(
                     error(
                         "Формат: task <name> <payload>",
-                        intent="task",
+                        intent="task.run",
                         mode="tool",
                         debug={"reason": "missing_payload"},
                     )
@@ -894,7 +894,7 @@ class Orchestrator:
                 return ensure_valid(
                     error(
                         "Формат: task <name> <payload>",
-                        intent="task",
+                        intent="task.run",
                         mode="tool",
                         debug={"reason": "missing_payload"},
                     )
@@ -904,7 +904,7 @@ class Orchestrator:
                 return ensure_valid(
                     error(
                         "Формат: task <name> <payload>",
-                        intent="task",
+                        intent="task.run",
                         mode="tool",
                         debug={"reason": "missing_payload"},
                     )
@@ -918,7 +918,7 @@ class Orchestrator:
                 return ensure_valid(
                     error(
                         "Формат: task <name> <payload>",
-                        intent="task",
+                        intent="task.run",
                         mode="tool",
                         debug={"reason": "missing_payload"},
                     )
@@ -932,7 +932,7 @@ class Orchestrator:
                 return ensure_valid(
                     error(
                         "Формат: task <name> <payload>",
-                        intent="task",
+                        intent="task.run",
                         mode="tool",
                         debug={"reason": "missing_payload"},
                     )
@@ -946,7 +946,7 @@ class Orchestrator:
                 return ensure_valid(
                     error(
                         "Формат: task <name> <payload>",
-                        intent="task",
+                        intent="task.run",
                         mode="tool",
                         debug={"reason": "missing_payload"},
                     )
@@ -959,8 +959,7 @@ class Orchestrator:
             if not payload:
                 return ensure_valid(
                     refused(
-                        "Укажи запрос: /search <текст>",
-                        "Использование: /search <запрос>",
+                        "Укажи запрос: /search <текст>.",
                         intent="command.search",
                         mode="local",
                         debug={"reason": "missing_payload"},
@@ -973,8 +972,7 @@ class Orchestrator:
             if not payload:
                 return ensure_valid(
                     refused(
-                        "Укажи запрос: /search <текст>",
-                        "Использование: /search <запрос>",
+                        "Укажи запрос: /search <текст>.",
                         intent="command.search",
                         mode="local",
                         debug={"reason": "missing_payload"},
@@ -984,7 +982,7 @@ class Orchestrator:
 
         LOGGER.info("Routing: user_id=%s action=perplexity mode=ask", user_id)
         execution = await self.ask_llm(user_id, trimmed, mode="ask")
-        return self._build_llm_result(execution, intent="ask", facts_only=False, request_context=None)
+        return self._build_llm_result(execution, intent="ask.llm", facts_only=False, request_context=None)
 
     async def run_fact_answer(
         self,
@@ -1008,8 +1006,7 @@ class Orchestrator:
         if not trimmed_query:
             return ensure_valid(
                 refused(
-                    "Укажи запрос: /search <текст>",
-                    "Использование: /search <запрос>",
+                    "Укажи запрос: /search <текст>.",
                     intent=intent,
                     mode="local",
                     debug={"reason": "missing_payload"},
@@ -1291,7 +1288,7 @@ class Orchestrator:
             return ensure_valid(
                 refused(
                     "Использование: summary: <текст> или /summary <текст>.",
-                    intent="utility_summary",
+                    intent="utility.summary",
                     mode="local",
                     debug={"reason": "missing_summary_payload"},
                 )
@@ -1310,14 +1307,14 @@ class Orchestrator:
             result = (
                 error(
                     execution.result,
-                    intent="utility_summary",
+                    intent="utility.summary",
                     mode="llm",
                     debug={"task_name": execution.task_name},
                 )
                 if status == "error"
                 else refused(
                     execution.result,
-                    intent="utility_summary",
+                    intent="utility.summary",
                     mode="llm",
                     debug={"task_name": execution.task_name},
                 )
@@ -1325,7 +1322,7 @@ class Orchestrator:
             return ensure_valid(result)
         return self._build_llm_result(
             execution,
-            intent="utility_summary",
+            intent="utility.summary",
             facts_only=self.is_facts_only(user_id),
             request_context=None,
         )
@@ -1376,14 +1373,14 @@ class Orchestrator:
 
     def _make_decision(self, trimmed: str) -> Decision:
         if not trimmed:
-            return Decision(intent="unknown", status="refused", reason="empty_prompt")
+            return Decision(intent="intent.unknown", status="refused", reason="empty_prompt")
         if len(trimmed) > self._MAX_INPUT_LENGTH:
-            return Decision(intent="unknown", status="refused", reason="input_too_long")
+            return Decision(intent="intent.unknown", status="refused", reason="input_too_long")
         lowered = trimmed.lower()
         if _is_destructive_request(lowered):
             return Decision(intent="refused.destructive", status="refused", reason="destructive")
-        if detect_intent(trimmed) == "utility_summary" and not _extract_summary_payload(trimmed):
-            return Decision(intent="utility_summary", status="refused", reason="missing_summary_payload")
+        if detect_intent(trimmed) == "utility.summary" and not _extract_summary_payload(trimmed):
+            return Decision(intent="utility.summary", status="refused", reason="missing_summary_payload")
         if trimmed.startswith("/"):
             command, payload = _split_command(trimmed)
             if command == "/ask":
@@ -1392,8 +1389,8 @@ class Orchestrator:
                 return Decision(intent="command.ask", status="ok")
             if command == "/summary":
                 if not payload:
-                    return Decision(intent="utility_summary", status="refused", reason="missing_summary_payload")
-                return Decision(intent="utility_summary", status="ok")
+                    return Decision(intent="utility.summary", status="refused", reason="missing_summary_payload")
+                return Decision(intent="utility.summary", status="ok")
             if command == "/search":
                 if not payload:
                     return Decision(intent="command.search", status="refused", reason="missing_search_payload")
@@ -1419,8 +1416,7 @@ class Orchestrator:
             )
         if decision.reason == "missing_search_payload":
             return refused(
-                "Укажи запрос: /search <текст>",
-                "Использование: /search <запрос>",
+                "Укажи запрос: /search <текст>.",
                 intent=decision.intent,
                 mode="local",
             )

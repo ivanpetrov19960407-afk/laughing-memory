@@ -10,7 +10,7 @@ def test_last_state_store_ttl_eviction() -> None:
     clock = {"value": now}
     store = LastStateStore(ttl_seconds=10, now_provider=lambda: clock["value"])
 
-    store.update_state(chat_id=1, user_id=2, intent="test", correlation_id="cid-1", event_id="evt-1")
+    store.update_state(chat_id=1, user_id=2, intent="test.example", correlation_id="cid-1", event_id="evt-1")
     assert store.get_state(chat_id=1, user_id=2) is not None
 
     clock["value"] = now + timedelta(seconds=11)

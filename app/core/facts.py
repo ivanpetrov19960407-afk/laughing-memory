@@ -6,12 +6,22 @@ from app.core.result import Source
 def render_fact_response_with_sources(text: str, sources: list[Source]) -> str:
     if not sources:
         return text
-    lines = [text.rstrip(), "", "Источники:"]
+    block = format_sources_block(sources)
+    return "\n".join([text.rstrip(), "", block]).strip()
+
+
+def format_sources_block(sources: list[Source]) -> str:
+    if not sources:
+        return "Источники:\n(нет)"
+    lines = ["Источники:"]
     for index, source in enumerate(sources, start=1):
         title = _trim(source.title or source.url, 140)
-        url = source.url.strip()
-        lines.append(f"[{index}] {title} — {url}")
-    return "\n".join(lines).strip()
+        url = (source.url or "").strip()
+        if url:
+            lines.append(f"[{index}] {title} — {url}")
+        else:
+            lines.append(f"[{index}] {title}")
+    return "\n".join(lines)
 
 
 def build_sources_prompt(sources: list[Source]) -> str:

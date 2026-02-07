@@ -530,7 +530,7 @@ async def _guard_access(update: Update, context: ContextTypes.DEFAULT_TYPE, *, b
             message = f"Слишком часто. Попробуй через {wait_time}."
         result_message = ratelimited(
             message,
-            intent="rate_limit",
+            intent="rate.limit",
             mode="local",
             debug={"scope": result.scope, "retry_after": result.retry_after},
         )
@@ -625,7 +625,7 @@ async def _send_access_denied(
 ) -> None:
     result = _build_simple_result(
         f"Доступ запрещён.\nТвой user_id: {user_id}",
-        intent="access_denied",
+        intent="access.denied",
         status="refused",
         mode="local",
     )
@@ -716,7 +716,7 @@ async def _reply_with_history(
     history = _append_history(context, user_id, "user", prompt)
     response = _format_history(history)
     _append_history(context, user_id, "assistant", response)
-    result = _build_simple_result(response, intent="history", status="ok", mode="local")
+    result = _build_simple_result(response, intent="history.view", status="ok", mode="local")
     await send_result(update, context, result)
 
 
@@ -1398,19 +1398,25 @@ def _render_text_with_sources(text: str, sources: list[Any]) -> str:
         return base
     if "\nИсточники:\n" in base or base.endswith("\nИсточники:"):
         return base
-    lines: list[str] = []
+    from app.core.facts import format_sources_block
+    from app.core.result import Source
+
+    normalized: list[Source] = []
     for source in sources:
-        if isinstance(source, dict):
-            url = str(source.get("url") or "").strip()
-        else:
-            url = str(getattr(source, "url", "") or "").strip()
-        if not url:
+        if isinstance(source, Source):
+            normalized.append(source)
             continue
-        index = len(lines) + 1
-        lines.append(f"{index}) {url}")
-    if not lines:
-        return base
-    return f"{base}\n\nИсточники:\n" + "\n".join(lines)
+        if isinstance(source, dict):
+            title = str(source.get("title") or "")
+            url = str(source.get("url") or "")
+            snippet = str(source.get("snippet") or "")
+            normalized.append(Source(title=title, url=url, snippet=snippet))
+            continue
+        url = str(getattr(source, "url", "") or "")
+        title = str(getattr(source, "title", "") or url)
+        snippet = str(getattr(source, "snippet", "") or "")
+        normalized.append(Source(title=title, url=url, snippet=snippet))
+    return f"{base}\n\n{format_sources_block(normalized)}"
 
 
 def _apply_strict_pseudo_source_guard(text: str | None) -> str:
@@ -1780,18 +1786,6 @@ async def _build_health_message(
     version = resolve_app_version(orchestrator.config.get("system_metadata", {}))
     timezone_label = calendar_store.BOT_TZ.key
     caldav_status = "ok" if tools_calendar.is_caldav_configured(settings) else "error"
-    google_configured = bool(
-        settings.google_oauth_client_id and settings.google_oauth_client_secret and settings.public_base_url
-    )
-    google_partial = any(
-        [settings.google_oauth_client_id, settings.google_oauth_client_secret, settings.public_base_url]
-    )
-    if google_configured:
-        google_status = "ok"
-    elif google_partial:
-        google_status = "error"
-    else:
-        google_status = "disabled"
     llm_status = "ok" if settings.openai_api_key or settings.perplexity_api_key else "error"
     store = calendar_store.load_store()
     reminders_count = len(store.get("reminders") or [])
@@ -1805,7 +1799,7 @@ async def _build_health_message(
     return (
         "Health:\n"
         f"App: v{version}, uptime {uptime}, env {env_label}, tz {timezone_label}\n"
-        f"Integrations: CalDAV {caldav_status}, Google {google_status}, LLM {llm_status}\n"
+        f"Integrations: CalDAV {caldav_status}, LLM {llm_status}\n"
         f"Stores: reminders {reminders_count}, memory {memory_count}, trace {trace_count}\n"
         f"Circuit breakers: {breaker_label}"
     )
@@ -1819,11 +1813,6 @@ def _build_config_message(context: ContextTypes.DEFAULT_TYPE) -> str:
     log_level = logging.getLevelName(logging.getLogger().getEffectiveLevel())
     integrations = {
         "caldav": bool(settings.caldav_url and settings.caldav_username and settings.caldav_password),
-        "google": bool(
-            settings.google_oauth_client_id
-            and settings.google_oauth_client_secret
-            and settings.public_base_url
-        ),
         "openai": bool(settings.openai_api_key),
         "perplexity": bool(settings.perplexity_api_key),
         "web_search": bool(settings.feature_web_search),
@@ -1841,7 +1830,6 @@ def _build_config_message(context: ContextTypes.DEFAULT_TYPE) -> str:
         f"allowlist_path={settings.allowlist_path}",
         f"dialog_memory_path={settings.dialog_memory_path}",
         f"wizard_store_path={settings.wizard_store_path}",
-        f"google_tokens_path={settings.google_tokens_path}",
     ]
     lines = [
         "Config:",
@@ -2761,7 +2749,7 @@ async def _handle_menu_section(
                 ),
                 Action(
                     id="utility_reminders.list",
-                    label="📋 Ближайшие",
+                    label="📋 Список",
                     payload={"op": "reminder.list", "limit": 10},
                 ),
                 _menu_action(),
@@ -4575,7 +4563,7 @@ async def calc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not expression:
         result = _build_simple_result(
             "Использование: /calc <выражение>.",
-            intent="utility_calc",
+            intent="utility.calc",
             status="refused",
             mode="local",
         )
@@ -4585,10 +4573,10 @@ async def calc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         result_value = parse_and_eval(expression)
     except CalcError as exc:
-        result = error(f"Ошибка вычисления: {exc}", intent="utility_calc", mode="local")
+        result = error(f"Ошибка вычисления: {exc}", intent="utility.calc", mode="local")
         await send_result(update, context, result)
         return
-    result = ok(f"{expression} = {result_value}", intent="utility_calc", mode="local")
+    result = ok(f"{expression} = {result_value}", intent="utility.calc", mode="local")
     await send_result(update, context, result)
 
 
@@ -4603,7 +4591,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         result = refused(
             "Использование: /calendar add YYYY-MM-DD HH:MM <title> (или DD.MM.YYYY HH:MM) | list [YYYY-MM-DD YYYY-MM-DD] | "
             "today | week | del <id> | debug_due.",
-            intent="utility_calendar",
+            intent="utility.calendar",
             mode="local",
         )
         await send_result(update, context, result)
@@ -4802,7 +4790,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     result = refused(
         "Неизвестная команда. Использование: /calendar add|list|today|week|del|debug_due.",
-        intent="utility_calendar",
+        intent="utility.calendar",
         mode="local",
     )
     await send_result(update, context, result)
@@ -5198,7 +5186,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     if isinstance(update, Update) and update.message:
         result = _build_simple_result(
             "Ошибка на сервере. Попробуй ещё раз.",
-            intent="error",
+            intent="error.general",
             status="error",
             mode="local",
         )

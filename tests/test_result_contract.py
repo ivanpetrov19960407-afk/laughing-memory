@@ -12,7 +12,6 @@ from app.core.orchestrator import Orchestrator
 from app.core.result import (
     Action,
     OrchestratorResult,
-    STRICT_REFUSAL_TEXT,
     ensure_safe_text_strict,
     ensure_valid,
     normalize_to_orchestrator_result,
@@ -57,14 +56,14 @@ class DummyUpdate:
 
 
 def test_result_defaults_empty_lists() -> None:
-    result = ok("hi", intent="test", mode="local")
+    result = ok("hi", intent="test.example", mode="local")
     assert result.sources == []
     assert result.actions == []
     assert result.attachments == []
 
 
 def test_ratelimited_result_is_valid() -> None:
-    result = ratelimited("slow down", intent="rate_limit", mode="local")
+    result = ratelimited("slow down", intent="rate.limit", mode="local")
     result.validate()
 
 
@@ -140,7 +139,7 @@ def test_handler_does_not_leak_debug(monkeypatch) -> None:
 
     monkeypatch.setattr(handlers, "safe_send_text", fake_safe_send_text)
 
-    result = ok("Hello", intent="test", mode="local", debug={"secret": "token"})
+    result = ok("Hello", intent="test.example", mode="local", debug={"secret": "token"})
     asyncio.run(handlers.send_result(DummyUpdate(), DummyContext(), result))
 
     assert captured["text"] == "Hello"
@@ -157,7 +156,7 @@ def test_handler_renders_actions_keyboard(monkeypatch) -> None:
     monkeypatch.setattr(handlers, "safe_send_text", fake_safe_send_text)
 
     action = Action(id="test", label="Click me", payload={"foo": "bar"})
-    result = ok("Hello", intent="test", mode="local", actions=[action])
+    result = ok("Hello", intent="test.example", mode="local", actions=[action])
     asyncio.run(handlers.send_result(DummyUpdate(), DummyContext(), result))
 
     reply_markup = captured["reply_markup"]
@@ -167,11 +166,11 @@ def test_handler_renders_actions_keyboard(monkeypatch) -> None:
 
 
 def test_actions_and_debug_separation() -> None:
-    result = ok("Hello", intent="test", mode="local", debug={"actions": "oops"})
+    result = ok("Hello", intent="test.example", mode="local", debug={"actions": "oops"})
     with pytest.raises(ValueError):
         result.validate()
     bad_action = Action(id="test", label="Click", payload={"debug": "oops"})
-    result = ok("Hello", intent="test", mode="local", actions=[bad_action])
+    result = ok("Hello", intent="test.example", mode="local", actions=[bad_action])
     with pytest.raises(ValueError):
         result.validate()
 
@@ -179,7 +178,7 @@ def test_actions_and_debug_separation() -> None:
 def test_attachment_validation() -> None:
     result = ok(
         "Hello",
-        intent="test",
+        intent="test.example",
         mode="local",
         attachments=[{"type": "image", "name": "sample", "url": "https://example.com"}],
     )
@@ -201,7 +200,7 @@ def test_ensure_valid_dict_result_defaults() -> None:
     assert isinstance(result, OrchestratorResult)
     assert result.status == "ok"
     assert result.text == "x"
-    assert result.intent == "unknown"
+    assert result.intent == "unknown.unknown"
     assert result.mode == "local"
     assert result.sources == []
     assert result.actions == []
@@ -213,13 +212,13 @@ def test_normalize_string_result_defaults() -> None:
     result = normalize_to_orchestrator_result("hello")
     assert result.status == "ok"
     assert result.text == "hello"
-    assert result.intent == "unknown"
+    assert result.intent == "unknown.unknown"
     assert result.actions == []
     assert result.attachments == []
 
 
 def test_ensure_valid_moves_extra_fields_to_debug() -> None:
-    result = ensure_valid({"status": "ok", "text": "x", "intent": "test", "mode": "local", "foo": "bar"})
+    result = ensure_valid({"status": "ok", "text": "x", "intent": "test.example", "mode": "local", "foo": "bar"})
     assert result.debug.get("extra_fields", {}).get("foo") == "bar"
     assert "actions" not in result.debug
 
@@ -229,7 +228,7 @@ def test_ensure_valid_separates_action_debug() -> None:
         {
             "status": "ok",
             "text": "x",
-            "intent": "test",
+            "intent": "test.example",
             "mode": "local",
             "actions": [{"id": "x", "label": "Open", "payload": {"debug": {"trace": 1}, "foo": "bar"}}],
         }
@@ -239,13 +238,18 @@ def test_ensure_valid_separates_action_debug() -> None:
 
 
 def test_ensure_valid_invalid_actions_type_moves_to_debug() -> None:
-    result = ensure_valid({"status": "ok", "text": "x", "intent": "test", "actions": "oops"})
+    result = ensure_valid({"status": "ok", "text": "x", "intent": "test.example", "actions": "oops"})
     assert result.actions == []
     assert result.debug.get("invalid_actions") == ["oops"]
 
 
 def test_strict_guard_allows_text_when_sources_present() -> None:
-    result = ok("Sources: [1]", intent="test", mode="llm", sources=[{"title": "x", "url": "y", "snippet": "z"}])
+    result = ok(
+        "Sources: [1]",
+        intent="test.example",
+        mode="llm",
+        sources=[{"title": "x", "url": "y", "snippet": "z"}],
+    )
     guarded = ensure_safe_text_strict(result, facts_enabled=False, allow_sources_in_text=False)
 
     assert guarded.status == "ok"
@@ -258,7 +262,7 @@ def test_ensure_valid_normalizes_none_actions() -> None:
         text="Hello",
         status="ok",
         mode="local",
-        intent="test",
+        intent="test.example",
         actions=None,
     )
     normalized = ensure_valid(result)
