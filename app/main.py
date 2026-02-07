@@ -19,7 +19,9 @@ from app.core.dialog_memory import DialogMemory
 from app.core.memory_store import MemoryStore
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
+from app.infra.actions_log_store import ActionsLogStore
 from app.infra.config import load_settings, resolve_env_label, validate_startup_env
+from app.infra.user_profile_store import UserProfileStore
 from app.infra.google_oauth import GoogleOAuthConfig
 from app.infra.google_oauth_server import start_google_oauth_server
 from app.infra.request_context import RequestContext, log_event
@@ -60,6 +62,12 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("context_clear", handlers.context_clear))
     application.add_handler(CommandHandler("context_status", handlers.context_status))
     application.add_handler(CommandHandler("memory", handlers.memory_command))
+    application.add_handler(CommandHandler("profile", handlers.profile_command))
+    application.add_handler(CommandHandler("profile_set", handlers.profile_set_command))
+    application.add_handler(CommandHandler("remember", handlers.remember_command))
+    application.add_handler(CommandHandler("forget", handlers.forget_command))
+    application.add_handler(CommandHandler("history", handlers.history_command))
+    application.add_handler(CommandHandler("history_find", handlers.history_search_command))
     application.add_handler(CommandHandler("allow", handlers.allow))
     application.add_handler(CommandHandler("deny", handlers.deny))
     application.add_handler(CommandHandler("allowlist", handlers.allowlist))
@@ -189,6 +197,8 @@ def main() -> None:
     )
     asyncio.run(dialog_memory.load())
     memory_store = MemoryStore()
+    profile_store = UserProfileStore(settings.db_path)
+    actions_log_store = ActionsLogStore(settings.db_path)
 
     warnings.filterwarnings("ignore", message="No JobQueue set up", category=PTBUserWarning)
     application = Application.builder().token(settings.bot_token).build()
@@ -221,6 +231,8 @@ def main() -> None:
     application.bot_data["start_time"] = time.monotonic()
     application.bot_data["dialog_memory"] = dialog_memory
     application.bot_data["memory_store"] = memory_store
+    application.bot_data["profile_store"] = profile_store
+    application.bot_data["actions_log_store"] = actions_log_store
     application.bot_data["last_state_store"] = LastStateStore(ttl_seconds=7 * 24 * 3600)
     application.bot_data["action_store"] = actions.ActionStore(
         ttl_seconds=settings.action_ttl_seconds,
@@ -236,6 +248,7 @@ def main() -> None:
         wizard_store,
         reminder_scheduler=reminder_scheduler,
         settings=settings,
+        profile_store=profile_store,
     )
     startup_context = RequestContext(
         correlation_id="startup",

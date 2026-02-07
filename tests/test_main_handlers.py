@@ -24,3 +24,5 @@ def test_facts_handlers_registered() -> None:
     assert "facts_on" in commands
     assert "facts_off" in commands
     assert "trace" in commands
+    assert "profile" in commands
+    assert "history" in commands

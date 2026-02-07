@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from app.core.actions_log import ActionLogEntry
+
+LOGGER = logging.getLogger(__name__)
+
+
+class ActionsLogStore:
+    def __init__(self, db_path: Path) -> None:
+        self._db_path = db_path
+        self._connection = sqlite3.connect(db_path, check_same_thread=False)
+        self._connection.row_factory = sqlite3.Row
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                ts TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                correlation_id TEXT
+            )
+            """
+        )
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_actions_user_ts ON user_actions (user_id, ts DESC)"
+        )
+        self._connection.commit()
+
+    def append(
+        self,
+        *,
+        user_id: int,
+        action_type: str,
+        payload: dict[str, Any],
+        ts: datetime | None = None,
+        correlation_id: str | None = None,
+    ) -> ActionLogEntry:
+        timestamp = (ts or datetime.now(timezone.utc)).isoformat()
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        cursor = self._connection.execute(
+            """
+            INSERT INTO user_actions (user_id, ts, action_type, payload, correlation_id)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, timestamp, action_type, encoded, correlation_id),
+        )
+        self._connection.commit()
+        entry_id = cursor.lastrowid if cursor.lastrowid else 0
+        return ActionLogEntry(
+            id=entry_id,
+            user_id=user_id,
+            ts=_parse_datetime(timestamp),
+            action_type=action_type,
+            payload=payload,
+            correlation_id=correlation_id,
+        )
+
+    def search(
+        self,
+        *,
+        user_id: int,
+        query: str | None = None,
+        limit: int = 10,
+    ) -> list[ActionLogEntry]:
+        if limit <= 0:
+            return []
+        normalized_query = (query or "").strip()
+        params: list[object] = [user_id]
+        sql = """
+            SELECT id, user_id, ts, action_type, payload, correlation_id
+            FROM user_actions
+            WHERE user_id = ?
+        """
+        if normalized_query:
+            if normalized_query.startswith("type:"):
+                action_type = normalized_query.replace("type:", "", 1).strip()
+                if action_type:
+                    sql += " AND action_type LIKE ?"
+                    params.append(f"%{action_type}%")
+            else:
+                sql += " AND (action_type LIKE ? OR payload LIKE ?)"
+                params.extend([f"%{normalized_query}%", f"%{normalized_query}%"])
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        cursor = self._connection.execute(sql, params)
+        rows = cursor.fetchall()
+        return [_row_to_entry(row) for row in rows]
+
+    def close(self) -> None:
+        try:
+            self._connection.close()
+        except sqlite3.Error:
+            LOGGER.exception("Failed to close actions log database connection")
+
+
+def _row_to_entry(row: sqlite3.Row) -> ActionLogEntry:
+    raw_payload = row["payload"] if isinstance(row, sqlite3.Row) else None
+    try:
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else {}
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return ActionLogEntry(
+        id=row["id"],
+        user_id=row["user_id"],
+        ts=_parse_datetime(row["ts"]),
+        action_type=row["action_type"],
+        payload=payload,
+        correlation_id=row["correlation_id"],
+    )
+
+
+def _parse_datetime(value: str | None) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
