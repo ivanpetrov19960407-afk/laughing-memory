@@ -41,7 +41,9 @@ from app.infra.rate_limiter import RateLimiter
 from app.infra.request_context import (
     RequestContext,
     add_trace,
+    elapsed_ms,
     get_request_context,
+    log_error,
     log_event,
     log_request,
     set_input_text,
@@ -267,14 +269,13 @@ def _with_error_handling(
             await handler(update, context)
         except Exception as exc:
             set_status(context, "error")
-            log_event(
+            log_error(
                 LOGGER,
                 request_context,
                 component="handler",
-                event="error",
-                status="error",
-                error_type=type(exc).__name__,
-                error=str(exc),
+                where="handler.wrapper",
+                exc=exc,
+                extra={"handler": handler.__name__},
             )
             await _handle_exception(update, context, exc)
         finally:
@@ -816,7 +817,7 @@ async def send_result(
     if request_id:
         total_duration_ms = None
         if request_context:
-            total_duration_ms = (time.monotonic() - request_context.start_time) * 1000
+            total_duration_ms = elapsed_ms(request_context.start_time)
         log_event(
             LOGGER,
             request_context,
@@ -833,7 +834,7 @@ async def send_result(
             component="handler",
             name="send_result",
             status=public_result.status,
-            duration_ms=(time.monotonic() - send_start) * 1000,
+            duration_ms=elapsed_ms(send_start),
         )
 
 

@@ -26,7 +26,14 @@ from app.core.tasks import TaskDefinition, TaskError, get_task_registry
 from app.infra.access import AccessController
 from app.infra.llm import LLMAPIError, LLMClient, LLMGuardError, ensure_plain_text
 from app.infra.rate_limit import RateLimiter
-from app.infra.request_context import RequestContext, add_trace, log_event
+from app.infra.request_context import (
+    RequestContext,
+    add_trace,
+    build_args_shape,
+    elapsed_ms,
+    log_error,
+    log_event,
+)
 from app.infra.storage import TaskStorage
 from app.tools.web_search import NullSearchClient, SearchClient
 
@@ -252,7 +259,7 @@ class Orchestrator:
         start_time: float,
         result: OrchestratorResult,
     ) -> OrchestratorResult:
-        duration_ms = (time.monotonic() - start_time) * 1000
+        duration_ms = elapsed_ms(start_time)
         log_event(
             LOGGER,
             request_context,
@@ -293,6 +300,7 @@ class Orchestrator:
             self._record_task_result(user_id, task_name, payload, result, executed_at)
             return ensure_valid(result)
         start_time = time.monotonic()
+        args_shape = build_args_shape({"payload": payload})
         log_event(
             LOGGER,
             request_context,
@@ -300,7 +308,16 @@ class Orchestrator:
             event="tool.call.start",
             status="ok",
             tool_name=task_name,
-            payload=payload,
+            intent=f"task.{task_name}",
+            args_shape=args_shape,
+        )
+        add_trace(
+            request_context,
+            step="tool.call",
+            component="tool",
+            name=task_name,
+            status="start",
+            duration_ms=0.0,
         )
         try:
             task = self._get_task(task_name)
@@ -313,15 +330,13 @@ class Orchestrator:
                 debug=_tool_debug_payload(request_context, exc, reason="task_error"),
             )
             LOGGER.warning("Task execution failed: %s", exc, exc_info=True)
-            log_event(
+            log_error(
                 LOGGER,
                 request_context,
                 component="tool",
-                event="error",
-                status="error",
-                tool_name=task_name,
-                error_type=type(exc).__name__,
-                error=str(exc),
+                where="tool.dispatch",
+                exc=exc,
+                extra={"tool_name": task_name},
             )
         except Exception as exc:  # pragma: no cover - safety net
             result = error(
@@ -331,18 +346,16 @@ class Orchestrator:
                 debug=_tool_debug_payload(request_context, exc, reason="unexpected_exception"),
             )
             LOGGER.exception("Unexpected error while executing task: %s", exc)
-            log_event(
+            log_error(
                 LOGGER,
                 request_context,
                 component="tool",
-                event="error",
-                status="error",
-                tool_name=task_name,
-                error_type=type(exc).__name__,
-                error="Unexpected error while executing task.",
+                where="tool.dispatch",
+                exc=exc,
+                extra={"tool_name": task_name},
             )
         self._record_task_result(user_id, task_name, payload, result, executed_at)
-        duration_ms = (time.monotonic() - start_time) * 1000
+        duration_ms = elapsed_ms(start_time)
         log_event(
             LOGGER,
             request_context,
@@ -450,6 +463,8 @@ class Orchestrator:
         else:
             llm_config = self._config.get("llm", {})
             model = self._llm_model or llm_config.get("model", "sonar")
+            provider = _resolve_llm_provider(llm_client)
+            llm_trace_name = f"{provider}/{model}" if provider else model
             effective_system_prompt = system_prompt if system_prompt is not None else llm_config.get("system_prompt")
             if mode == "search":
                 effective_system_prompt = llm_config.get(
@@ -508,7 +523,17 @@ class Orchestrator:
                 status="ok",
                 mode=mode,
                 prompt=trimmed,
+                model=model,
+                provider=provider or "-",
                 request_id=request_id or "-",
+            )
+            add_trace(
+                request_context,
+                step="llm.call",
+                component="llm",
+                name=llm_trace_name,
+                status="start",
+                duration_ms=0.0,
             )
             try:
                 messages = _build_messages(trimmed)
@@ -560,15 +585,13 @@ class Orchestrator:
                 if request_context:
                     request_context.meta["llm_error"] = _llm_error_payload(request_context, exc)
                 LOGGER.warning("LLM guard error: %s", exc)
-                log_event(
+                log_error(
                     LOGGER,
                     request_context,
                     component="llm",
-                    event="error",
-                    status="error",
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                    mode=mode,
+                    where="llm.client",
+                    exc=exc,
+                    extra={"mode": mode, "model": model, "provider": provider or "-"},
                 )
             except LLMAPIError as exc:
                 result = self._map_llm_error(exc)
@@ -580,15 +603,13 @@ class Orchestrator:
                     exc.status_code,
                     user_id,
                 )
-                log_event(
+                log_error(
                     LOGGER,
                     request_context,
                     component="llm",
-                    event="error",
-                    status="error",
-                    error_type=type(exc).__name__,
-                    error=exc.message,
-                    mode=mode,
+                    where="llm.client",
+                    exc=exc,
+                    extra={"mode": mode, "model": model, "provider": provider or "-"},
                 )
             except Exception as exc:
                 result = "Временная ошибка сервиса. Попробуйте позже."
@@ -596,18 +617,16 @@ class Orchestrator:
                 if request_context:
                     request_context.meta["llm_error"] = _llm_error_payload(request_context, exc)
                 LOGGER.warning("LLM request failed: %s", exc, exc_info=True)
-                log_event(
+                log_error(
                     LOGGER,
                     request_context,
                     component="llm",
-                    event="error",
-                    status="error",
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                    mode=mode,
+                    where="llm.client",
+                    exc=exc,
+                    extra={"mode": mode, "model": model, "provider": provider or "-"},
                 )
             finally:
-                duration_ms = (time.monotonic() - start_time) * 1000
+                duration_ms = elapsed_ms(start_time)
                 log_event(
                     LOGGER,
                     request_context,
@@ -616,12 +635,14 @@ class Orchestrator:
                     status=status,
                     duration_ms=duration_ms,
                     mode=mode,
+                    model=model,
+                    provider=provider or "-",
                 )
                 add_trace(
                     request_context,
                     step="llm.call",
                     component="llm",
-                    name=mode,
+                    name=llm_trace_name,
                     status=status,
                     duration_ms=duration_ms,
                 )
@@ -1197,6 +1218,16 @@ def _build_sources_from_citations(citations: list[str]) -> list[Source]:
         if isinstance(url, str) and url:
             sources.append(Source(title=url, url=url, snippet=""))
     return sources
+
+
+def _resolve_llm_provider(client: LLMClient) -> str:
+    provider = getattr(client, "provider", None)
+    if isinstance(provider, str) and provider:
+        return provider
+    name = client.__class__.__name__
+    if name.endswith("Client"):
+        name = name[: -len("Client")]
+    return name.lower()
 
 
 def _coerce_bool(value: object) -> bool:
