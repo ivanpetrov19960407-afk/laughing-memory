@@ -2729,6 +2729,9 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         chat_id = update.effective_chat.id if update.effective_chat else 0
         request_context = get_request_context(context)
+        scheduler = _get_reminder_scheduler(context)
+        settings = _get_settings(context)
+        reminders_enabled = bool(getattr(settings, "reminders_enabled", False))
         tool_result = await create_event(
             start_at=dt,
             title=title,
@@ -2736,6 +2739,8 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             user_id=user_id,
             request_id=request_context.request_id if request_context else None,
             intent="utility_calendar.add",
+            reminder_scheduler=scheduler,
+            reminders_enabled=reminders_enabled,
         )
         result = replace(tool_result, mode="local")
         await send_result(update, context, result)

@@ -59,7 +59,7 @@ async def _process_due_reminders(application: Application) -> None:
         event = await calendar_store.get_event(item.event_id)
         event_dt = event.dt if event else item.trigger_at
         message_time = event_dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-        text = f"⏰ Напоминание: {item.text}\nКогда: {message_time} (Europe/Vilnius)"
+        text = f"⏰ Напоминание: {item.text}\nКогда: {message_time} (МСК)"
         actions = _build_reminder_actions(item)
         action_store = application.bot_data.get("action_store")
         reply_markup = None

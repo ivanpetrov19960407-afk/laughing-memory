@@ -11,7 +11,9 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-BOT_TZ = ZoneInfo(os.getenv("BOT_TIMEZONE", "Europe/Vilnius"))
+from config.constants import TZ
+
+BOT_TZ = TZ
 MOSCOW_TZ = BOT_TZ  # backward compatible alias
 VIENNA_TZ = BOT_TZ  # backward compatible alias
 @dataclass(frozen=True)
