@@ -1103,6 +1103,33 @@ def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
     raw = value.strip()
     lowered = raw.lower()
     current = (now or datetime.now(tz=VIENNA_TZ)).astimezone(VIENNA_TZ)
+    full_date_match = re.match(
+        r"^\s*(?P<day>\d{1,2})[./-](?P<month>\d{1,2})[./-](?P<year>\d{4})(?:\s+(?P<rest>.+))?$",
+        raw,
+    )
+    if full_date_match:
+        day = int(full_date_match.group("day"))
+        month = int(full_date_match.group("month"))
+        year = int(full_date_match.group("year"))
+        rest = full_date_match.group("rest")
+        parsed_time = time(0, 0)
+        if rest:
+            parsed_time, remainder = _parse_time_fragment(rest, require_full=True)
+            if remainder:
+                raise ValueError("Формат времени: HH:MM")
+        return _combine_local(date(year, month, day), parsed_time)
+    full_iso_match = re.match(r"^\s*(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})(?:\s+(?P<rest>.+))?$", raw)
+    if full_iso_match:
+        day = int(full_iso_match.group("day"))
+        month = int(full_iso_match.group("month"))
+        year = int(full_iso_match.group("year"))
+        rest = full_iso_match.group("rest")
+        parsed_time = time(0, 0)
+        if rest:
+            parsed_time, remainder = _parse_time_fragment(rest, require_full=True)
+            if remainder:
+                raise ValueError("Формат времени: HH:MM")
+        return _combine_local(date(year, month, day), parsed_time)
     if lowered.startswith("через"):
         fragment = raw[len("через") :].strip()
         hours, minutes = _parse_relative_delta(fragment)
@@ -1131,7 +1158,10 @@ def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
                 raise ValueError("Формат времени: HH:MM")
             target_date = _next_weekday_date(current, weekday_value, parsed_time)
             return _combine_local(target_date, parsed_time)
-    date_match = re.match(r"^\s*(?P<day>\d{1,2})[./-](?P<month>\d{1,2})\s+(?P<rest>.+)$", raw)
+    date_match = re.match(
+        r"^\s*(?P<day>\d{1,2})[./-](?P<month>\d{1,2})(?![./-]\d{4})\s+(?P<rest>.+)$",
+        raw,
+    )
     if date_match:
         day = int(date_match.group("day"))
         month = int(date_match.group("month"))
@@ -1143,6 +1173,20 @@ def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
         if candidate < current:
             candidate = candidate.replace(year=current.year + 1)
         return candidate
+
+    short_date_match = re.match(
+        r"^\s*(?P<day>\d{1,2})[./-](?P<month>\d{1,2})(?![./-]\d{4})\s*$",
+        raw,
+    )
+    if short_date_match:
+        day = int(short_date_match.group("day"))
+        month = int(short_date_match.group("month"))
+        candidate_date = date(current.year, month, day)
+        candidate = _combine_local(candidate_date, time(0, 0))
+        if candidate < current:
+            candidate = candidate.replace(year=current.year + 1)
+        return candidate
+
     for fmt in ("%d.%m %H:%M", "%d-%m %H:%M", "%d/%m %H:%M"):
         try:
             parsed = datetime.strptime(raw, fmt)
