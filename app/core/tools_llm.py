@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.core.orchestrator import Orchestrator
 from app.core.result import OrchestratorResult, ensure_valid, error, ok, refused
+from app.infra.request_context import RequestContext
 
 BASE_SYSTEM_PROMPT = (
     "Ты аккуратный помощник. Не выдумывай, не добавляй источники без наличия, "
@@ -59,6 +60,7 @@ async def _run_llm_tool(
 ) -> OrchestratorResult:
     orchestrator = ctx.get("orchestrator")
     user_id = ctx.get("user_id")
+    request_context = ctx.get("request_context")
     if not isinstance(orchestrator, Orchestrator) or not isinstance(user_id, int):
         return ensure_valid(
             error(
@@ -73,6 +75,7 @@ async def _run_llm_tool(
         prompt,
         mode="ask",
         system_prompt=system_prompt,
+        request_context=request_context if isinstance(request_context, RequestContext) else None,
     )
     if execution.status != "success":
         if "LLM не настроен" in execution.result:

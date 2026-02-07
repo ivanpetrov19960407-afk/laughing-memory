@@ -38,7 +38,16 @@ from app.infra.allowlist import AllowlistStore
 from app.infra.messaging import safe_edit_text, safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limiter import RateLimiter
-from app.infra.request_context import get_request_context, log_request, set_input_text, set_status, start_request
+from app.infra.request_context import (
+    RequestContext,
+    add_trace,
+    get_request_context,
+    log_event,
+    log_request,
+    set_input_text,
+    set_status,
+    start_request,
+)
 from app.infra.storage import TaskStorage
 
 LOGGER = logging.getLogger(__name__)
@@ -212,14 +221,27 @@ async def _log_route(update: Update, context: ContextTypes.DEFAULT_TYPE, handler
             message_type = "non_text"
         route = routing.resolve_text_route(text) if text else "non_text"
     modes = await _get_active_modes(update, context)
-    LOGGER.info(
-        "Route: user_id=%s type=%s command=%s handler=%s route=%s modes=%s",
-        user_id,
-        message_type,
-        command or "-",
-        handler_name,
-        route,
-        modes,
+    request_context = get_request_context(context)
+    log_event(
+        LOGGER,
+        request_context,
+        component="router",
+        event="route.selected",
+        status="ok",
+        user_id=user_id,
+        message_type=message_type,
+        command=command or "-",
+        handler=handler_name,
+        intent=route,
+        modes=modes,
+    )
+    add_trace(
+        request_context,
+        step="route.selected",
+        component="router",
+        name=route,
+        status="ok",
+        duration_ms=None,
     )
 
 
@@ -229,11 +251,31 @@ def _with_error_handling(
     @wraps(handler)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         request_context = start_request(update, context)
+        log_event(
+            LOGGER,
+            request_context,
+            component="handler",
+            event="update.received",
+            status="ok",
+            user_id=request_context.user_id,
+            chat_id=request_context.chat_id,
+            message_id=request_context.message_id,
+            text=request_context.input_text,
+        )
         try:
             await _log_route(update, context, handler.__name__)
             await handler(update, context)
         except Exception as exc:
             set_status(context, "error")
+            log_event(
+                LOGGER,
+                request_context,
+                component="handler",
+                event="error",
+                status="error",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             await _handle_exception(update, context, exc)
         finally:
             log_request(LOGGER, request_context)
@@ -393,9 +435,14 @@ async def _reply_with_history(
     await send_result(update, context, result)
 
 
-def _build_user_context(update: Update) -> dict[str, int]:
+def _build_user_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> dict[str, object]:
     user_id = update.effective_user.id if update.effective_user else 0
-    return {"user_id": user_id}
+    request_context = get_request_context(context)
+    payload: dict[str, object] = {"user_id": user_id}
+    if request_context:
+        payload["request_id"] = request_context.correlation_id
+        payload["request_context"] = request_context
+    return payload
 
 
 def _build_menu_actions(context: ContextTypes.DEFAULT_TYPE, *, user_id: int) -> list[Action]:
@@ -524,6 +571,7 @@ def _build_user_context_with_dialog(
     dialog_context: str | None,
     dialog_message_count: int,
     request_id: str | None,
+    request_context: RequestContext | None,
 ) -> dict[str, object]:
     user_id = update.effective_user.id if update.effective_user else 0
     payload: dict[str, object] = {"user_id": user_id}
@@ -532,6 +580,8 @@ def _build_user_context_with_dialog(
         payload["dialog_message_count"] = dialog_message_count
     if request_id:
         payload["request_id"] = request_id
+    if request_context:
+        payload["request_context"] = request_context
     return payload
 
 
@@ -580,35 +630,34 @@ async def _prepare_dialog_context(
 
 def _build_tool_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> dict[str, object]:
     user_id = update.effective_user.id if update.effective_user else 0
-    return {"user_id": user_id, "orchestrator": _get_orchestrator(context)}
+    return {
+        "user_id": user_id,
+        "orchestrator": _get_orchestrator(context),
+        "request_context": get_request_context(context),
+    }
 
 
 def _log_orchestrator_result(
     user_id: int,
     result: OrchestratorResult,
     *,
-    request_id: str | None = None,
+    request_context: RequestContext | None = None,
 ) -> None:
-    LOGGER.info(
-        "Orchestrator result: request_id=%s user_id=%s intent=%s mode=%s status=%s sources=%s actions=%s attachments=%s response_len=%s",
-        request_id or "-",
-        user_id,
-        result.intent,
-        result.mode,
-        result.status,
-        len(result.sources),
-        len(result.actions),
-        len(result.attachments),
-        len(result.text),
+    log_event(
+        LOGGER,
+        request_context,
+        component="orchestrator",
+        event="result.normalized",
+        status=result.status,
+        user_id=user_id,
+        intent=result.intent,
+        mode=result.mode,
+        sources=len(result.sources),
+        actions=len(result.actions),
+        attachments=len(result.attachments),
+        response=result.text,
+        debug=result.debug,
     )
-    if result.debug:
-        LOGGER.info(
-            "Orchestrator debug: request_id=%s user_id=%s intent=%s debug=%s",
-            request_id or "-",
-            user_id,
-            result.intent,
-            result.debug,
-        )
 
 
 async def _send_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None) -> None:
@@ -728,14 +777,20 @@ async def send_result(
         public_result = replace(public_result, text="Нет ответа.")
     chat_id = update.effective_chat.id if update.effective_chat else 0
     request_context = get_request_context(context)
-    request_id = request_context.request_id if request_context else None
+    request_id = request_context.correlation_id if request_context else None
+    if request_context and not public_result.request_id:
+        public_result = replace(public_result, request_id=request_context.correlation_id)
+    if request_context:
+        debug_payload = dict(public_result.debug)
+        debug_payload.setdefault("trace", request_context.trace)
+        public_result = replace(public_result, debug=debug_payload)
     if request_id:
         sent_key = f"send_result:{request_id}"
         if context.chat_data.get(sent_key):
             LOGGER.warning("send_result skipped duplicate: request_id=%s intent=%s", request_id, public_result.intent)
             return
         context.chat_data[sent_key] = True
-    _log_orchestrator_result(user_id, public_result, request_id=request_id)
+    _log_orchestrator_result(user_id, public_result, request_context=request_context)
     guarded_text = public_result.text
     if _strict_no_pseudo_sources(context):
         guarded_text = _apply_strict_pseudo_source_guard(public_result.text)
@@ -755,15 +810,30 @@ async def send_result(
         f"actions={len(public_result.actions)} "
         f"reply_markup={effective_reply_markup is not None}",
     )
+    send_start = time.monotonic()
     await _send_text(update, context, final_text, reply_markup=effective_reply_markup)
     await _send_attachments(update, context, public_result.attachments)
     if request_id:
-        LOGGER.info(
-            "Response: request_id=%s intent=%s status=%s output_preview=%r",
-            request_id,
-            public_result.intent,
-            public_result.status,
-            output_preview,
+        total_duration_ms = None
+        if request_context:
+            total_duration_ms = (time.monotonic() - request_context.start_time) * 1000
+        log_event(
+            LOGGER,
+            request_context,
+            component="handler",
+            event="response.sent",
+            status=public_result.status,
+            duration_ms=total_duration_ms,
+            intent=public_result.intent,
+            output_preview=output_preview,
+        )
+        add_trace(
+            request_context,
+            step="response.sent",
+            component="handler",
+            name="send_result",
+            status=public_result.status,
+            duration_ms=(time.monotonic() - send_start) * 1000,
         )
 
 
@@ -959,7 +1029,12 @@ async def task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user_id = update.effective_user.id if update.effective_user else 0
     try:
-        tool_result = orchestrator.execute_task(user_id, task_name, payload)
+        tool_result = orchestrator.execute_task(
+            user_id,
+            task_name,
+            payload,
+            request_context=get_request_context(context),
+        )
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
@@ -1041,7 +1116,7 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         prompt=prompt,
     )
     request_context = get_request_context(context)
-    request_id = request_context.request_id if request_context else None
+    request_id = request_context.correlation_id if request_context else None
     try:
         result = await orchestrator.handle(
             f"/ask {prompt}",
@@ -1050,6 +1125,7 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 dialog_context=dialog_context,
                 dialog_message_count=dialog_count,
                 request_id=request_id,
+                request_context=request_context,
             ),
         )
     except Exception as exc:
@@ -1070,7 +1146,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
     try:
         payload = f"/summary {prompt}" if prompt else "/summary"
-        result = await orchestrator.handle(payload, _build_user_context(update))
+        result = await orchestrator.handle(payload, _build_user_context(update, context))
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
@@ -1086,7 +1162,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     prompt = " ".join(context.args).strip()
     payload = f"/search {prompt}" if prompt else "/search"
     try:
-        result = await orchestrator.handle(payload, _build_user_context(update))
+        result = await orchestrator.handle(payload, _build_user_context(update, context))
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
@@ -2127,10 +2203,15 @@ async def _dispatch_action_payload(
                 mode="local",
                 debug={"reason": "invalid_task_payload"},
             )
-        return orchestrator.execute_task(user_id, task_name, task_payload)
+        return orchestrator.execute_task(
+            user_id,
+            task_name,
+            task_payload,
+            request_context=get_request_context(context),
+        )
     text = payload.get("text")
     if isinstance(text, str) and text.strip():
-        return await orchestrator.handle(text, _build_user_context(update))
+        return await orchestrator.handle(text, _build_user_context(update, context))
     return refused(
         "Действие не поддерживается.",
         intent="ui.action",
@@ -2187,7 +2268,7 @@ async def _dispatch_command_payload(
         query = args.strip()
         if not query:
             return refused("Укажи запрос: /search <текст>", intent="menu.search", mode="local")
-        return await orchestrator.handle(f"/search {query}", _build_user_context(update))
+        return await orchestrator.handle(f"/search {query}", _build_user_context(update, context))
     if normalized == "/reminders":
         user_id = update.effective_user.id if update.effective_user else 0
         chat_id = update.effective_chat.id if update.effective_chat else 0
@@ -2738,7 +2819,7 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             title=title,
             chat_id=chat_id,
             user_id=user_id,
-            request_id=request_context.request_id if request_context else None,
+            request_id=request_context.correlation_id if request_context else None,
             intent="utility_calendar.add",
             reminder_scheduler=scheduler,
             reminders_enabled=reminders_enabled,
@@ -2969,7 +3050,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         prompt=prompt,
     )
     request_context = get_request_context(context)
-    request_id = request_context.request_id if request_context else None
+    request_id = request_context.correlation_id if request_context else None
     try:
         result = await orchestrator.handle(
             prompt,
@@ -2978,6 +3059,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 dialog_context=dialog_context,
                 dialog_message_count=dialog_count,
                 request_id=request_id,
+                request_context=request_context,
             ),
         )
     except Exception as exc:
