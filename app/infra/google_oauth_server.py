@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from app.infra.google_oauth import GoogleOAuthConfig, OAuthStateStore, build_authorization_url, handle_oauth_callback
+from app.infra.resilience import CircuitBreaker, RetryPolicy
 from app.stores.google_tokens import GoogleTokenStore
 
 LOGGER = logging.getLogger(__name__)
@@ -22,11 +23,15 @@ class OAuthHTTPServer(ThreadingHTTPServer):
         config: GoogleOAuthConfig,
         token_store: GoogleTokenStore,
         state_store: OAuthStateStore,
+        retry_policy: RetryPolicy | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         super().__init__(server_address, handler_class)
         self.config = config
         self.token_store = token_store
         self.state_store = state_store
+        self.retry_policy = retry_policy
+        self.circuit_breaker = circuit_breaker
 
 
 class GoogleOAuthHandler(BaseHTTPRequestHandler):
@@ -75,6 +80,8 @@ class GoogleOAuthHandler(BaseHTTPRequestHandler):
             token_store=self.server.token_store,
             state_store=self.server.state_store,
             query_params=flat,
+            retry_policy=self.server.retry_policy,
+            circuit_breaker=self.server.circuit_breaker,
         )
         self._send_html(HTTPStatus(status), message)
 
@@ -101,6 +108,8 @@ def start_google_oauth_server(
     port: int,
     config: GoogleOAuthConfig,
     token_store: GoogleTokenStore,
+    retry_policy: RetryPolicy | None = None,
+    circuit_breaker: CircuitBreaker | None = None,
 ) -> OAuthHTTPServer:
     state_store = OAuthStateStore()
     bind_host = "127.0.0.1"
@@ -112,6 +121,8 @@ def start_google_oauth_server(
         config=config,
         token_store=token_store,
         state_store=state_store,
+        retry_policy=retry_policy,
+        circuit_breaker=circuit_breaker,
     )
     thread = threading.Thread(target=server.serve_forever, name="google-oauth-server", daemon=True)
     thread.start()
@@ -125,6 +136,8 @@ def run_google_oauth_server(
     port: int,
     config: GoogleOAuthConfig,
     token_store: GoogleTokenStore,
+    retry_policy: RetryPolicy | None = None,
+    circuit_breaker: CircuitBreaker | None = None,
 ) -> None:
     state_store = OAuthStateStore()
     bind_host = "127.0.0.1"
@@ -136,6 +149,8 @@ def run_google_oauth_server(
         config=config,
         token_store=token_store,
         state_store=state_store,
+        retry_policy=retry_policy,
+        circuit_breaker=circuit_breaker,
     )
     LOGGER.info("Google OAuth server listening on %s:%s", bind_host, port)
     try:

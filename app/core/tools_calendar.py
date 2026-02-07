@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from app.core import calendar_store, tools_calendar_caldav
-from app.core.calendar_backend import CalDAVCalendarBackend, LocalCalendarBackend
-from app.core.result import Action, OrchestratorResult, ensure_valid, ok, refused
+from app.core.calendar_backend import CalendarCreateResult, LocalCalendarBackend
+from app.core.error_messages import map_error_text
+from app.core.result import Action, OrchestratorResult, ensure_valid, error, ok, refused
 from app.core.reminders import ReminderScheduler
+from app.infra.request_context import RequestContext, add_trace, log_error, log_event
+from app.infra.resilience import (
+    CircuitBreakerRegistry,
+    RetryPolicy,
+    TimeoutConfig,
+    is_network_error,
+    is_timeout_error,
+    retry_async,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +50,18 @@ def _ensure_aware_for_label(value: datetime) -> datetime:
     return value
 
 
+def _resolve_timeouts(timeouts: TimeoutConfig | None) -> TimeoutConfig:
+    return timeouts or TimeoutConfig()
+
+
+def _resolve_retry_policy(retry_policy: RetryPolicy | None) -> RetryPolicy:
+    return retry_policy or RetryPolicy()
+
+
+def _is_retryable_calendar_error(exc: Exception) -> bool:
+    return is_timeout_error(exc) or is_network_error(exc)
+
+
 async def create_event(
     *,
     start_at: datetime,
@@ -47,6 +72,10 @@ async def create_event(
     intent: str = "utility_calendar.add",
     reminder_scheduler: ReminderScheduler | None = None,
     reminders_enabled: bool = True,
+    request_context: RequestContext | None = None,
+    circuit_breakers: CircuitBreakerRegistry | None = None,
+    retry_policy: RetryPolicy | None = None,
+    timeouts: TimeoutConfig | None = None,
 ) -> OrchestratorResult:
     request_label = request_id or "-"
     LOGGER.info(
@@ -59,6 +88,9 @@ async def create_event(
     backend_mode = _resolve_backend_mode()
     end_at = start_at + timedelta(hours=1)
     if backend_mode == "caldav":
+        timeouts = _resolve_timeouts(timeouts)
+        retry_policy = _resolve_retry_policy(retry_policy)
+        breaker = circuit_breakers.get("caldav") if circuit_breakers else None
         config = tools_calendar_caldav.load_caldav_config()
         if config is None:
             LOGGER.info(
@@ -77,14 +109,107 @@ async def create_event(
                 reminder_scheduler=reminder_scheduler,
                 reminders_enabled=reminders_enabled,
             )
+        if breaker is not None:
+            allowed, circuit_event = breaker.allow_request()
+            if circuit_event:
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="caldav",
+                    event=circuit_event,
+                    status="ok",
+                    name="calendar.create",
+                )
+            if not allowed:
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="caldav",
+                    event="circuit.short_circuit",
+                    status="error",
+                    name="calendar.create",
+                )
+                add_trace(
+                    request_context,
+                    step="calendar.caldav",
+                    component="caldav",
+                    name="calendar.create",
+                    status="error",
+                    duration_ms=0.0,
+                )
+                return ensure_valid(
+                    error(
+                        map_error_text("temporarily_unavailable"),
+                        intent=intent,
+                        mode="tool",
+                        debug={"reason": "circuit_open"},
+                    )
+                )
+        start_time = time.monotonic()
+        add_trace(
+            request_context,
+            step="calendar.caldav",
+            component="caldav",
+            name="calendar.create",
+            status="start",
+            duration_ms=0.0,
+        )
+        status = "ok"
         try:
-            backend = CalDAVCalendarBackend(config, chat_id=chat_id, user_id=user_id)
-            created = await backend.create_event(title=title, start_dt=start_at, end_dt=end_at)
+            uid = str(uuid.uuid4())
+            created_remote = await retry_async(
+                lambda: tools_calendar_caldav.create_event(
+                    config,
+                    start_at=start_at,
+                    end_at=end_at,
+                    title=title,
+                    uid=uid,
+                ),
+                policy=retry_policy,
+                timeout_seconds=timeouts.external_api_seconds,
+                logger=LOGGER,
+                request_context=request_context,
+                component="caldav",
+                name="calendar.create",
+                is_retryable=_is_retryable_calendar_error,
+            )
+            created_local = await calendar_store.add_item(
+                dt=start_at,
+                title=title,
+                chat_id=chat_id,
+                remind_at=None,
+                user_id=user_id,
+                reminders_enabled=False,
+                event_id=created_remote.uid,
+            )
+            event_payload = created_local.get("event") if isinstance(created_local, dict) else None
+            event_id = event_payload.get("event_id") if isinstance(event_payload, dict) else None
+            if not isinstance(event_id, str) or not event_id:
+                raise RuntimeError("local_event_missing_id")
+            debug: dict[str, str] = {}
+            if created_remote.calendar_name:
+                debug["caldav_calendar"] = created_remote.calendar_name
+            if created_remote.calendar_url_base:
+                debug["caldav_url_base"] = created_remote.calendar_url_base
+            if created_remote.uid:
+                debug["caldav_uid"] = created_remote.uid
+            created = CalendarCreateResult(event_id=event_id, debug=debug)
             await _maybe_schedule_reminder(
                 created.event_id,
                 reminder_scheduler=reminder_scheduler,
                 reminders_enabled=reminders_enabled,
             )
+            if breaker is not None:
+                circuit_event = breaker.record_success()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="caldav",
+                        event=circuit_event,
+                        status="ok",
+                        name="calendar.create",
+                    )
             return _build_create_result(
                 created,
                 start_at=start_at,
@@ -92,7 +217,47 @@ async def create_event(
                 intent=intent,
                 calendar_backend="caldav",
             )
+        except asyncio.TimeoutError as exc:
+            status = "error"
+            if breaker is not None:
+                circuit_event = breaker.record_failure()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="caldav",
+                        event=circuit_event,
+                        status="error",
+                        name="calendar.create",
+                    )
+            log_error(
+                LOGGER,
+                request_context,
+                component="caldav",
+                where="caldav.timeout",
+                exc=exc,
+            )
+            return ensure_valid(
+                error(
+                    map_error_text("timeout"),
+                    intent=intent,
+                    mode="tool",
+                    debug={"reason": "timeout"},
+                )
+            )
         except Exception as exc:
+            status = "error"
+            if breaker is not None:
+                circuit_event = breaker.record_failure()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="caldav",
+                        event=circuit_event,
+                        status="error",
+                        name="calendar.create",
+                    )
             LOGGER.error(
                 "calendar.create caldav error: request_id=%s user_id=%s error=%s",
                 request_label,
@@ -109,6 +274,16 @@ async def create_event(
                 caldav_error=_safe_caldav_error_label(exc),
                 reminder_scheduler=reminder_scheduler,
                 reminders_enabled=reminders_enabled,
+            )
+        finally:
+            duration_ms = max((time.monotonic() - start_time) * 1000, 0.01)
+            add_trace(
+                request_context,
+                step="calendar.caldav",
+                component="caldav",
+                name="calendar.create",
+                status=status,
+                duration_ms=duration_ms,
             )
     try:
         backend = LocalCalendarBackend(chat_id=chat_id, user_id=user_id, reminders_enabled=False)
@@ -215,21 +390,145 @@ async def delete_event(
     *,
     user_id: int,
     intent: str = "utility_calendar.delete",
+    request_context: RequestContext | None = None,
+    circuit_breakers: CircuitBreakerRegistry | None = None,
+    retry_policy: RetryPolicy | None = None,
+    timeouts: TimeoutConfig | None = None,
 ) -> OrchestratorResult:
     backend_mode = _resolve_backend_mode()
     deleted_remote = False
     caldav_error: str | None = None
     if backend_mode == "caldav":
+        timeouts = _resolve_timeouts(timeouts)
+        retry_policy = _resolve_retry_policy(retry_policy)
+        breaker = circuit_breakers.get("caldav") if circuit_breakers else None
         config = tools_calendar_caldav.load_caldav_config()
         if config is None:
             caldav_error = "missing_config"
             LOGGER.info("calendar.delete fallback: user_id=%s reason=caldav_missing_config", user_id)
         else:
+            start_time = time.monotonic()
+            status = "ok"
+            add_trace(
+                request_context,
+                step="calendar.caldav",
+                component="caldav",
+                name="calendar.delete",
+                status="start",
+                duration_ms=0.0,
+            )
             try:
-                deleted_remote = await tools_calendar_caldav.delete_event(config, event_id=item_id)
+                if breaker is not None:
+                    allowed, circuit_event = breaker.allow_request()
+                    if circuit_event:
+                        log_event(
+                            LOGGER,
+                            request_context,
+                            component="caldav",
+                            event=circuit_event,
+                            status="ok",
+                            name="calendar.delete",
+                        )
+                    if not allowed:
+                        log_event(
+                            LOGGER,
+                            request_context,
+                            component="caldav",
+                            event="circuit.short_circuit",
+                            status="error",
+                            name="calendar.delete",
+                        )
+                        status = "error"
+                        add_trace(
+                            request_context,
+                            step="calendar.caldav",
+                            component="caldav",
+                            name="calendar.delete",
+                            status="error",
+                            duration_ms=0.0,
+                        )
+                        return ensure_valid(
+                            error(
+                                map_error_text("temporarily_unavailable"),
+                                intent=intent,
+                                mode="tool",
+                                debug={"reason": "circuit_open"},
+                            )
+                        )
+                deleted_remote = await retry_async(
+                lambda: tools_calendar_caldav.delete_event(config, event_id=item_id),
+                policy=retry_policy,
+                timeout_seconds=timeouts.external_api_seconds,
+                    logger=LOGGER,
+                    request_context=request_context,
+                    component="caldav",
+                    name="calendar.delete",
+                    is_retryable=_is_retryable_calendar_error,
+                )
+                if breaker is not None:
+                    circuit_event = breaker.record_success()
+                    if circuit_event:
+                        log_event(
+                            LOGGER,
+                            request_context,
+                            component="caldav",
+                            event=circuit_event,
+                            status="ok",
+                            name="calendar.delete",
+                        )
+            except asyncio.TimeoutError as exc:
+                status = "error"
+                if breaker is not None:
+                    circuit_event = breaker.record_failure()
+                    if circuit_event:
+                        log_event(
+                            LOGGER,
+                            request_context,
+                            component="caldav",
+                            event=circuit_event,
+                            status="error",
+                            name="calendar.delete",
+                        )
+                log_error(
+                    LOGGER,
+                    request_context,
+                    component="caldav",
+                    where="caldav.timeout",
+                    exc=exc,
+                )
+                return ensure_valid(
+                    error(
+                        map_error_text("timeout"),
+                        intent=intent,
+                        mode="tool",
+                        debug={"reason": "timeout"},
+                    )
+                )
             except Exception as exc:
+                status = "error"
+                if breaker is not None:
+                    circuit_event = breaker.record_failure()
+                    if circuit_event:
+                        log_event(
+                            LOGGER,
+                            request_context,
+                            component="caldav",
+                            event=circuit_event,
+                            status="error",
+                            name="calendar.delete",
+                        )
                 caldav_error = _safe_caldav_error_label(exc)
                 LOGGER.error("calendar.delete caldav error: user_id=%s error=%s", user_id, exc.__class__.__name__)
+            finally:
+                duration_ms = max((time.monotonic() - start_time) * 1000, 0.01)
+                add_trace(
+                    request_context,
+                    step="calendar.caldav",
+                    component="caldav",
+                    name="calendar.delete",
+                    status=status,
+                    duration_ms=duration_ms,
+                )
     removed, reminder_id = await calendar_store.delete_item(item_id)
     deleted = deleted_remote or removed
     text = f"Удалено: {item_id}" if deleted else f"Не найдено: {item_id}"
@@ -249,11 +548,18 @@ async def list_calendar_items(
     *,
     user_id: int,
     intent: str = "utility_calendar.list",
+    request_context: RequestContext | None = None,
+    circuit_breakers: CircuitBreakerRegistry | None = None,
+    retry_policy: RetryPolicy | None = None,
+    timeouts: TimeoutConfig | None = None,
 ) -> OrchestratorResult:
     backend_mode = _resolve_backend_mode()
     start_value = start or datetime.now(tz=calendar_store.BOT_TZ)
     end_value = end or (start_value + timedelta(days=7))
     if backend_mode == "caldav":
+        timeouts = _resolve_timeouts(timeouts)
+        retry_policy = _resolve_retry_policy(retry_policy)
+        breaker = circuit_breakers.get("caldav") if circuit_breakers else None
         config = tools_calendar_caldav.load_caldav_config()
         if config is None:
             LOGGER.info("calendar.list fallback: user_id=%s reason=caldav_missing_config", user_id)
@@ -263,15 +569,124 @@ async def list_calendar_items(
                 intent=intent,
                 caldav_error="missing_config",
             )
+        start_time = time.monotonic()
+        status = "ok"
+        add_trace(
+            request_context,
+            step="calendar.caldav",
+            component="caldav",
+            name="calendar.list",
+            status="start",
+            duration_ms=0.0,
+        )
         try:
-            events = await tools_calendar_caldav.list_events(config, start=start_value, end=end_value, limit=20)
+            if breaker is not None:
+                allowed, circuit_event = breaker.allow_request()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="caldav",
+                        event=circuit_event,
+                        status="ok",
+                        name="calendar.list",
+                    )
+                if not allowed:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="caldav",
+                        event="circuit.short_circuit",
+                        status="error",
+                        name="calendar.list",
+                    )
+                    status = "error"
+                    return ensure_valid(
+                        error(
+                            map_error_text("temporarily_unavailable"),
+                            intent=intent,
+                            mode="tool",
+                            debug={"reason": "circuit_open"},
+                        )
+                    )
+            events = await retry_async(
+                lambda: tools_calendar_caldav.list_events(config, start=start_value, end=end_value, limit=20),
+                policy=retry_policy,
+                timeout_seconds=timeouts.external_api_seconds,
+                logger=LOGGER,
+                request_context=request_context,
+                component="caldav",
+                name="calendar.list",
+                is_retryable=_is_retryable_calendar_error,
+            )
+            if breaker is not None:
+                circuit_event = breaker.record_success()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="caldav",
+                        event=circuit_event,
+                        status="ok",
+                        name="calendar.list",
+                    )
+        except asyncio.TimeoutError as exc:
+            status = "error"
+            if breaker is not None:
+                circuit_event = breaker.record_failure()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="caldav",
+                        event=circuit_event,
+                        status="error",
+                        name="calendar.list",
+                    )
+            log_error(
+                LOGGER,
+                request_context,
+                component="caldav",
+                where="caldav.timeout",
+                exc=exc,
+            )
+            return ensure_valid(
+                error(
+                    map_error_text("timeout"),
+                    intent=intent,
+                    mode="tool",
+                    debug={"reason": "timeout"},
+                )
+            )
         except Exception as exc:
+            status = "error"
+            if breaker is not None:
+                circuit_event = breaker.record_failure()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="caldav",
+                        event=circuit_event,
+                        status="error",
+                        name="calendar.list",
+                    )
             LOGGER.error("calendar.list caldav error: user_id=%s error=%s", user_id, exc.__class__.__name__)
             return await _list_local_items(
                 start_value,
                 end_value,
                 intent=intent,
                 caldav_error=_safe_caldav_error_label(exc),
+            )
+        finally:
+            duration_ms = max((time.monotonic() - start_time) * 1000, 0.01)
+            add_trace(
+                request_context,
+                step="calendar.caldav",
+                component="caldav",
+                name="calendar.list",
+                status=status,
+                duration_ms=duration_ms,
             )
         if not events:
             return ensure_valid(

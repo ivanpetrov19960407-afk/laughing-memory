@@ -21,6 +21,12 @@ from app.infra.google_oauth_server import start_google_oauth_server
 from app.infra.llm import OpenAIClient, PerplexityClient
 from app.infra.rate_limit import RateLimiter as LLMRateLimiter
 from app.infra.rate_limiter import RateLimiter
+from app.infra.resilience import (
+    CircuitBreakerRegistry,
+    load_circuit_breaker_config,
+    load_retry_policy,
+    load_timeouts,
+)
 from app.infra.storage import TaskStorage
 from app.infra.trace_store import TraceStore
 from app.stores.google_tokens import GoogleTokenStore
@@ -92,6 +98,9 @@ def main() -> None:
     google_token_store = GoogleTokenStore(settings.google_tokens_path)
     google_token_store.load()
     config = load_orchestrator_config(settings.orchestrator_config_path)
+    timeouts = load_timeouts(config)
+    retry_policy = load_retry_policy(config)
+    circuit_breakers = CircuitBreakerRegistry(config=load_circuit_breaker_config(config))
     if settings.facts_only_default is not None:
         config["facts_only_default"] = settings.facts_only_default
     storage = TaskStorage(settings.db_path)
@@ -103,20 +112,23 @@ def main() -> None:
         openai_client = OpenAIClient(
             api_key=settings.openai_api_key,
             model=settings.openai_model,
-            timeout_seconds=settings.openai_timeout_seconds,
+            timeout_seconds=timeouts.llm_seconds,
+            max_retries=0,
         )
         llm_client = openai_client
     elif settings.perplexity_api_key:
         perplexity_client = PerplexityClient(
             api_key=settings.perplexity_api_key,
             base_url=settings.perplexity_base_url,
-            timeout_seconds=settings.perplexity_timeout_seconds,
+            timeout_seconds=timeouts.llm_seconds,
+            max_retries=0,
         )
         llm_client = perplexity_client
     if settings.perplexity_api_key and perplexity_client is not None:
         search_client = PerplexityWebSearchClient(
             perplexity_client,
             model=settings.perplexity_model,
+            timeout_seconds=timeouts.external_api_seconds,
         )
     config_allowlist_ids = extract_allowed_user_ids(config)
     initial_allowlist_ids = settings.allowed_user_ids or config_allowlist_ids
@@ -147,6 +159,9 @@ def main() -> None:
         llm_model=settings.openai_model if openai_client else settings.perplexity_model,
         search_client=search_client,
         feature_web_search=settings.feature_web_search,
+        timeouts=timeouts,
+        retry_policy=retry_policy,
+        circuit_breakers=circuit_breakers,
     )
     dialog_memory = DialogMemory(
         settings.dialog_memory_path,
@@ -177,6 +192,9 @@ def main() -> None:
     application.bot_data["history_size"] = settings.history_size
     application.bot_data["message_limit"] = settings.telegram_message_limit
     application.bot_data["settings"] = settings
+    application.bot_data["resilience_timeouts"] = timeouts
+    application.bot_data["resilience_retry_policy"] = retry_policy
+    application.bot_data["circuit_breakers"] = circuit_breakers
     application.bot_data["google_token_store"] = google_token_store
     application.bot_data["openai_client"] = openai_client
     application.bot_data["start_time"] = time.monotonic()
@@ -201,6 +219,7 @@ def main() -> None:
             client_secret=settings.google_oauth_client_secret,
             public_base_url=settings.public_base_url,
             redirect_path=settings.google_oauth_redirect_path,
+            timeout_seconds=timeouts.external_api_seconds,
         )
         try:
             start_google_oauth_server(
@@ -208,6 +227,8 @@ def main() -> None:
                 port=settings.google_oauth_server_port,
                 config=oauth_config,
                 token_store=google_token_store,
+                retry_policy=retry_policy,
+                circuit_breaker=circuit_breakers.get("google"),
             )
         except OSError:
             logging.getLogger(__name__).exception(

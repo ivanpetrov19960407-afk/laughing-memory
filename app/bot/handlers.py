@@ -98,6 +98,18 @@ def _get_settings(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data.get("settings")
 
 
+def _get_timeouts(context: ContextTypes.DEFAULT_TYPE):
+    return context.application.bot_data.get("resilience_timeouts")
+
+
+def _get_retry_policy(context: ContextTypes.DEFAULT_TYPE):
+    return context.application.bot_data.get("resilience_retry_policy")
+
+
+def _get_circuit_breakers(context: ContextTypes.DEFAULT_TYPE):
+    return context.application.bot_data.get("circuit_breakers")
+
+
 def _get_wizard_manager(context: ContextTypes.DEFAULT_TYPE) -> wizard.WizardManager | None:
     manager = context.application.bot_data.get("wizard_manager")
     if isinstance(manager, wizard.WizardManager):
@@ -2075,6 +2087,7 @@ async def _dispatch_action_payload(
             intent="callback.missing_chat",
             mode="local",
         )
+    request_context = get_request_context(context)
     op_value = op if isinstance(op, str) else ""
     if op_value == "menu_open":
         await _send_reply_keyboard_remove(update, context)
@@ -2207,7 +2220,15 @@ async def _dispatch_action_payload(
                 mode="local",
                 debug={"reason": "invalid_event_id"},
             )
-        deleted = await delete_event(event_id, intent="utility_calendar.delete", user_id=user_id)
+        deleted = await delete_event(
+            event_id,
+            intent="utility_calendar.delete",
+            user_id=user_id,
+            request_context=request_context,
+            circuit_breakers=_get_circuit_breakers(context),
+            retry_policy=_get_retry_policy(context),
+            timeouts=_get_timeouts(context),
+        )
         if deleted.status != "ok":
             if deleted.status == "refused":
                 return refused(
@@ -3050,6 +3071,10 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             intent="utility_calendar.add",
             reminder_scheduler=scheduler,
             reminders_enabled=reminders_enabled,
+            request_context=request_context,
+            circuit_breakers=_get_circuit_breakers(context),
+            retry_policy=_get_retry_policy(context),
+            timeouts=_get_timeouts(context),
         )
         result = replace(tool_result, mode="local")
         await send_result(update, context, result)
@@ -3128,7 +3153,15 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             result = refused("Укажите id для удаления.", intent="utility_calendar.delete", mode="local")
             await send_result(update, context, result)
             return
-        tool_result = await delete_event(item_id, intent="utility_calendar.delete", user_id=user_id)
+        tool_result = await delete_event(
+            item_id,
+            intent="utility_calendar.delete",
+            user_id=user_id,
+            request_context=request_context,
+            circuit_breakers=_get_circuit_breakers(context),
+            retry_policy=_get_retry_policy(context),
+            timeouts=_get_timeouts(context),
+        )
         reminder_id = tool_result.debug.get("reminder_id") if isinstance(tool_result.debug, dict) else None
         scheduler = _get_reminder_scheduler(context)
         if reminder_id and scheduler:

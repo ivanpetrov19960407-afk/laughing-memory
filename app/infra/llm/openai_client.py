@@ -21,7 +21,7 @@ class OpenAIClient:
         image_model: str = "dall-e-3",
         base_url: str = "https://api.openai.com/v1",
         timeout_seconds: float = 30.0,
-        max_retries: int = 1,
+        max_retries: int = 0,
     ) -> None:
         self.api_key = api_key
         self.model = model

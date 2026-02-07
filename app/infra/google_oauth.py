@@ -10,6 +10,15 @@ from urllib.parse import urlencode, urljoin
 
 import httpx
 
+from app.core.error_messages import map_error_text
+from app.infra.request_context import RequestContext, log_error, log_event
+from app.infra.resilience import (
+    CircuitBreaker,
+    RetryPolicy,
+    is_network_error,
+    is_timeout_error,
+    retry_sync,
+)
 from app.stores.google_tokens import GoogleTokens, GoogleTokenStore
 
 LOGGER = logging.getLogger(__name__)
@@ -26,6 +35,7 @@ class GoogleOAuthConfig:
     client_secret: str
     public_base_url: str
     redirect_path: str
+    timeout_seconds: float = 10.0
 
     @property
     def redirect_uri(self) -> str:
@@ -47,6 +57,15 @@ def load_google_oauth_config() -> GoogleOAuthConfig | None:
         public_base_url=public_base_url,
         redirect_path=redirect_path,
     )
+
+
+def _is_retryable_google_error(exc: Exception) -> bool:
+    if is_timeout_error(exc) or is_network_error(exc):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        return status_code == 429 or status_code >= 500
+    return False
 
 
 def build_authorization_url(config: GoogleOAuthConfig, *, state: str) -> str:
@@ -109,7 +128,14 @@ class OAuthStateStore:
                 self._user_index.pop(user_id, None)
 
 
-def exchange_code_for_tokens(config: GoogleOAuthConfig, *, code: str) -> dict[str, object]:
+def exchange_code_for_tokens(
+    config: GoogleOAuthConfig,
+    *,
+    code: str,
+    retry_policy: RetryPolicy | None = None,
+    circuit_breaker: CircuitBreaker | None = None,
+    request_context: RequestContext | None = None,
+) -> dict[str, object]:
     payload = {
         "client_id": config.client_id,
         "client_secret": config.client_secret,
@@ -117,23 +143,150 @@ def exchange_code_for_tokens(config: GoogleOAuthConfig, *, code: str) -> dict[st
         "grant_type": "authorization_code",
         "redirect_uri": config.redirect_uri,
     }
-    with httpx.Client(timeout=10.0) as client:
-        response = client.post(GOOGLE_TOKEN_URL, data=payload)
-        response.raise_for_status()
-        return response.json()
+
+    def _call() -> dict[str, object]:
+        with httpx.Client(timeout=config.timeout_seconds) as client:
+            response = client.post(GOOGLE_TOKEN_URL, data=payload)
+            response.raise_for_status()
+            return response.json()
+
+    if circuit_breaker is not None:
+        allowed, circuit_event = circuit_breaker.allow_request()
+        if circuit_event:
+            log_event(
+                LOGGER,
+                request_context,
+                component="google",
+                event=circuit_event,
+                status="ok",
+                name="oauth.exchange",
+            )
+        if not allowed:
+            log_event(
+                LOGGER,
+                request_context,
+                component="google",
+                event="circuit.short_circuit",
+                status="error",
+                name="oauth.exchange",
+            )
+            raise RuntimeError("google_oauth_circuit_open")
+
+    try:
+        result = retry_sync(
+            _call,
+            policy=retry_policy or RetryPolicy(),
+            logger=LOGGER,
+            request_context=request_context,
+            component="google",
+            name="oauth.exchange",
+            is_retryable=_is_retryable_google_error,
+        )
+        if circuit_breaker is not None:
+            circuit_event = circuit_breaker.record_success()
+            if circuit_event:
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="google",
+                    event=circuit_event,
+                    status="ok",
+                    name="oauth.exchange",
+                )
+        return result
+    except Exception as exc:
+        if circuit_breaker is not None:
+            circuit_event = circuit_breaker.record_failure()
+            if circuit_event:
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="google",
+                    event=circuit_event,
+                    status="error",
+                    name="oauth.exchange",
+                )
+        raise exc
 
 
-def refresh_access_token(config: GoogleOAuthConfig, *, refresh_token: str) -> dict[str, object]:
+def refresh_access_token(
+    config: GoogleOAuthConfig,
+    *,
+    refresh_token: str,
+    retry_policy: RetryPolicy | None = None,
+    circuit_breaker: CircuitBreaker | None = None,
+    request_context: RequestContext | None = None,
+) -> dict[str, object]:
     payload = {
         "client_id": config.client_id,
         "client_secret": config.client_secret,
         "refresh_token": refresh_token,
         "grant_type": "refresh_token",
     }
-    with httpx.Client(timeout=10.0) as client:
-        response = client.post(GOOGLE_TOKEN_URL, data=payload)
-        response.raise_for_status()
-        return response.json()
+
+    def _call() -> dict[str, object]:
+        with httpx.Client(timeout=config.timeout_seconds) as client:
+            response = client.post(GOOGLE_TOKEN_URL, data=payload)
+            response.raise_for_status()
+            return response.json()
+
+    if circuit_breaker is not None:
+        allowed, circuit_event = circuit_breaker.allow_request()
+        if circuit_event:
+            log_event(
+                LOGGER,
+                request_context,
+                component="google",
+                event=circuit_event,
+                status="ok",
+                name="oauth.refresh",
+            )
+        if not allowed:
+            log_event(
+                LOGGER,
+                request_context,
+                component="google",
+                event="circuit.short_circuit",
+                status="error",
+                name="oauth.refresh",
+            )
+            raise RuntimeError("google_oauth_circuit_open")
+
+    try:
+        result = retry_sync(
+            _call,
+            policy=retry_policy or RetryPolicy(),
+            logger=LOGGER,
+            request_context=request_context,
+            component="google",
+            name="oauth.refresh",
+            is_retryable=_is_retryable_google_error,
+        )
+        if circuit_breaker is not None:
+            circuit_event = circuit_breaker.record_success()
+            if circuit_event:
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="google",
+                    event=circuit_event,
+                    status="ok",
+                    name="oauth.refresh",
+                )
+        return result
+    except Exception as exc:
+        if circuit_breaker is not None:
+            circuit_event = circuit_breaker.record_failure()
+            if circuit_event:
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="google",
+                    event=circuit_event,
+                    status="error",
+                    name="oauth.refresh",
+                )
+        raise exc
 
 
 def handle_oauth_callback(
@@ -142,6 +295,9 @@ def handle_oauth_callback(
     token_store: GoogleTokenStore,
     state_store: OAuthStateStore,
     query_params: Mapping[str, str],
+    retry_policy: RetryPolicy | None = None,
+    circuit_breaker: CircuitBreaker | None = None,
+    request_context: RequestContext | None = None,
 ) -> tuple[int, str]:
     if "error" in query_params:
         error_value = query_params.get("error", "")
@@ -160,9 +316,26 @@ def handle_oauth_callback(
             return 400, _wrap_html("Неверный state.")
         user_id = int(state)
     try:
-        token_payload = exchange_code_for_tokens(config, code=code)
-    except httpx.HTTPError as exc:
+        token_payload = exchange_code_for_tokens(
+            config,
+            code=code,
+            retry_policy=retry_policy,
+            circuit_breaker=circuit_breaker,
+            request_context=request_context,
+        )
+    except RuntimeError as exc:
+        if "circuit_open" in str(exc):
+            return 503, _wrap_html(map_error_text("temporarily_unavailable"))
         LOGGER.exception("OAuth exchange failed: %s", exc)
+        return 500, _wrap_html("Не удалось обменять код на токены. Проверьте настройки OAuth.")
+    except httpx.HTTPError as exc:
+        log_error(
+            LOGGER,
+            request_context,
+            component="google",
+            where="oauth.exchange",
+            exc=exc,
+        )
         return 500, _wrap_html("Не удалось обменять код на токены. Проверьте настройки OAuth.")
     access_token = token_payload.get("access_token")
     refresh_token = token_payload.get("refresh_token")
