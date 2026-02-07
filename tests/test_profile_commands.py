@@ -84,7 +84,7 @@ def test_history_command_lists_actions(monkeypatch, tmp_path) -> None:
 
     profile_store = UserProfileStore(tmp_path / "profiles.db")
     actions_store = ActionsLogStore(tmp_path / "actions.db")
-    actions_store.append(user_id=1, action_type="calendar.create", payload={"summary": "Создал событие"})
+    actions_store.append(user_id=1, action_type="calendar.event.create", payload={"summary": "Создал событие"})
     context = DummyContext(profile_store, actions_store)
     update = DummyUpdate(text="/history")
 
@@ -111,3 +111,32 @@ def test_send_result_logs_actions(monkeypatch, tmp_path) -> None:
     entries = actions_store.search(user_id=1, query=None, limit=10)
     assert entries
     assert entries[0].action_type == "reminder.create"
+
+
+def test_history_after_action(monkeypatch, tmp_path) -> None:
+    sent: list[str] = []
+
+    async def fake_send_text(update, context, text, reply_markup=None):
+        sent.append(text)
+        return len(text or "")
+
+    async def fake_guard_access(update, context, bucket="default"):
+        return True
+
+    monkeypatch.setattr(handlers, "safe_send_text", fake_send_text)
+    monkeypatch.setattr(handlers, "safe_edit_text", fake_send_text)
+    monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
+
+    profile_store = UserProfileStore(tmp_path / "profiles.db")
+    actions_store = ActionsLogStore(tmp_path / "actions.db")
+    context = DummyContext(profile_store, actions_store)
+    update = DummyUpdate(text="/anything")
+    start_request(update, context)
+
+    asyncio.run(handlers.send_result(update, context, ok("ок", intent="utility_reminders.create", mode="local")))
+
+    sent.clear()
+    update = DummyUpdate(text="/history")
+    asyncio.run(handlers.history_command(update, context))
+    assert "Последние действия" in sent[-1]
+    assert "reminder.create" in sent[-1]

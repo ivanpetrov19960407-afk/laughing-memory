@@ -8,9 +8,10 @@ def test_profile_store_defaults_and_update(tmp_path) -> None:
     store = UserProfileStore(tmp_path / "profiles.db")
 
     profile = store.get(1)
+    assert profile.user_id == 1
     assert profile.language == "ru"
     assert profile.timezone == DEFAULT_TIMEZONE
-    assert profile.default_reminders.offset_minutes == 10
+    assert profile.default_reminders.offset_minutes is None
 
     updated = store.update(
         1,

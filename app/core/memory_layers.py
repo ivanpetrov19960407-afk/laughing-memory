@@ -121,14 +121,21 @@ def _render_profile(profile: UserProfile, *, max_chars: int) -> str:
     notes = profile.notes[:5]
     reminder_defaults = profile.default_reminders
     note_lines = [f"• {note.text} (id: {note.id})" for note in notes]
+    reminder_offset = (
+        f"{reminder_defaults.offset_minutes} минут"
+        if reminder_defaults.offset_minutes is not None
+        else "не задано"
+    )
+    facts_label = "вкл" if profile.facts_mode_default else "выкл"
+    reminders_label = "вкл" if reminder_defaults.enabled else "выкл"
     blocks = [
         "Профиль пользователя:",
         f"• язык: {profile.language}",
         f"• таймзона: {profile.timezone}",
         f"• подробность: {profile.verbosity}",
-        f"• режим фактов по умолчанию: {'on' if profile.facts_mode_default else 'off'}",
-        f"• напоминания по умолчанию: {'on' if reminder_defaults.enabled else 'off'}",
-        f"• смещение напоминаний: {reminder_defaults.offset_minutes} минут",
+        f"• режим фактов по умолчанию: {facts_label}",
+        f"• напоминания по умолчанию: {reminders_label}",
+        f"• смещение напоминаний: {reminder_offset}",
     ]
     if profile.style:
         blocks.append(f"• стиль: {profile.style}")
@@ -154,16 +161,27 @@ def _render_actions(
     if not entries:
         return None
     cutoff = now - timedelta(days=max(1, days))
-    recent = [entry for entry in entries if entry.ts >= cutoff]
+    recent = [
+        entry
+        for entry in entries
+        if entry.ts >= cutoff and entry.action_type.startswith(("calendar.", "reminder."))
+    ]
     if not recent:
         return None
-    lines = []
-    for entry in recent[:limit]:
-        timestamp = entry.ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        summary = entry.to_summary()
-        lines.append(f"• {timestamp} — {summary}")
-    block = "Последние действия:\n" + "\n".join(lines)
+    recent = recent[: max(1, limit)]
+
+    def _render(entries_to_render: list[ActionLogEntry]) -> str:
+        lines = []
+        for entry in entries_to_render:
+            timestamp = entry.ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+            summary = entry.to_summary()
+            lines.append(f"• {timestamp} | {entry.action_type} | {summary}")
+        return "Последние действия:\n" + "\n".join(lines)
+
+    block = _render(recent)
+    while len(block) > max_chars and len(recent) > 1:
+        recent = recent[:-1]
+        block = _render(recent)
     if len(block) <= max_chars:
         return block
     return block[: max(1, max_chars - 1)].rstrip() + "…"
-

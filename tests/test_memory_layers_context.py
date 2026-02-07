@@ -17,13 +17,13 @@ def test_memory_layers_context_includes_profile_and_actions(tmp_path) -> None:
     profile_store.update(1, {"language": "en", "timezone": "Europe/London", "verbosity": "short"})
     actions_store.append(
         user_id=1,
-        action_type="calendar.create",
+        action_type="calendar.event.create",
         payload={"summary": "Создал событие"},
         ts=datetime.now(timezone.utc),
     )
     actions_store.append(
         user_id=1,
-        action_type="calendar.delete",
+        action_type="calendar.event.delete",
         payload={"summary": "Старое событие"},
         ts=datetime.now(timezone.utc) - timedelta(days=10),
     )
@@ -60,3 +60,49 @@ def test_memory_layers_context_includes_profile_and_actions(tmp_path) -> None:
     assert "Последние действия" in context
     assert "Создал событие" in context
     assert "Старое событие" not in context
+
+
+def test_memory_layers_context_truncates_actions(tmp_path) -> None:
+    actions_store = ActionsLogStore(tmp_path / "actions.db")
+    now = datetime.now(timezone.utc)
+    actions_store.append(
+        user_id=1,
+        action_type="calendar.event.create",
+        payload={"summary": "Новое действие " + ("x" * 60)},
+        ts=now,
+    )
+    actions_store.append(
+        user_id=1,
+        action_type="calendar.event.update",
+        payload={"summary": "Среднее действие " + ("y" * 60)},
+        ts=now - timedelta(minutes=5),
+    )
+    actions_store.append(
+        user_id=1,
+        action_type="calendar.event.delete",
+        payload={"summary": "Старое действие " + ("z" * 60)},
+        ts=now - timedelta(minutes=10),
+    )
+    request_context = RequestContext(
+        correlation_id="corr-2",
+        user_id=1,
+        chat_id=2,
+        message_id=3,
+        timezone=None,
+        ts=now,
+        env="dev",
+    )
+    context = build_memory_layers_context(
+        request_context,
+        memory_store=None,
+        profile_layer=None,
+        actions_layer=ActionsLogLayer(actions_store),
+        max_chars=120,
+        action_limit=5,
+        action_days=7,
+    )
+
+    assert context is not None
+    assert len(context) <= 120
+    assert "Новое действие" in context
+    assert "Старое действие" not in context
