@@ -146,8 +146,6 @@ def test_wizard_calendar_does_not_create_without_confirm(tmp_path, monkeypatch) 
 def test_wizard_calendar_refuses_without_connection(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-    tokens_path = tmp_path / "google_tokens.db"
-    monkeypatch.setenv("GOOGLE_TOKENS_PATH", str(tokens_path))
     store = WizardStore(tmp_path / "wizards", timeout_seconds=600)
     manager = WizardManager(store)
 

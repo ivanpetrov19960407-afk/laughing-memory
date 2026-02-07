@@ -78,9 +78,6 @@ def test_health_command_returns_status(monkeypatch, calendar_env) -> None:
         caldav_url=None,
         caldav_username=None,
         caldav_password=None,
-        google_oauth_client_id=None,
-        google_oauth_client_secret=None,
-        public_base_url=None,
         openai_api_key="",
         perplexity_api_key=None,
         calendar_backend="local",
@@ -92,7 +89,6 @@ def test_health_command_returns_status(monkeypatch, calendar_env) -> None:
         allowlist_path="data/allowlist.json",
         dialog_memory_path="data/dialog_memory.json",
         wizard_store_path="data/wizards",
-        google_tokens_path="data/google_tokens.db",
     )
     update = _build_update("/health")
     context = _build_context(settings)
@@ -126,9 +122,6 @@ def test_config_command_dev_only(monkeypatch) -> None:
         caldav_url=None,
         caldav_username=None,
         caldav_password=None,
-        google_oauth_client_id=None,
-        google_oauth_client_secret=None,
-        public_base_url=None,
         openai_api_key=None,
         perplexity_api_key=None,
         calendar_backend="local",
@@ -140,7 +133,6 @@ def test_config_command_dev_only(monkeypatch) -> None:
         allowlist_path="data/allowlist.json",
         dialog_memory_path="data/dialog_memory.json",
         wizard_store_path="data/wizards",
-        google_tokens_path="data/google_tokens.db",
     )
     update = _build_update("/config")
     context = _build_context(settings)

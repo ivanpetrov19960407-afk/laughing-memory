@@ -113,7 +113,7 @@ def test_trace_dev_action_and_callback(monkeypatch) -> None:
     update = DummyUpdate(text="/ping")
     start_request(update, context)
 
-    asyncio.run(handlers.send_result(update, context, ok("hi", intent="test", mode="local")))
+    asyncio.run(handlers.send_result(update, context, ok("hi", intent="test.example", mode="local")))
     assert any(action.id == "debug.trace" for action in sent_actions[-1])
 
     trace_store = context.application.bot_data["trace_store"]
@@ -149,5 +149,5 @@ def test_trace_action_not_in_prod(monkeypatch) -> None:
     update = DummyUpdate(text="/ping")
     start_request(update, context)
 
-    asyncio.run(handlers.send_result(update, context, ok("hi", intent="test", mode="local")))
+    asyncio.run(handlers.send_result(update, context, ok("hi", intent="test.example", mode="local")))
     assert not any(action.id == "debug.trace" for action in sent_actions[-1])

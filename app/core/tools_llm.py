@@ -22,7 +22,7 @@ async def llm_check(text: str, ctx: dict[str, object]) -> OrchestratorResult:
         "3) Как улучшить (конкретно)\n"
         "Не добавляй факты, которых нет в тексте."
     )
-    return await _run_llm_tool(text, ctx, intent="utility_check", system_prompt=system_prompt)
+    return await _run_llm_tool(text, ctx, intent="utility.check", system_prompt=system_prompt)
 
 
 async def llm_rewrite(mode: str, text: str, ctx: dict[str, object]) -> OrchestratorResult:
@@ -36,7 +36,7 @@ async def llm_rewrite(mode: str, text: str, ctx: dict[str, object]) -> Orchestra
         "Не добавляй новые факты."
     )
     prompt = f"Режим: {mode}\nТекст:\n{text}"
-    return await _run_llm_tool(prompt, ctx, intent="utility_rewrite", system_prompt=system_prompt)
+    return await _run_llm_tool(prompt, ctx, intent="utility.rewrite", system_prompt=system_prompt)
 
 
 async def llm_explain(text: str, ctx: dict[str, object]) -> OrchestratorResult:
@@ -48,7 +48,7 @@ async def llm_explain(text: str, ctx: dict[str, object]) -> OrchestratorResult:
         "- 3 пункта «итог»\n"
         "Не добавляй новые факты."
     )
-    return await _run_llm_tool(text, ctx, intent="utility_explain", system_prompt=system_prompt)
+    return await _run_llm_tool(text, ctx, intent="utility.explain", system_prompt=system_prompt)
 
 
 async def _run_llm_tool(

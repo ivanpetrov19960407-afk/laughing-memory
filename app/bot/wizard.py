@@ -1087,7 +1087,7 @@ def _profile_summary(profile: UserProfile) -> str:
 
 def _expired_result() -> OrchestratorResult:
     return refused(
-        "Сценарий истёк, начни заново.",
+        "Сценарий истёк. Открой /menu.",
         intent="wizard.expired",
         mode="local",
         actions=_menu_actions(),

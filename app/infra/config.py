@@ -61,18 +61,11 @@ class Settings:
     caldav_username: str | None
     caldav_password: str | None
     caldav_calendar_name: str | None
-    google_oauth_client_id: str | None
-    google_oauth_client_secret: str | None
-    public_base_url: str | None
-    google_oauth_redirect_path: str
-    google_tokens_path: Path
-    google_oauth_server_port: int
 
 
 @dataclass(frozen=True)
 class StartupFeatures:
     caldav_enabled: bool
-    google_enabled: bool
     llm_enabled: bool
 
 
@@ -116,22 +109,12 @@ def validate_startup_env(
         log.warning("startup.env caldav disabled: missing CALDAV_URL/USERNAME/PASSWORD")
         os.environ["CALENDAR_BACKEND"] = "local"
 
-    google_fields = (
-        settings.google_oauth_client_id,
-        settings.google_oauth_client_secret,
-        settings.public_base_url,
-    )
-    google_enabled = all(google_fields)
-    if any(google_fields) and not google_enabled:
-        log.warning("startup.env google disabled: missing oauth config")
-
     llm_enabled = bool(settings.openai_api_key or settings.perplexity_api_key)
     if not llm_enabled:
         log.warning("startup.env llm disabled: no API key configured")
 
     return StartupFeatures(
         caldav_enabled=caldav_enabled,
-        google_enabled=google_enabled,
         llm_enabled=llm_enabled,
     )
 
@@ -210,15 +193,6 @@ def load_settings() -> Settings:
     caldav_username = os.getenv("CALDAV_USERNAME") or None
     caldav_password = os.getenv("CALDAV_PASSWORD") or None
     caldav_calendar_name = os.getenv("CALDAV_CALENDAR_NAME") or None
-    google_oauth_client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID") or None
-    google_oauth_client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or None
-    public_base_url = os.getenv("PUBLIC_BASE_URL") or None
-    google_oauth_redirect_path = os.getenv("GOOGLE_OAUTH_REDIRECT_PATH", "/oauth2/callback")
-    google_tokens_path = Path(
-        os.getenv("GOOGLE_TOKENS_DB_PATH", os.getenv("GOOGLE_TOKENS_PATH", "data/google_tokens.db"))
-    )
-    google_oauth_server_port = _parse_int_with_default(os.getenv("GOOGLE_OAUTH_SERVER_PORT"), 8000)
-
     return Settings(
         bot_token=token,
         orchestrator_config_path=config_path,
@@ -263,12 +237,6 @@ def load_settings() -> Settings:
         caldav_username=caldav_username,
         caldav_password=caldav_password,
         caldav_calendar_name=caldav_calendar_name,
-        google_oauth_client_id=google_oauth_client_id,
-        google_oauth_client_secret=google_oauth_client_secret,
-        public_base_url=public_base_url,
-        google_oauth_redirect_path=google_oauth_redirect_path,
-        google_tokens_path=google_tokens_path,
-        google_oauth_server_port=google_oauth_server_port,
     )
 
 

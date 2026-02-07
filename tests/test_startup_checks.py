@@ -57,12 +57,6 @@ def _build_settings(tmp_path: Path) -> Settings:
         caldav_username=None,
         caldav_password=None,
         caldav_calendar_name=None,
-        google_oauth_client_id=None,
-        google_oauth_client_secret=None,
-        public_base_url=None,
-        google_oauth_redirect_path="/oauth2/callback",
-        google_tokens_path=tmp_path / "google_tokens.db",
-        google_oauth_server_port=8000,
     )
 
 
