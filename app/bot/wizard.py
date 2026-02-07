@@ -221,14 +221,19 @@ class WizardManager:
     ) -> OrchestratorResult:
         if state.step == STEP_AWAIT_DATETIME:
             try:
-                dt = calendar_store.parse_local_datetime(text)
+                dt, extracted_title = calendar_store.parse_event_datetime(text)
             except ValueError as exc:
                 return refused(
-                    f"{exc}. Пример: 2026-02-05 18:30 или 05.02.2026 18:30",
+                    f"{exc}. Пример: 2026-02-05 18:30, завтра 19:00 врач, через 2 часа тренировка или в пятницу 10:15 встреча",
                     intent="wizard.calendar.datetime",
                     mode="local",
                     actions=_step_actions(),
                 )
+            title = extracted_title.strip()
+            if title:
+                updated = _touch_state(state, step=STEP_CONFIRM, data={"dt": dt.isoformat(), "title": title})
+                self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+                return _render_prompt(updated)
             updated = _touch_state(state, step=STEP_AWAIT_TITLE, data={"dt": dt.isoformat()})
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return ok(
@@ -570,7 +575,8 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
     if state.step == STEP_AWAIT_DATETIME:
         return ok(
             "Введи дату и время события в формате YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
-            "Пример: 2026-02-05 18:30 или 05.02.2026 18:30",
+            "Можно одной строкой с названием: завтра 19:00 врач, через 2 часа тренировка, в пятницу 10:15 встреча.\n"
+            "Пример строгого формата: 2026-02-05 18:30 или 05.02.2026 18:30",
             intent="wizard.calendar.datetime",
             mode="local",
             actions=_step_actions(),
