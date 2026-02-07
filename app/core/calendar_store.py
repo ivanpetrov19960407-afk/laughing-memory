@@ -1173,6 +1173,7 @@ def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
         if candidate < current:
             candidate = candidate.replace(year=current.year + 1)
         return candidate
+
     short_date_match = re.match(
         r"^\s*(?P<day>\d{1,2})[./-](?P<month>\d{1,2})(?![./-]\d{4})\s*$",
         raw,
@@ -1185,6 +1186,7 @@ def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
         if candidate < current:
             candidate = candidate.replace(year=current.year + 1)
         return candidate
+
     for fmt in ("%d.%m %H:%M", "%d-%m %H:%M", "%d/%m %H:%M"):
         try:
             parsed = datetime.strptime(raw, fmt)
