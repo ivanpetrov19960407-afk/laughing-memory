@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from app.core import calendar_store, recurrence_parse, tools_calendar_caldav
 from app.core.calendar_backend import CalendarCreateResult, LocalCalendarBackend
 from app.core.error_messages import map_error_text
+from app.core.recurrence_scope import RecurrenceScope, normalize_scope
 from app.core.result import Action, OrchestratorResult, ensure_valid, error, ok, refused
 from app.core.reminders import ReminderScheduler
 from app.infra.request_context import RequestContext, add_trace, log_error, log_event
@@ -449,6 +450,8 @@ async def _maybe_schedule_reminder(
 async def delete_event(
     item_id: str,
     *,
+    scope: RecurrenceScope | str | None = None,
+    instance_dt: datetime | None = None,
     user_id: int,
     intent: str = "utility_calendar.delete",
     request_context: RequestContext | None = None,
@@ -459,6 +462,29 @@ async def delete_event(
     backend_mode = _resolve_backend_mode()
     deleted_remote = False
     caldav_error: str | None = None
+    scope_value = normalize_scope(scope) or RecurrenceScope.ALL
+    event = await calendar_store.get_event(item_id)
+    is_recurring = event is not None and bool(event.rrule)
+    if is_recurring and scope is None:
+        return ensure_valid(
+            refused(
+                "Нужно выбрать область изменения для повторяющегося события.",
+                intent=intent,
+                mode="tool",
+                debug={"reason": "missing_scope"},
+            )
+        )
+    if is_recurring and scope_value in {RecurrenceScope.THIS, RecurrenceScope.FUTURE} and instance_dt is None:
+        instance_dt = event.dt if event else None
+    if scope_value in {RecurrenceScope.THIS, RecurrenceScope.FUTURE} and instance_dt is None:
+        return ensure_valid(
+            refused(
+                "Не удалось определить дату инстанса.",
+                intent=intent,
+                mode="tool",
+                debug={"reason": "missing_instance_dt"},
+            )
+        )
     if backend_mode == "caldav":
         timeouts = _resolve_timeouts(timeouts)
         retry_policy = _resolve_retry_policy(retry_policy)
@@ -516,16 +542,46 @@ async def delete_event(
                                 debug={"reason": "circuit_open"},
                             )
                         )
-                deleted_remote = await retry_async(
-                lambda: tools_calendar_caldav.delete_event(config, event_id=item_id),
-                policy=retry_policy,
-                timeout_seconds=timeouts.external_api_seconds,
-                    logger=LOGGER,
-                    request_context=request_context,
-                    component="caldav",
-                    name="calendar.delete",
-                    is_retryable=_is_retryable_calendar_error,
-                )
+                if scope_value == RecurrenceScope.ALL:
+                    deleted_remote = await retry_async(
+                        lambda: tools_calendar_caldav.delete_event(config, event_id=item_id),
+                        policy=retry_policy,
+                        timeout_seconds=timeouts.external_api_seconds,
+                        logger=LOGGER,
+                        request_context=request_context,
+                        component="caldav",
+                        name="calendar.delete",
+                        is_retryable=_is_retryable_calendar_error,
+                    )
+                else:
+                    if event is None:
+                        return ensure_valid(
+                            refused("Событие не найдено.", intent=intent, mode="tool", debug={"reason": "missing_event"})
+                        )
+                    updated_rrule, updated_exdates = _apply_recurrence_delete_scope(
+                        event,
+                        scope_value,
+                        instance_dt=instance_dt,
+                    )
+                    await retry_async(
+                        lambda: tools_calendar_caldav.update_event(
+                            config,
+                            event_id=item_id,
+                            start_at=event.dt,
+                            end_at=event.dt + timedelta(hours=1),
+                            title=event.title,
+                            rrule=updated_rrule,
+                            exdates=updated_exdates,
+                        ),
+                        policy=retry_policy,
+                        timeout_seconds=timeouts.external_api_seconds,
+                        logger=LOGGER,
+                        request_context=request_context,
+                        component="caldav",
+                        name="calendar.delete",
+                        is_retryable=_is_retryable_calendar_error,
+                    )
+                    deleted_remote = True
                 if breaker is not None:
                     circuit_event = breaker.record_success()
                     if circuit_event:
@@ -590,7 +646,24 @@ async def delete_event(
                     status=status,
                     duration_ms=duration_ms,
                 )
-    removed, reminder_id = await calendar_store.delete_item(item_id)
+    removed = False
+    reminder_id: str | None = None
+    if scope_value == RecurrenceScope.ALL or not is_recurring:
+        removed, reminder_id = await calendar_store.delete_item(item_id)
+    else:
+        if event is None:
+            return ensure_valid(refused("Событие не найдено.", intent=intent, mode="tool"))
+        updated_rrule, updated_exdates = _apply_recurrence_delete_scope(
+            event,
+            scope_value,
+            instance_dt=instance_dt,
+        )
+        updated_event, reminder_id = await calendar_store.update_event_fields(
+            item_id,
+            new_rrule=updated_rrule,
+            new_exdates=updated_exdates,
+        )
+        removed = updated_event is not None
     deleted = deleted_remote or removed
     text = f"Удалено: {item_id}" if deleted else f"Не найдено: {item_id}"
     debug: dict[str, object] = {}
@@ -602,6 +675,399 @@ async def delete_event(
         debug["caldav_error"] = caldav_error
     result = ok(text, intent=intent, mode="tool", debug=debug) if deleted else refused(text, intent=intent, mode="tool", debug=debug)
     return ensure_valid(result)
+
+
+async def update_event(
+    event_id: str,
+    changes: dict[str, object],
+    *,
+    scope: RecurrenceScope | str | None = None,
+    instance_dt: datetime | None = None,
+    user_id: int,
+    chat_id: int,
+    intent: str = "utility_calendar.update",
+    request_context: RequestContext | None = None,
+    circuit_breakers: CircuitBreakerRegistry | None = None,
+    retry_policy: RetryPolicy | None = None,
+    timeouts: TimeoutConfig | None = None,
+) -> OrchestratorResult:
+    backend_mode = _resolve_backend_mode()
+    scope_value = normalize_scope(scope) or RecurrenceScope.ALL
+    event = await calendar_store.get_event(event_id)
+    if event is None:
+        return ensure_valid(refused("Событие не найдено.", intent=intent, mode="tool"))
+    is_recurring = bool(event.rrule)
+    if is_recurring and scope is None:
+        return ensure_valid(
+            refused(
+                "Нужно выбрать область изменения для повторяющегося события.",
+                intent=intent,
+                mode="tool",
+                debug={"reason": "missing_scope"},
+            )
+        )
+    if is_recurring and scope_value in {RecurrenceScope.THIS, RecurrenceScope.FUTURE} and instance_dt is None:
+        instance_dt = event.dt
+    if scope_value in {RecurrenceScope.THIS, RecurrenceScope.FUTURE} and instance_dt is None:
+        return ensure_valid(
+            refused(
+                "Не удалось определить дату инстанса.",
+                intent=intent,
+                mode="tool",
+                debug={"reason": "missing_instance_dt"},
+            )
+        )
+    updated_local, reminder_id = await _apply_local_update_scope(
+        event,
+        changes,
+        scope=scope_value,
+        instance_dt=instance_dt,
+        chat_id=chat_id,
+        user_id=user_id,
+    )
+    caldav_error: str | None = None
+    if backend_mode == "caldav":
+        timeouts = _resolve_timeouts(timeouts)
+        retry_policy = _resolve_retry_policy(retry_policy)
+        breaker = circuit_breakers.get("caldav") if circuit_breakers else None
+        config = tools_calendar_caldav.load_caldav_config()
+        if config is None:
+            caldav_error = "missing_config"
+        else:
+            if breaker is not None:
+                allowed, circuit_event = breaker.allow_request()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="caldav",
+                        event=circuit_event,
+                        status="ok",
+                        name="calendar.update",
+                    )
+                if not allowed:
+                    return ensure_valid(
+                        error(
+                            map_error_text("temporarily_unavailable"),
+                            intent=intent,
+                            mode="tool",
+                            debug={"reason": "circuit_open"},
+                        )
+                    )
+            try:
+                await _apply_caldav_update_scope(
+                    config,
+                    event,
+                    changes,
+                    scope=scope_value,
+                    instance_dt=instance_dt,
+                    policy=retry_policy,
+                    timeouts=timeouts,
+                    request_context=request_context,
+                )
+                if breaker is not None:
+                    circuit_event = breaker.record_success()
+                    if circuit_event:
+                        log_event(
+                            LOGGER,
+                            request_context,
+                            component="caldav",
+                            event=circuit_event,
+                            status="ok",
+                            name="calendar.update",
+                        )
+            except Exception as exc:
+                if breaker is not None:
+                    circuit_event = breaker.record_failure()
+                    if circuit_event:
+                        log_event(
+                            LOGGER,
+                            request_context,
+                            component="caldav",
+                            event=circuit_event,
+                            status="error",
+                            name="calendar.update",
+                        )
+                caldav_error = _safe_caldav_error_label(exc)
+    if updated_local is None:
+        return ensure_valid(refused("Событие не найдено.", intent=intent, mode="tool"))
+    debug: dict[str, object] = {"event_id": event_id}
+    if reminder_id:
+        debug["reminder_id"] = reminder_id
+    if caldav_error:
+        debug["calendar_backend"] = "local_fallback"
+        debug["caldav_error"] = caldav_error
+    return ensure_valid(ok("Событие обновлено.", intent=intent, mode="tool", debug=debug))
+
+
+async def _apply_caldav_update_scope(
+    config: tools_calendar_caldav.CalDAVConfig,
+    event: calendar_store.CalendarItem,
+    changes: dict[str, object],
+    *,
+    scope: RecurrenceScope,
+    instance_dt: datetime | None,
+    policy: RetryPolicy,
+    timeouts: TimeoutConfig,
+    request_context: RequestContext | None,
+) -> None:
+    updated_start = _resolve_change_datetime(changes.get("start_at")) or event.dt
+    updated_title = _resolve_change_text(changes.get("title")) or event.title
+    updated_end = updated_start + timedelta(hours=1)
+    if scope == RecurrenceScope.ALL or not event.rrule:
+        await retry_async(
+            lambda: tools_calendar_caldav.update_event(
+                config,
+                event_id=event.id,
+                start_at=updated_start,
+                end_at=updated_end,
+                title=updated_title,
+                rrule=event.rrule,
+                exdates=event.exdates,
+            ),
+            policy=policy,
+            timeout_seconds=timeouts.external_api_seconds,
+            logger=LOGGER,
+            request_context=request_context,
+            component="caldav",
+            name="calendar.update",
+            is_retryable=_is_retryable_calendar_error,
+        )
+        return
+    if scope == RecurrenceScope.THIS:
+        updated_rrule, updated_exdates = _apply_recurrence_delete_scope(
+            event,
+            scope,
+            instance_dt=instance_dt,
+        )
+        await retry_async(
+            lambda: tools_calendar_caldav.update_event(
+                config,
+                event_id=event.id,
+                start_at=event.dt,
+                end_at=event.dt + timedelta(hours=1),
+                title=event.title,
+                rrule=updated_rrule,
+                exdates=updated_exdates,
+            ),
+            policy=policy,
+            timeout_seconds=timeouts.external_api_seconds,
+            logger=LOGGER,
+            request_context=request_context,
+            component="caldav",
+            name="calendar.update",
+            is_retryable=_is_retryable_calendar_error,
+        )
+        await retry_async(
+            lambda: tools_calendar_caldav.create_event(
+                config,
+                start_at=updated_start,
+                end_at=updated_end,
+                title=updated_title,
+            ),
+            policy=policy,
+            timeout_seconds=timeouts.external_api_seconds,
+            logger=LOGGER,
+            request_context=request_context,
+            component="caldav",
+            name="calendar.update",
+            is_retryable=_is_retryable_calendar_error,
+        )
+        return
+    if scope == RecurrenceScope.FUTURE:
+        updated_rrule, _ = _apply_recurrence_delete_scope(
+            event,
+            scope,
+            instance_dt=instance_dt,
+        )
+        await retry_async(
+            lambda: tools_calendar_caldav.update_event(
+                config,
+                event_id=event.id,
+                start_at=event.dt,
+                end_at=event.dt + timedelta(hours=1),
+                title=event.title,
+                rrule=updated_rrule,
+                exdates=event.exdates,
+            ),
+            policy=policy,
+            timeout_seconds=timeouts.external_api_seconds,
+            logger=LOGGER,
+            request_context=request_context,
+            component="caldav",
+            name="calendar.update",
+            is_retryable=_is_retryable_calendar_error,
+        )
+        new_rrule = _strip_rrule_parts(event.rrule, {"UNTIL", "COUNT"})
+        await retry_async(
+            lambda: tools_calendar_caldav.create_event(
+                config,
+                start_at=updated_start,
+                end_at=updated_end,
+                title=updated_title,
+                rrule=new_rrule,
+            ),
+            policy=policy,
+            timeout_seconds=timeouts.external_api_seconds,
+            logger=LOGGER,
+            request_context=request_context,
+            component="caldav",
+            name="calendar.update",
+            is_retryable=_is_retryable_calendar_error,
+        )
+
+
+async def _apply_local_update_scope(
+    event: calendar_store.CalendarItem,
+    changes: dict[str, object],
+    *,
+    scope: RecurrenceScope,
+    instance_dt: datetime | None,
+    chat_id: int,
+    user_id: int,
+) -> tuple[calendar_store.CalendarItem | None, str | None]:
+    updated_start = _resolve_change_datetime(changes.get("start_at")) or event.dt
+    updated_title = _resolve_change_text(changes.get("title")) or event.title
+    if scope == RecurrenceScope.ALL or not event.rrule:
+        updated_event, reminder_id = await calendar_store.update_event_fields(
+            event.id,
+            new_dt=updated_start,
+            new_title=updated_title,
+        )
+        return updated_event, reminder_id
+    if scope == RecurrenceScope.THIS:
+        updated_rrule, updated_exdates = _apply_recurrence_delete_scope(
+            event,
+            scope,
+            instance_dt=instance_dt,
+        )
+        await calendar_store.update_event_fields(
+            event.id,
+            new_rrule=updated_rrule,
+            new_exdates=updated_exdates,
+        )
+        created = await calendar_store.add_item(
+            dt=updated_start,
+            title=updated_title,
+            chat_id=chat_id,
+            remind_at=None,
+            user_id=user_id,
+            reminders_enabled=False,
+        )
+        created_event = created.get("event") if isinstance(created, dict) else None
+        created_id = created_event.get("event_id") if isinstance(created_event, dict) else None
+        event_value = await calendar_store.get_event(created_id) if isinstance(created_id, str) else None
+        return event_value, None
+    if scope == RecurrenceScope.FUTURE:
+        updated_rrule, updated_exdates = _apply_recurrence_delete_scope(
+            event,
+            scope,
+            instance_dt=instance_dt,
+        )
+        await calendar_store.update_event_fields(
+            event.id,
+            new_rrule=updated_rrule,
+            new_exdates=updated_exdates,
+        )
+        new_rrule = _strip_rrule_parts(event.rrule, {"UNTIL", "COUNT"})
+        created = await calendar_store.add_item(
+            dt=updated_start,
+            title=updated_title,
+            chat_id=chat_id,
+            remind_at=None,
+            user_id=user_id,
+            reminders_enabled=False,
+            rrule=new_rrule,
+        )
+        created_event = created.get("event") if isinstance(created, dict) else None
+        created_id = created_event.get("event_id") if isinstance(created_event, dict) else None
+        event_value = await calendar_store.get_event(created_id) if isinstance(created_id, str) else None
+        return event_value, None
+    return None, None
+
+
+def _apply_recurrence_delete_scope(
+    event: calendar_store.CalendarItem,
+    scope: RecurrenceScope,
+    *,
+    instance_dt: datetime | None,
+) -> tuple[str | None, list[datetime] | None]:
+    rrule = event.rrule
+    if not rrule:
+        return rrule, event.exdates
+    if scope == RecurrenceScope.THIS:
+        exdates = list(event.exdates or [])
+        if instance_dt is not None:
+            exdates.append(_ensure_aware_for_label(instance_dt))
+        return rrule, _dedupe_exdates(exdates)
+    if scope == RecurrenceScope.FUTURE:
+        base_dt = instance_dt or event.dt
+        until_value = _format_utc_value(base_dt - timedelta(seconds=1))
+        updated_rrule = _set_rrule_part(rrule, "UNTIL", until_value)
+        return updated_rrule, event.exdates
+    return rrule, event.exdates
+
+
+def _resolve_change_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    return None
+
+
+def _resolve_change_text(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _dedupe_exdates(exdates: list[datetime]) -> list[datetime] | None:
+    seen: set[str] = set()
+    result: list[datetime] = []
+    for item in exdates:
+        if not isinstance(item, datetime):
+            continue
+        iso = item.astimezone(calendar_store.BOT_TZ).isoformat()
+        if iso in seen:
+            continue
+        seen.add(iso)
+        result.append(item)
+    return result or None
+
+
+def _parse_rrule(rrule: str) -> dict[str, str]:
+    parts: dict[str, str] = {}
+    for segment in rrule.split(";"):
+        if "=" not in segment:
+            continue
+        key, value = segment.split("=", 1)
+        if key and value:
+            parts[key] = value
+    return parts
+
+
+def _format_rrule(parts: dict[str, str]) -> str:
+    return ";".join(f"{key}={value}" for key, value in parts.items())
+
+
+def _set_rrule_part(rrule: str, key: str, value: str) -> str:
+    parts = _parse_rrule(rrule)
+    parts[key] = value
+    return _format_rrule(parts)
+
+
+def _strip_rrule_parts(rrule: str | None, keys: set[str]) -> str | None:
+    if not rrule:
+        return rrule
+    parts = _parse_rrule(rrule)
+    for key in keys:
+        parts.pop(key, None)
+    if not parts:
+        return None
+    return _format_rrule(parts)
+
+
+def _format_utc_value(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 async def list_calendar_items(

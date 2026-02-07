@@ -111,6 +111,28 @@ async def delete_event(config: CalDAVConfig, *, event_id: str) -> bool:
     return await asyncio.to_thread(_delete_event_sync, config, event_id)
 
 
+async def update_event(
+    config: CalDAVConfig,
+    *,
+    event_id: str,
+    start_at: datetime,
+    end_at: datetime,
+    title: str,
+    rrule: str | None = None,
+    exdates: list[datetime] | None = None,
+) -> bool:
+    return await asyncio.to_thread(
+        _update_event_sync,
+        config,
+        event_id,
+        start_at,
+        end_at,
+        title,
+        rrule,
+        exdates,
+    )
+
+
 def _check_connection_sync(config: CalDAVConfig) -> tuple[bool, str | None]:
     try:
         calendar, name = _resolve_calendar(config)
@@ -206,6 +228,32 @@ def _delete_event_sync(config: CalDAVConfig, event_id: str) -> bool:
             event.delete()
             return True
     return False
+
+
+def _update_event_sync(
+    config: CalDAVConfig,
+    event_id: str,
+    start_at: datetime,
+    end_at: datetime,
+    title: str,
+    rrule: str | None,
+    exdates: list[datetime] | None,
+) -> bool:
+    calendar, _ = _resolve_calendar(config)
+    calendar_url = _calendar_url(calendar)
+    href = _build_event_url(calendar_url, event_id)
+    ical = _build_ical_event(
+        uid=event_id,
+        start_at=_to_utc(_ensure_aware(start_at)),
+        end_at=_to_utc(_ensure_aware(end_at)),
+        title=title,
+        description=None,
+        location=None,
+        rrule=rrule,
+        exdates=exdates,
+    )
+    _put_event(href, ical, config)
+    return True
 
 
 def _resolve_calendar(config: CalDAVConfig) -> tuple[object, str | None]:

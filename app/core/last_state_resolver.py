@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from app.infra.last_state_store import LastState
+from app.core.recurrence_scope import RecurrenceScope, parse_recurrence_scope
 
 
 ResolutionStatus = Literal["matched", "fallback", "skip"]
@@ -19,6 +20,7 @@ class ResolutionResult:
     target_id: str | None = None
     query: str | None = None
     matched_ref: str | None = None
+    scope: RecurrenceScope | None = None
 
 
 _TRIGGER_TOKENS = {
@@ -46,6 +48,7 @@ def resolve_short_message(text: str, last_state: LastState | None) -> Resolution
     if not cleaned:
         return ResolutionResult(status="skip", reason="empty")
     lowered = cleaned.lower()
+    scope = parse_recurrence_scope(lowered)
     tokens = re.findall(r"\w+", lowered)
     is_short = len(tokens) <= 5
     has_trigger = any(token in _TRIGGER_TOKENS for token in tokens) or any(
@@ -57,7 +60,7 @@ def resolve_short_message(text: str, last_state: LastState | None) -> Resolution
     if action is None:
         return ResolutionResult(status="skip", reason="no_action_match")
     if last_state is None:
-        return ResolutionResult(status="fallback", reason="missing_last_state", action=action)
+        return ResolutionResult(status="fallback", reason="missing_last_state", action=action, scope=scope)
     if action == "repeat_search":
         query = last_state.last_query
         if isinstance(query, str) and query.strip():
@@ -68,10 +71,11 @@ def resolve_short_message(text: str, last_state: LastState | None) -> Resolution
                 target="search",
                 query=query,
                 matched_ref="last_query",
+                scope=scope,
             )
-        return ResolutionResult(status="fallback", reason="missing_last_query", action=action)
+        return ResolutionResult(status="fallback", reason="missing_last_query", action=action, scope=scope)
     if action == "move":
-        return ResolutionResult(status="fallback", reason="missing_date", action=action)
+        return ResolutionResult(status="fallback", reason="missing_date", action=action, scope=scope)
     if action == "move_tomorrow":
         event_id = last_state.last_event_id
         if isinstance(event_id, str) and event_id.strip():
@@ -82,8 +86,9 @@ def resolve_short_message(text: str, last_state: LastState | None) -> Resolution
                 target="event",
                 target_id=event_id,
                 matched_ref="last_event_id",
+                scope=scope,
             )
-        return ResolutionResult(status="fallback", reason="missing_last_event", action=action)
+        return ResolutionResult(status="fallback", reason="missing_last_event", action=action, scope=scope)
     if action == "cancel":
         reminder_id = last_state.last_reminder_id
         if isinstance(reminder_id, str) and reminder_id.strip():
@@ -94,6 +99,7 @@ def resolve_short_message(text: str, last_state: LastState | None) -> Resolution
                 target="reminder",
                 target_id=reminder_id,
                 matched_ref="last_reminder_id",
+                scope=scope,
             )
         event_id = last_state.last_event_id
         if isinstance(event_id, str) and event_id.strip():
@@ -104,8 +110,9 @@ def resolve_short_message(text: str, last_state: LastState | None) -> Resolution
                 target="event",
                 target_id=event_id,
                 matched_ref="last_event_id",
+                scope=scope,
             )
-        return ResolutionResult(status="fallback", reason="missing_last_target", action=action)
+        return ResolutionResult(status="fallback", reason="missing_last_target", action=action, scope=scope)
     return ResolutionResult(status="skip", reason="unsupported_action")
 
 
