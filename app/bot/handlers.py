@@ -50,6 +50,7 @@ from app.infra.request_context import (
     set_status,
     start_request,
 )
+from app.infra.trace_store import TraceEntry, TraceStore
 from app.infra.storage import TaskStorage
 
 LOGGER = logging.getLogger(__name__)
@@ -111,6 +112,13 @@ def _get_action_store(context: ContextTypes.DEFAULT_TYPE) -> ActionStore:
     store = ActionStore()
     context.application.bot_data["action_store"] = store
     return store
+
+
+def _get_trace_store(context: ContextTypes.DEFAULT_TYPE) -> TraceStore | None:
+    store = context.application.bot_data.get("trace_store")
+    if isinstance(store, TraceStore):
+        return store
+    return None
 
 
 def _wizards_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -247,6 +255,23 @@ async def _log_route(update: Update, context: ContextTypes.DEFAULT_TYPE, handler
     )
 
 
+def _record_trace_summary(context: ContextTypes.DEFAULT_TYPE, request_context: RequestContext | None) -> None:
+    if request_context is None:
+        return
+    if not request_context.user_id or not request_context.chat_id:
+        return
+    store = _get_trace_store(context)
+    if store is None:
+        return
+    total_duration_ms = elapsed_ms(request_context.start_time)
+    store.add_from_context(
+        chat_id=int(request_context.chat_id),
+        user_id=int(request_context.user_id),
+        request_context=request_context,
+        total_duration_ms=total_duration_ms,
+    )
+
+
 def _with_error_handling(
     handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]],
 ) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]:
@@ -280,6 +305,7 @@ def _with_error_handling(
             await _handle_exception(update, context, exc)
         finally:
             log_request(LOGGER, request_context)
+            _record_trace_summary(context, request_context)
 
     return wrapper
 
@@ -363,6 +389,75 @@ async def _guard_access(update: Update, context: ContextTypes.DEFAULT_TYPE, *, b
         await send_result(update, context, result_message)
         return False
     return True
+
+
+def _is_group_chat(update: Update) -> bool:
+    chat = update.effective_chat
+    chat_type = getattr(chat, "type", None)
+    return chat_type in {"group", "supergroup"}
+
+
+def _handle_trace_request(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    correlation_id: str | None = None,
+    use_last: bool = False,
+) -> OrchestratorResult:
+    store = _get_trace_store(context)
+    if store is None:
+        return _build_simple_result(
+            "Трассы недоступны.",
+            intent="command.trace",
+            status="refused",
+            mode="local",
+        )
+    if correlation_id:
+        matches = store.find_entries(chat_id=chat_id, user_id=user_id, correlation_id=correlation_id)
+        if not matches:
+            return _build_simple_result(
+                "Трасса не найдена.",
+                intent="command.trace",
+                status="refused",
+                mode="local",
+            )
+        if len(matches) > 1:
+            return _build_simple_result(
+                "Найдено несколько совпадений, укажи больше символов.",
+                intent="command.trace",
+                status="refused",
+                mode="local",
+            )
+        entry = matches[0]
+        return _build_simple_result(
+            _format_trace_detail(entry),
+            intent="command.trace.detail",
+            status="ok",
+            mode="local",
+        )
+    if use_last:
+        entry = store.get_last_entry(chat_id=chat_id, user_id=user_id)
+        if entry is None:
+            return _build_simple_result(
+                "Трассы не найдены.",
+                intent="command.trace",
+                status="refused",
+                mode="local",
+            )
+        return _build_simple_result(
+            _format_trace_detail(entry),
+            intent="command.trace.detail",
+            status="ok",
+            mode="local",
+        )
+    entries = store.list_entries(chat_id=chat_id, user_id=user_id, limit=5)
+    return _build_simple_result(
+        _format_trace_list(entries),
+        intent="command.trace",
+        status="ok",
+        mode="local",
+    )
 
 
 def _is_allowed_user(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
@@ -695,6 +790,60 @@ def _apply_strict_pseudo_source_guard(text: str | None) -> str:
     return cleaned
 
 
+def _format_trace_timestamp(ts: datetime) -> str:
+    return ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+
+
+def _format_trace_list(entries: list[TraceEntry]) -> str:
+    if not entries:
+        return "Трассы не найдены."
+    lines = ["Последние запросы:"]
+    for entry in entries:
+        intent = entry.intent or "-"
+        short_id = entry.correlation_id[:8]
+        lines.append(f"- {_format_trace_timestamp(entry.ts)} | {intent} | {entry.status} | {short_id}")
+    return "\n".join(lines)
+
+
+def _format_trace_detail(entry: TraceEntry) -> str:
+    lines = [
+        f"Trace {entry.correlation_id}",
+        f"intent: {entry.intent or '-'}",
+        f"mode: {entry.mode or '-'}",
+        f"status: {entry.status}",
+    ]
+    if entry.total_duration_ms is not None:
+        lines.append(f"total_duration_ms: {entry.total_duration_ms:.2f}")
+    lines.append("")
+    lines.append("Steps:")
+    lines.append("step | component | name | status | duration_ms")
+    for step in entry.trace_steps:
+        duration = step.get("duration_ms")
+        duration_text = f"{duration:.2f}" if isinstance(duration, (int, float)) else "-"
+        name = step.get("name") or "-"
+        lines.append(
+            f"{step.get('step')} | {step.get('component')} | {name} | {step.get('status')} | {duration_text}"
+        )
+    if entry.tool_calls:
+        lines.append("")
+        lines.append("Tool calls:")
+        for call in entry.tool_calls:
+            duration = call.get("duration_ms")
+            duration_text = f"{duration:.2f}" if isinstance(duration, (int, float)) else "-"
+            lines.append(f"- {call.get('name') or '-'}: {duration_text} ms")
+    if entry.llm_calls:
+        lines.append("")
+        lines.append("LLM calls:")
+        for call in entry.llm_calls:
+            duration = call.get("duration_ms")
+            duration_text = f"{duration:.2f}" if isinstance(duration, (int, float)) else "-"
+            lines.append(f"- {call.get('name') or '-'}: {duration_text} ms")
+    if entry.error:
+        lines.append("")
+        lines.append(f"error: {entry.error.get('exc_type')} at {entry.error.get('where')}")
+    return "\n".join(lines)
+
+
 
 async def _send_reply_keyboard_remove(
     update: Update,
@@ -785,6 +934,17 @@ async def send_result(
         debug_payload = dict(public_result.debug)
         debug_payload.setdefault("trace", request_context.trace)
         public_result = replace(public_result, debug=debug_payload)
+        request_context.meta.setdefault("intent", public_result.intent)
+        request_context.meta.setdefault("mode", public_result.mode)
+        if request_context.env == "dev":
+            if not any(action.id == "debug.trace" for action in public_result.actions):
+                public_result = replace(
+                    public_result,
+                    actions=[
+                        *public_result.actions,
+                        Action(id="debug.trace", label="Trace", payload={"op": "trace_last"}),
+                    ],
+                )
     if request_id:
         sent_key = f"send_result:{request_id}"
         if context.chat_data.get(sent_key):
@@ -879,6 +1039,40 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         intent="command.help",
         status="ok",
         mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def trace_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context, bucket="ui"):
+        return
+    if _is_group_chat(update):
+        result = _build_simple_result(
+            "Команда /trace недоступна в группах.",
+            intent="command.trace",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    if not user_id or not chat_id:
+        result = _build_simple_result(
+            "Не удалось определить пользователя.",
+            intent="command.trace",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    args_text = " ".join(context.args) if context.args else ""
+    result = _handle_trace_request(
+        context,
+        user_id=user_id,
+        chat_id=chat_id,
+        correlation_id=args_text or None,
     )
     await send_result(update, context, result)
 
@@ -1889,6 +2083,15 @@ async def _dispatch_action_payload(
     if op_value == "menu_cancel":
         await _send_reply_keyboard_remove(update, context, text="Ок")
         return ok("Ок", intent="menu.cancel", mode="local")
+    if op_value == "trace_last":
+        if _is_group_chat(update):
+            return refused("Команда /trace недоступна в группах.", intent="command.trace", mode="local")
+        return _handle_trace_request(
+            context,
+            user_id=user_id,
+            chat_id=chat_id,
+            use_last=True,
+        )
     if op_value == "menu_section":
         section = payload.get("section")
         if not isinstance(section, str):
@@ -2289,6 +2492,19 @@ async def _dispatch_command_payload(
             chat_id=chat_id,
             limit=5,
             intent="utility_reminders.list",
+        )
+    if normalized == "/trace":
+        if _is_group_chat(update):
+            return refused("Команда /trace недоступна в группах.", intent="command.trace", mode="local")
+        user_id = update.effective_user.id if update.effective_user else 0
+        chat_id = update.effective_chat.id if update.effective_chat else 0
+        if not user_id or not chat_id:
+            return refused("Не удалось определить пользователя.", intent="command.trace", mode="local")
+        return _handle_trace_request(
+            context,
+            user_id=user_id,
+            chat_id=chat_id,
+            correlation_id=args.strip() or None,
         )
     if normalized in {"/facts_on", "/facts_off"}:
         user_id = update.effective_user.id if update.effective_user else 0
