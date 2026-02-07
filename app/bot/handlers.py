@@ -19,6 +19,14 @@ from telegram.ext import ContextTypes
 from app.bot import menu, routing, wizard
 from app.bot.actions import ActionStore, StoredAction, build_inline_keyboard, parse_callback_token
 from app.core import calendar_store, tools_calendar
+from app.core.calendar_nlp_ru import (
+    EventDraft,
+    event_from_text_ru,
+    generate_draft_id,
+    is_calendar_intent,
+    parse_datetime_shift,
+    update_draft_from_text,
+)
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMemory, DialogMessage
 from app.core.last_state_resolver import ResolutionResult, resolve_short_message
@@ -40,6 +48,7 @@ from app.core.recurrence_scope import RecurrenceScope, normalize_scope, parse_re
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
 from app.infra.last_state_store import LastStateStore
+from app.infra.draft_store import DraftStore
 from app.infra.messaging import safe_edit_text, safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limiter import RateLimiter
@@ -150,6 +159,13 @@ def _get_action_store(context: ContextTypes.DEFAULT_TYPE) -> ActionStore:
 def _get_trace_store(context: ContextTypes.DEFAULT_TYPE) -> TraceStore | None:
     store = context.application.bot_data.get("trace_store")
     if isinstance(store, TraceStore):
+        return store
+    return None
+
+
+def _get_draft_store(context: ContextTypes.DEFAULT_TYPE) -> DraftStore | None:
+    store = context.application.bot_data.get("draft_store")
+    if isinstance(store, DraftStore):
         return store
     return None
 
@@ -749,10 +765,13 @@ def _build_recurrence_scope_actions(
     *,
     event_id: str,
     instance_dt: datetime | None,
+    extra_payload: dict[str, object] | None = None,
 ) -> list[Action]:
     payload_base: dict[str, object] = {"op": op, "event_id": event_id}
     if instance_dt is not None:
         payload_base["instance_dt"] = instance_dt.isoformat()
+    if extra_payload:
+        payload_base.update(extra_payload)
     return [
         Action(
             id=f"{op}.scope.this",
@@ -855,6 +874,62 @@ def _short_label(value: str, limit: int = 24) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _render_event_draft(draft: EventDraft) -> str:
+    lines = ["🗓 Черновик события"]
+    lines.append(f"Название: {draft.title}")
+    when_label = "—"
+    if draft.start_at is not None:
+        start_local = draft.start_at.astimezone(calendar_store.BOT_TZ)
+        when_label = start_local.strftime("%d.%m.%Y %H:%M")
+    elif draft.date_hint is not None:
+        when_label = draft.date_hint.strftime("%d.%m.%Y")
+    lines.append(f"Когда: {when_label}")
+    if draft.duration_minutes:
+        lines.append(f"Длительность: {draft.duration_minutes} мин")
+    elif draft.end_at is not None:
+        end_local = draft.end_at.astimezone(calendar_store.BOT_TZ)
+        lines.append(f"До: {end_local.strftime('%H:%M')}")
+    if draft.recurrence is not None:
+        lines.append(f"Повтор: {draft.recurrence.human}")
+    if draft.location:
+        lines.append(f"Место: {draft.location}")
+    if draft.missing_fields:
+        missing_map = {"title": "название", "date": "дату", "time": "время"}
+        missing_labels = [missing_map.get(field, field) for field in draft.missing_fields]
+        lines.append(f"Нужно уточнить: {', '.join(missing_labels)}.")
+    return "\n".join(lines)
+
+
+def _draft_actions(draft_id: str) -> list[Action]:
+    return [
+        Action(
+            id="calendar.create_confirm",
+            label="✅ Подтвердить",
+            payload={"op": "calendar.create_confirm", "draft_id": draft_id},
+        ),
+        Action(
+            id="calendar.create_edit",
+            label="✏️ Изменить",
+            payload={"op": "calendar.create_edit", "draft_id": draft_id},
+        ),
+        Action(
+            id="calendar.create_cancel",
+            label="❌ Отмена",
+            payload={"op": "calendar.create_cancel", "draft_id": draft_id},
+        ),
+    ]
+
+
+def _draft_missing_prompt(draft: EventDraft) -> str:
+    if "title" in draft.missing_fields:
+        return "Как назвать событие?"
+    if "date" in draft.missing_fields:
+        return "На какую дату?"
+    if "time" in draft.missing_fields:
+        return "Во сколько?"
+    return "Что уточнить?"
 
 
 def _build_user_context_with_dialog(
@@ -2116,6 +2191,11 @@ async def _handle_menu_section(
                     payload={"op": "wizard_start", "wizard_id": wizard.WIZARD_CALENDAR_ADD},
                 ),
                 Action(
+                    id="utility_calendar.add_nlp",
+                    label="✍️ Одним сообщением",
+                    payload={"op": "calendar.nlp.start"},
+                ),
+                Action(
                     id="calendar.list",
                     label="📋 Список",
                     payload={"op": "calendar.list"},
@@ -2586,6 +2666,46 @@ async def _dispatch_action_payload(
                 mode="local",
             )
         return result
+    if op_value == "calendar.nlp.start":
+        draft_store = _get_draft_store(context)
+        if draft_store is not None:
+            draft_store.set_force_nlp(chat_id=chat_id, user_id=user_id, enabled=True)
+        return ok(
+            "Напиши событие одной фразой.",
+            intent="calendar.nlp.start",
+            mode="local",
+            actions=[_menu_action()],
+        )
+    if op_value == "calendar.create_confirm":
+        draft_id = payload.get("draft_id")
+        if not isinstance(draft_id, str) or not draft_id:
+            return error("Некорректные данные действия.", intent="calendar.nlp.confirm", mode="local")
+        return await _handle_calendar_draft_confirm(
+            context,
+            user_id=user_id,
+            chat_id=chat_id,
+            draft_id=draft_id,
+        )
+    if op_value == "calendar.create_edit":
+        draft_id = payload.get("draft_id")
+        if not isinstance(draft_id, str) or not draft_id:
+            return error("Некорректные данные действия.", intent="calendar.nlp.edit", mode="local")
+        return await _handle_calendar_draft_edit(
+            context,
+            user_id=user_id,
+            chat_id=chat_id,
+            draft_id=draft_id,
+        )
+    if op_value == "calendar.create_cancel":
+        draft_id = payload.get("draft_id")
+        if not isinstance(draft_id, str) or not draft_id:
+            return ok("Ок, отменил.", intent="calendar.nlp.cancel", mode="local")
+        return await _handle_calendar_draft_cancel(
+            context,
+            user_id=user_id,
+            chat_id=chat_id,
+            draft_id=draft_id,
+        )
     if op_value == "calendar.add":
         if not _wizards_enabled(context):
             return refused("Сценарии отключены.", intent="wizard.disabled", mode="local")
@@ -2696,6 +2816,32 @@ async def _dispatch_action_payload(
         return await _handle_event_move_tomorrow(
             context,
             event_id=event_id,
+            user_id=user_id,
+            chat_id=chat_id,
+            scope=scope,
+            instance_dt=instance_dt,
+        )
+    if op_value == "calendar.move_phrase":
+        event_id = payload.get("event_id")
+        scope = normalize_scope(payload.get("scope"))
+        instance_raw = payload.get("instance_dt")
+        instance_dt = None
+        if isinstance(instance_raw, str):
+            try:
+                instance_dt = datetime.fromisoformat(instance_raw)
+            except ValueError:
+                instance_dt = None
+        if not isinstance(event_id, str) or not event_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="utility_calendar.move",
+                mode="local",
+                debug={"reason": "invalid_event_id"},
+            )
+        return await _handle_event_move_phrase(
+            context,
+            event_id=event_id,
+            text=str(payload.get("text") or ""),
             user_id=user_id,
             chat_id=chat_id,
             scope=scope,
@@ -3294,6 +3440,60 @@ async def _handle_event_move_tomorrow(
     )
 
 
+async def _handle_event_move_phrase(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    event_id: str,
+    text: str,
+    user_id: int,
+    chat_id: int,
+    scope: RecurrenceScope | str | None = None,
+    instance_dt: datetime | None = None,
+) -> OrchestratorResult:
+    event = await calendar_store.get_event(event_id)
+    if event is None or event.user_id != user_id or event.chat_id != chat_id:
+        return refused("Событие не найдено.", intent="utility_calendar.move", mode="local")
+    scope_value = normalize_scope(scope)
+    if event.rrule and scope_value is None:
+        return ok(
+            "Это повторяющееся событие. Что изменить?",
+            intent="utility_calendar.move",
+            mode="local",
+            actions=_build_recurrence_scope_actions(
+                "calendar.move_phrase",
+                event_id=event_id,
+                instance_dt=instance_dt or event.dt,
+                extra_payload={"text": text},
+            ),
+        )
+    now = datetime.now(tz=calendar_store.BOT_TZ)
+    new_dt = parse_datetime_shift(text, base_dt=event.dt, now=now, tz=calendar_store.BOT_TZ)
+    if new_dt is None:
+        return refused("Не понял, на какое время перенести.", intent="utility_calendar.move", mode="local")
+    tool_result = await update_event(
+        event_id,
+        {"start_at": new_dt},
+        scope=scope_value or RecurrenceScope.ALL,
+        instance_dt=instance_dt or event.dt,
+        user_id=user_id,
+        chat_id=chat_id,
+        intent="utility_calendar.move",
+        request_context=get_request_context(context),
+        circuit_breakers=_get_circuit_breakers(context),
+        retry_policy=_get_retry_policy(context),
+        timeouts=_get_timeouts(context),
+    )
+    if tool_result.status != "ok":
+        return replace(tool_result, mode="local", intent="utility_calendar.move")
+    when_label = new_dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+    return ok(
+        f"Ок, перенёс на {when_label}.",
+        intent="utility_calendar.move",
+        mode="local",
+        debug={"refs": {"event_id": event_id}},
+    )
+
+
 async def _execute_resolution(
     resolution: ResolutionResult,
     *,
@@ -3307,6 +3507,15 @@ async def _execute_resolution(
         return await _handle_event_move_tomorrow(
             context,
             event_id=resolution.target_id,
+            user_id=user_id,
+            chat_id=chat_id,
+            scope=resolution.scope,
+        )
+    if resolution.action == "move" and resolution.target_id and resolution.text:
+        return await _handle_event_move_phrase(
+            context,
+            event_id=resolution.target_id,
+            text=resolution.text,
             user_id=user_id,
             chat_id=chat_id,
             scope=resolution.scope,
@@ -3334,6 +3543,135 @@ async def _execute_resolution(
             request_context=request_context,
         )
     return _build_resolution_fallback(resolution.action or "resolve", reason=resolution.reason)
+
+
+def _draft_cancel_action(draft_id: str) -> Action:
+    return Action(
+        id="calendar.create_cancel",
+        label="❌ Отмена",
+        payload={"op": "calendar.create_cancel", "draft_id": draft_id},
+    )
+
+
+async def _handle_draft_followup(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    draft_id: str,
+    text: str,
+) -> OrchestratorResult:
+    draft_store = _get_draft_store(context)
+    if draft_store is None:
+        return refused("Черновик не найден.", intent="calendar.nlp.draft", mode="local")
+    draft = draft_store.get_draft(chat_id=chat_id, user_id=user_id, draft_id=draft_id)
+    if draft is None:
+        draft_store.set_active_draft(chat_id=chat_id, user_id=user_id, draft_id=None)
+        return refused("Черновик устарел.", intent="calendar.nlp.draft", mode="local")
+    updated = update_draft_from_text(draft, text, now=datetime.now(tz=calendar_store.BOT_TZ), tz=calendar_store.BOT_TZ)
+    draft_store.update_draft(chat_id=chat_id, user_id=user_id, draft_id=draft_id, draft=updated)
+    if updated.missing_fields:
+        draft_store.set_active_draft(chat_id=chat_id, user_id=user_id, draft_id=draft_id)
+        return ok(
+            _draft_missing_prompt(updated),
+            intent="calendar.nlp.clarify",
+            mode="local",
+            actions=[_draft_cancel_action(draft_id)],
+        )
+    draft_store.set_active_draft(chat_id=chat_id, user_id=user_id, draft_id=None)
+    return ok(
+        _render_event_draft(updated),
+        intent="calendar.nlp.create",
+        mode="local",
+        actions=_draft_actions(draft_id),
+    )
+
+
+async def _handle_calendar_draft_confirm(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    draft_id: str,
+) -> OrchestratorResult:
+    draft_store = _get_draft_store(context)
+    if draft_store is None:
+        return refused("Черновик не найден.", intent="calendar.nlp.confirm", mode="local")
+    draft = draft_store.get_draft(chat_id=chat_id, user_id=user_id, draft_id=draft_id)
+    if draft is None:
+        return refused("Черновик устарел.", intent="calendar.nlp.confirm", mode="local")
+    if draft.missing_fields:
+        draft_store.set_active_draft(chat_id=chat_id, user_id=user_id, draft_id=draft_id)
+        return ok(
+            _draft_missing_prompt(draft),
+            intent="calendar.nlp.clarify",
+            mode="local",
+            actions=[_draft_cancel_action(draft_id)],
+        )
+    if draft.start_at is None:
+        return refused("Нужно указать дату и время.", intent="calendar.nlp.confirm", mode="local")
+    settings = _get_settings(context)
+    result = await create_event(
+        start_at=draft.start_at,
+        title=draft.title,
+        chat_id=chat_id,
+        user_id=user_id,
+        intent="utility_calendar.add",
+        reminder_scheduler=_get_reminder_scheduler(context),
+        reminders_enabled=bool(getattr(settings, "reminders_enabled", True)) if settings else True,
+        request_context=get_request_context(context),
+        circuit_breakers=_get_circuit_breakers(context),
+        retry_policy=_get_retry_policy(context),
+        timeouts=_get_timeouts(context),
+        recurrence_text=draft.source_text if draft.recurrence else None,
+    )
+    draft_store.delete_draft(chat_id=chat_id, user_id=user_id, draft_id=draft_id)
+    draft_store.set_active_draft(chat_id=chat_id, user_id=user_id, draft_id=None)
+    return replace(result, mode="local", intent="utility_calendar.add")
+
+
+async def _handle_calendar_draft_edit(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    draft_id: str,
+) -> OrchestratorResult:
+    draft_store = _get_draft_store(context)
+    if draft_store is None:
+        return refused("Черновик не найден.", intent="calendar.nlp.edit", mode="local")
+    draft = draft_store.get_draft(chat_id=chat_id, user_id=user_id, draft_id=draft_id)
+    if draft is None:
+        return refused("Черновик устарел.", intent="calendar.nlp.edit", mode="local")
+    if not draft.missing_fields:
+        return ok(
+            _render_event_draft(draft),
+            intent="calendar.nlp.edit",
+            mode="local",
+            actions=_draft_actions(draft_id),
+        )
+    draft_store.set_active_draft(chat_id=chat_id, user_id=user_id, draft_id=draft_id)
+    return ok(
+        _draft_missing_prompt(draft),
+        intent="calendar.nlp.clarify",
+        mode="local",
+        actions=[_draft_cancel_action(draft_id)],
+    )
+
+
+async def _handle_calendar_draft_cancel(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    draft_id: str,
+) -> OrchestratorResult:
+    draft_store = _get_draft_store(context)
+    if draft_store is None:
+        return ok("Ок, отменил.", intent="calendar.nlp.cancel", mode="local")
+    draft_store.delete_draft(chat_id=chat_id, user_id=user_id, draft_id=draft_id)
+    draft_store.set_active_draft(chat_id=chat_id, user_id=user_id, draft_id=None)
+    return ok("Ок, отменил.", intent="calendar.nlp.cancel", mode="local")
 
 
 async def _handle_reminder_reschedule_start(
@@ -3921,6 +4259,19 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if wizard_result is not None:
                 await send_result(update, context, wizard_result)
                 return
+    draft_store = _get_draft_store(context)
+    if draft_store is not None:
+        active_draft_id = draft_store.get_active_draft_id(chat_id=chat_id, user_id=user_id)
+        if active_draft_id:
+            result = await _handle_draft_followup(
+                context,
+                user_id=user_id,
+                chat_id=chat_id,
+                draft_id=active_draft_id,
+                text=prompt,
+            )
+            await send_result(update, context, result)
+            return
     LOGGER.info("chat_ids user_id=%s chat_id=%s has_message=%s", user_id, chat_id, bool(update.message))
     dialog_memory = _get_dialog_memory(context)
     if user_id == 0 or chat_id == 0:
@@ -3973,6 +4324,23 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
             await dialog_memory.add_assistant(user_id, chat_id, result.text)
         return
+    if draft_store is not None:
+        force_nlp = draft_store.consume_force_nlp(chat_id=chat_id, user_id=user_id)
+        if force_nlp or is_calendar_intent(prompt):
+            now = datetime.now(tz=calendar_store.BOT_TZ)
+            draft = event_from_text_ru(prompt, now=now, tz=calendar_store.BOT_TZ, last_state=last_state)
+            draft_id = generate_draft_id()
+            draft_store.save_draft(chat_id=chat_id, user_id=user_id, draft_id=draft_id, draft=draft)
+            result = ok(
+                _render_event_draft(draft),
+                intent="calendar.nlp.create",
+                mode="local",
+                actions=_draft_actions(draft_id),
+            )
+            await send_result(update, context, result)
+            if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
+                await dialog_memory.add_assistant(user_id, chat_id, result.text)
+            return
     try:
         result = await orchestrator.handle(
             prompt,

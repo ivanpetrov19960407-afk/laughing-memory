@@ -36,6 +36,7 @@ from app.infra.resilience import (
 from app.infra.storage import TaskStorage
 from app.infra.last_state_store import LastStateStore
 from app.infra.trace_store import TraceStore
+from app.infra.draft_store import DraftStore
 from app.stores.google_tokens import GoogleTokenStore
 from app.tools import NullSearchClient, PerplexityWebSearchClient
 from app.storage.wizard_store import WizardStore
@@ -225,6 +226,7 @@ def main() -> None:
         ttl_seconds=settings.action_ttl_seconds,
         max_items=settings.action_max_size,
     )
+    application.bot_data["draft_store"] = DraftStore(max_items=50, ttl_seconds=24 * 3600)
     application.bot_data["trace_store"] = TraceStore(max_items=20, ttl_seconds=86400)
     wizard_store = WizardStore(
         settings.wizard_store_path,

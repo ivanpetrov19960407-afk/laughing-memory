@@ -26,6 +26,22 @@ def test_resolve_move_tomorrow() -> None:
     assert resolution.target_id == "evt-1"
 
 
+def test_resolve_move_phrase() -> None:
+    last_state = LastState(
+        last_intent="utility_calendar.add",
+        last_event_id="evt-42",
+        last_reminder_id=None,
+        last_calendar_id=None,
+        last_query=None,
+        last_correlation_id="cid-3",
+        updated_at=datetime.now(timezone.utc),
+    )
+    resolution = resolve_short_message("сдвинь на 30 минут", last_state)
+    assert resolution.status == "matched"
+    assert resolution.action == "move"
+    assert resolution.target_id == "evt-42"
+
+
 def test_resolve_cancel_reminder() -> None:
     last_state = LastState(
         last_intent="utility_reminders.create",
