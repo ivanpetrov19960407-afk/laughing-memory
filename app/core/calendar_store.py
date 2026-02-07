@@ -859,6 +859,212 @@ def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
     return parse_local_datetime(raw)
 
 
+_TITLE_PREFIX_TRIM_RE = re.compile(r"^[\s\-—–,:;]+")
+_SPACE_RE = re.compile(r"\s+")
+
+
+def now_local(*, tz: ZoneInfo | None = None) -> datetime:
+    tzinfo = tz or VIENNA_TZ
+    return datetime.now(tz=tzinfo)
+
+
+def _clean_title(value: str) -> str:
+    cleaned = _TITLE_PREFIX_TRIM_RE.sub("", value.strip())
+    return _SPACE_RE.sub(" ", cleaned).strip()
+
+
+_TIME_PREFIX_RE = re.compile(
+    r"^\s*(?:в\s+)?(?P<h>\d{1,2})(?::(?P<m>\d{2}))?(?:\s+(?P<part>утра|дня|вечера|ночи))?\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _parse_time_prefix(value: str) -> tuple[time, str] | None:
+    """
+    Parses leading time expressions like:
+    - 19:00
+    - в 19:00
+    - в 7
+    - 7 вечера
+    Returns (time, rest_text) or None if no time prefix.
+    """
+    match = _TIME_PREFIX_RE.match(value)
+    if not match:
+        return None
+    hour = int(match.group("h"))
+    minute = int(match.group("m") or 0)
+    part = (match.group("part") or "").lower()
+    if part in {"вечера", "дня"} and 1 <= hour <= 11:
+        hour += 12
+    if part in {"утра"} and hour == 12:
+        hour = 0
+    if part in {"ночи"} and hour == 12:
+        hour = 0
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError("Некорректное время.")
+    rest = value[match.end() :].strip()
+    return time(hour, minute), rest
+
+
+_WEEKDAY_ALIASES: dict[str, int] = {
+    "пн": 0,
+    "понедельник": 0,
+    "вт": 1,
+    "вторник": 1,
+    "ср": 2,
+    "среда": 2,
+    "среду": 2,
+    "чт": 3,
+    "четверг": 3,
+    "пт": 4,
+    "пятница": 4,
+    "пятницу": 4,
+    "сб": 5,
+    "суббота": 5,
+    "субботу": 5,
+    "вс": 6,
+    "воскресенье": 6,
+}
+
+_WEEKDAY_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:в|во)\s+)?(?P<day>"
+    r"пн|вт|ср|чт|пт|сб|вс|"
+    r"понедельник|вторник|среда|среду|четверг|пятница|пятницу|суббота|субботу|воскресенье"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _combine_local_tz(target_date: date, target_time: time, tzinfo: ZoneInfo) -> datetime:
+    return datetime.combine(target_date, target_time).replace(tzinfo=tzinfo)
+
+
+def parse_event_datetime(
+    value: str,
+    *,
+    now: datetime | None = None,
+    tz: ZoneInfo | None = None,
+) -> tuple[datetime, str]:
+    """
+    Calendar-oriented parser:
+    - First tries strict calendar formats (parse_local_datetime).
+    - Then falls back to human/RU phrases and extracts the remaining text as title.
+
+    Returns: (timezone-aware datetime, rest_text_for_title)
+    """
+    raw = value.strip()
+    if not raw:
+        raise ValueError("Пустой ввод.")
+    tzinfo = tz or VIENNA_TZ
+    current = (now or now_local(tz=tzinfo)).astimezone(tzinfo)
+
+    # 1) Strict (backward compatible): full string must be only datetime.
+    try:
+        parsed = parse_local_datetime(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=tzinfo)
+        return parsed.astimezone(tzinfo), ""
+    except ValueError:
+        pass
+
+    # 2) Strict datetime prefix + trailing title, e.g. "2026-02-05 18:30 врач".
+    strict_prefix_patterns = [
+        r"^(?P<dt>\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2})\b",
+        r"^(?P<dt>\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2})\b",
+        r"^(?P<dt>\d{4}\.\d{2}\.\d{2}\s+\d{1,2}:\d{2})\b",
+        r"^(?P<dt>\d{2}-\d{2}-\d{4}\s+\d{1,2}:\d{2})\b",
+    ]
+    for pattern in strict_prefix_patterns:
+        match = re.match(pattern, raw)
+        if not match:
+            continue
+        dt_part = match.group("dt")
+        parsed = parse_local_datetime(dt_part)
+        title = _clean_title(raw[match.end() :])
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=tzinfo)
+        return parsed.astimezone(tzinfo), title
+
+    # 3) Relative: "через 10 минут созвон", "через 2 часа тренировка"
+    lowered = raw.lower()
+    if lowered.startswith("через"):
+        tokens = raw.split()
+        idx = 1
+        seen_unit = False
+        unit_re = re.compile(r"^(час|часа|часов|ч|минут|минуты|мин|м)$", flags=re.IGNORECASE)
+        while idx < len(tokens):
+            token = tokens[idx]
+            low = token.lower()
+            if low in {"и"}:
+                idx += 1
+                continue
+            if re.fullmatch(r"\d+", token) and idx + 1 < len(tokens) and unit_re.fullmatch(tokens[idx + 1].lower()):
+                seen_unit = True
+                idx += 2
+                continue
+            break
+        if not seen_unit:
+            raise ValueError("Формат: через 10 минут или через 2 часа.")
+        phrase = " ".join(tokens[:idx])
+        rest = _clean_title(" ".join(tokens[idx:]))
+        parsed = parse_user_datetime(phrase, now=current)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=tzinfo)
+        return parsed.astimezone(tzinfo), rest
+
+    # 4) Today / tomorrow / day after tomorrow with time (+ optional title).
+    day_word_match = re.match(r"^(?P<day>сегодня|завтра|послезавтра)\b", raw, flags=re.IGNORECASE)
+    if day_word_match:
+        day_word = day_word_match.group("day").lower()
+        delta_days = 0 if day_word == "сегодня" else 1 if day_word == "завтра" else 2
+        rest = raw[day_word_match.end() :].strip()
+        parsed_time = _parse_time_prefix(rest)
+        if not parsed_time:
+            raise ValueError("Добавь время, например: завтра 19:00 врач.")
+        t, title_rest = parsed_time
+        dt = _combine_local_tz(current.date() + timedelta(days=delta_days), t, tzinfo)
+        return dt, _clean_title(title_rest)
+
+    # 5) Weekdays: "в пятницу 10:15 встреча", "в пт 10:15 встреча".
+    weekday_match = _WEEKDAY_PREFIX_RE.match(raw)
+    if weekday_match:
+        token = weekday_match.group("day").lower()
+        weekday = _WEEKDAY_ALIASES.get(token)
+        if weekday is None:
+            raise ValueError("Не понял день недели.")
+        rest = raw[weekday_match.end() :].strip()
+        parsed_time = _parse_time_prefix(rest)
+        if not parsed_time:
+            raise ValueError("Добавь время, например: в пятницу 10:15 встреча.")
+        t, title_rest = parsed_time
+        current_weekday = current.weekday()
+        delta = (weekday - current_weekday) % 7
+        target_date = current.date() + timedelta(days=delta)
+        candidate = _combine_local_tz(target_date, t, tzinfo)
+        if candidate <= current:
+            candidate = candidate + timedelta(days=7)
+        return candidate, _clean_title(title_rest)
+
+    # 6) Day-month without year at the start: "07.02 12:00 стоматолог" (year inferred).
+    dm_match = re.match(r"^(?P<day>\d{1,2})[.\-/](?P<month>\d{1,2})\b", raw)
+    if dm_match:
+        day = int(dm_match.group("day"))
+        month = int(dm_match.group("month"))
+        rest = raw[dm_match.end() :].strip()
+        parsed_time = _parse_time_prefix(rest)
+        if not parsed_time:
+            raise ValueError("Добавь время, например: 07.02 12:00 стоматолог.")
+        t, title_rest = parsed_time
+        candidate = _combine_local_tz(date(current.year, month, day), t, tzinfo)
+        if candidate < current:
+            candidate = _combine_local_tz(date(current.year + 1, month, day), t, tzinfo)
+        return candidate, _clean_title(title_rest)
+
+    raise ValueError(
+        "Не понял дату/время. Примеры: 2026-02-05 18:30; завтра 19:00 врач; через 2 часа тренировка; в пятницу 10:15 встреча."
+    )
+
+
 def parse_date(value: str) -> date:
     try:
         return datetime.strptime(value.strip(), "%Y-%m-%d").date()
