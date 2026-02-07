@@ -20,10 +20,8 @@ from app.core.memory_store import MemoryStore
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.actions_log_store import ActionsLogStore
-from app.infra.config import load_settings, resolve_env_label, validate_startup_env
+from app.infra.config import StartupFeatures, load_settings, resolve_env_label, validate_startup_env
 from app.infra.user_profile_store import UserProfileStore
-from app.infra.google_oauth import GoogleOAuthConfig
-from app.infra.google_oauth_server import start_google_oauth_server
 from app.infra.request_context import RequestContext, log_event
 from app.infra.version import resolve_app_version
 from app.infra.llm import OpenAIClient, PerplexityClient
@@ -40,7 +38,6 @@ from app.infra.storage import TaskStorage
 from app.infra.last_state_store import LastStateStore
 from app.infra.trace_store import TraceStore
 from app.infra.draft_store import DraftStore
-from app.stores.google_tokens import GoogleTokenStore
 from app.tools import NullSearchClient, PerplexityWebSearchClient
 from app.storage.wizard_store import WizardStore
 
@@ -80,7 +77,6 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("explain", handlers.explain))
     application.add_handler(CommandHandler("calc", handlers.calc))
     application.add_handler(CommandHandler("calendar", handlers.calendar))
-    application.add_handler(CommandHandler("google_calendar", handlers.caldav_settings))
     application.add_handler(CommandHandler("caldav", handlers.caldav_settings))
     application.add_handler(CommandHandler("reminders", handlers.reminders))
     application.add_handler(CommandHandler("reminder_off", handlers.reminder_off))
@@ -93,6 +89,13 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handlers.document_upload))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.chat))
     application.add_handler(MessageHandler(filters.COMMAND, handlers.unknown_command))
+
+
+def _build_startup_integrations(features: StartupFeatures) -> dict[str, bool]:
+    return {
+        "caldav": features.caldav_enabled,
+        "llm": features.llm_enabled,
+    }
 
 
 def main() -> None:
@@ -125,8 +128,6 @@ def main() -> None:
         env_label=env_label,
         logger=logging.getLogger(__name__),
     )
-    google_token_store = GoogleTokenStore(settings.google_tokens_path)
-    google_token_store.load()
     config = load_orchestrator_config(settings.orchestrator_config_path)
     timeouts = load_timeouts(config)
     retry_policy = load_retry_policy(config)
@@ -232,7 +233,6 @@ def main() -> None:
     application.bot_data["resilience_timeouts"] = timeouts
     application.bot_data["resilience_retry_policy"] = retry_policy
     application.bot_data["circuit_breakers"] = circuit_breakers
-    application.bot_data["google_token_store"] = google_token_store
     application.bot_data["openai_client"] = openai_client
     application.bot_data["llm_client"] = llm_client
     application.bot_data["start_time"] = time.monotonic()
@@ -276,33 +276,8 @@ def main() -> None:
         python_version=sys.version.split()[0],
         app_version=resolve_app_version(config.get("system_metadata", {})),
         timezone=calendar_store.BOT_TZ.key,
-        integrations={
-            "caldav": startup_features.caldav_enabled,
-            "google": startup_features.google_enabled,
-            "llm": startup_features.llm_enabled,
-        },
+        integrations=_build_startup_integrations(startup_features),
     )
-    if startup_features.google_enabled:
-        oauth_config = GoogleOAuthConfig(
-            client_id=settings.google_oauth_client_id,
-            client_secret=settings.google_oauth_client_secret,
-            public_base_url=settings.public_base_url,
-            redirect_path=settings.google_oauth_redirect_path,
-            timeout_seconds=timeouts.external_api_seconds,
-        )
-        try:
-            start_google_oauth_server(
-                host="127.0.0.1",
-                port=settings.google_oauth_server_port,
-                config=oauth_config,
-                token_store=google_token_store,
-                retry_policy=retry_policy,
-                circuit_breaker=circuit_breakers.get("google"),
-            )
-        except OSError:
-            logging.getLogger(__name__).exception(
-                "Failed to start Google OAuth server on port %s", settings.google_oauth_server_port
-            )
     if not application.job_queue:
         logging.getLogger(__name__).warning("JobQueue not configured; reminders will run without it.")
 
