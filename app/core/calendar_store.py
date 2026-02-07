@@ -817,6 +817,51 @@ def parse_local_datetime(value: str) -> datetime:
     raise ValueError("Формат: YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM")
 
 
+_WEEKDAY_MAP: dict[str, int] = {
+    "понедельник": 0, "пн": 0,
+    "вторник": 1, "вт": 1,
+    "среда": 2, "среду": 2, "ср": 2,
+    "четверг": 3, "чт": 3,
+    "пятница": 4, "пятницу": 4, "пт": 4,
+    "суббота": 5, "субботу": 5, "сб": 5,
+    "воскресенье": 6, "воскресение": 6, "вс": 6,
+}
+
+
+def _parse_time_with_period(time_str: str) -> time | None:
+    """Parse time string, supporting 'HH:MM', 'HH' and 'N вечера/утра' forms."""
+    time_str = time_str.strip()
+    # Try "N вечера" / "N утра" / "N дня"
+    m = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*(вечера|утра|дня|ночи)$", time_str, re.IGNORECASE)
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2)) if m.group(2) else 0
+        period = m.group(3).lower()
+        if period == "вечера" and 1 <= hour <= 11:
+            hour += 12
+        elif period == "дня" and 1 <= hour <= 4:
+            hour += 12
+        elif period == "ночи" and 1 <= hour <= 11:
+            pass  # keep as-is (1 ночи = 01:00)
+        elif period == "утра":
+            pass  # keep as-is
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return time(hour, minute)
+        return None
+    # Try HH:MM
+    try:
+        return datetime.strptime(time_str, "%H:%M").time()
+    except ValueError:
+        pass
+    # Try bare hour "19" or "7"
+    m2 = re.match(r"^(\d{1,2})$", time_str)
+    if m2:
+        hour = int(m2.group(1))
+        if 0 <= hour <= 23:
+            return time(hour, 0)
+    return None
+
+
 def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
     raw = value.strip()
     lowered = raw.lower()
@@ -834,19 +879,49 @@ def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
         if hours or minutes:
             return current + timedelta(hours=hours, minutes=minutes)
         raise ValueError("Формат: через 10 минут или через 2 часа")
+    if lowered.startswith(("послезавтра",)):
+        rest = raw[len("послезавтра"):].strip()
+        if not rest:
+            raise ValueError("Добавь время, например: послезавтра 18:30")
+        parsed_time = _parse_time_with_period(rest)
+        if parsed_time is None:
+            raise ValueError("Формат времени: HH:MM")
+        base = current.date() + timedelta(days=2)
+        return _combine_local(base, parsed_time)
     if lowered.startswith(("сегодня", "today", "завтра", "tomorrow")):
         parts = raw.split(maxsplit=1)
         if len(parts) < 2:
             raise ValueError("Добавь время, например: сегодня 18:30")
         time_part = parts[1].strip()
-        try:
-            parsed_time = datetime.strptime(time_part, "%H:%M").time()
-        except ValueError as exc:
-            raise ValueError("Формат времени: HH:MM") from exc
+        parsed_time = _parse_time_with_period(time_part)
+        if parsed_time is None:
+            raise ValueError("Формат времени: HH:MM")
         base = current.date()
         if lowered.startswith(("завтра", "tomorrow")):
             base = base + timedelta(days=1)
         return _combine_local(base, parsed_time)
+    # Check for weekday: "в пятницу 10:15" or "пятница 10:15"
+    weekday_match = re.match(
+        r"^(?:в\s+)?(" + "|".join(re.escape(k) for k in _WEEKDAY_MAP) + r")\s+(.+)$",
+        lowered,
+    )
+    if weekday_match:
+        day_name = weekday_match.group(1)
+        time_part = weekday_match.group(2).strip()
+        parsed_time = _parse_time_with_period(time_part)
+        if parsed_time is None:
+            raise ValueError("Формат времени: HH:MM")
+        target_weekday = _WEEKDAY_MAP[day_name]
+        current_weekday = current.weekday()
+        delta = (target_weekday - current_weekday) % 7
+        if delta == 0:
+            # Same weekday: if time already passed, go to next week
+            candidate_date = current.date()
+            candidate_dt = _combine_local(candidate_date, parsed_time)
+            if candidate_dt <= current:
+                delta = 7
+        target_date = current.date() + timedelta(days=delta)
+        return _combine_local(target_date, parsed_time)
     for fmt in ("%d.%m %H:%M", "%d-%m %H:%M", "%d/%m %H:%M"):
         try:
             parsed = datetime.strptime(raw, fmt)
@@ -857,6 +932,181 @@ def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
             candidate = candidate.replace(year=current.year + 1)
         return candidate
     return parse_local_datetime(raw)
+
+
+def parse_event_datetime(
+    text: str,
+    *,
+    now: datetime | None = None,
+    tz: ZoneInfo | None = None,
+) -> tuple[datetime, str]:
+    """Parse free-form text extracting datetime and remaining title.
+
+    Returns (aware_datetime, rest_text).
+    Raises ValueError if no valid datetime could be extracted.
+
+    Strategies (in order):
+    1. Try strict parse_local_datetime on the full text (date-only, no title).
+    2. Try strict parse_local_datetime on first 2 tokens (YYYY-MM-DD HH:MM format).
+    3. Try "через N минут/часов ..." - relative delta, rest is title.
+    4. Try "послезавтра HH:MM ...", "сегодня HH:MM ...", "завтра HH:MM ..." etc.
+    5. Try weekday patterns: "в пятницу 10:15 ..." or "пятница 10:15 ...".
+    6. Try DD.MM HH:MM prefix patterns.
+    """
+    raw = text.strip()
+    if not raw:
+        raise ValueError("Пустой ввод")
+    timezone_val = tz or VIENNA_TZ
+    current = (now or datetime.now(tz=timezone_val)).astimezone(timezone_val)
+    lowered = raw.lower()
+
+    # Strategy 1: full text is a strict datetime
+    try:
+        dt = parse_local_datetime(raw)
+        return dt, ""
+    except ValueError:
+        pass
+
+    # Strategy 2: first 2 tokens are strict datetime, rest is title
+    tokens = raw.split(maxsplit=2)
+    if len(tokens) >= 2:
+        candidate_dt_str = f"{tokens[0]} {tokens[1]}"
+        try:
+            dt = parse_local_datetime(candidate_dt_str)
+            rest = tokens[2].strip() if len(tokens) > 2 else ""
+            return dt, rest
+        except ValueError:
+            pass
+
+    # Strategy 3: "через N минут/часов <title>"
+    if lowered.startswith("через"):
+        fragment = lowered.removeprefix("через").strip()
+        hours = 0
+        minutes = 0
+        hours_match = re.search(r"(\d+)\s*(час|часа|часов|ч)\b", fragment)
+        minutes_match = re.search(r"(\d+)\s*(минут|минуты|мин|м)\b", fragment)
+        if hours_match:
+            hours = int(hours_match.group(1))
+        if minutes_match:
+            minutes = int(minutes_match.group(1))
+        if hours or minutes:
+            dt = current + timedelta(hours=hours, minutes=minutes)
+            # Extract title: everything after the time expression
+            rest = fragment
+            if hours_match:
+                rest = rest[:hours_match.start()] + rest[hours_match.end():]
+            if minutes_match:
+                # Re-search in the (possibly modified) rest
+                minutes_match2 = re.search(r"(\d+)\s*(минут|минуты|мин|м)\b", rest)
+                if minutes_match2:
+                    rest = rest[:minutes_match2.start()] + rest[minutes_match2.end():]
+            rest = re.sub(r"\s+", " ", rest).strip()
+            return dt, rest
+        raise ValueError("Формат: через 10 минут или через 2 часа")
+
+    # Strategy 4: "послезавтра", "сегодня", "завтра" + time + optional title
+    for prefix, day_offset in [("послезавтра", 2), ("завтра", 1), ("tomorrow", 1), ("сегодня", 0), ("today", 0)]:
+        if lowered.startswith(prefix):
+            after_prefix = raw[len(prefix):].strip()
+            if not after_prefix:
+                raise ValueError(f"Добавь время, например: {prefix} 18:30")
+            # Try to extract time from the beginning of after_prefix
+            dt_and_rest = _extract_time_and_rest(after_prefix, current.date() + timedelta(days=day_offset))
+            if dt_and_rest is not None:
+                return dt_and_rest
+            raise ValueError("Формат времени: HH:MM")
+
+    # Strategy 5: weekday patterns
+    weekday_match = re.match(
+        r"^(?:в\s+)?(" + "|".join(re.escape(k) for k in _WEEKDAY_MAP) + r")\s+(.+)$",
+        lowered,
+    )
+    if weekday_match:
+        day_name = weekday_match.group(1)
+        after_weekday = weekday_match.group(2).strip()
+        target_weekday = _WEEKDAY_MAP[day_name]
+        current_weekday = current.weekday()
+        delta = (target_weekday - current_weekday) % 7
+        if delta == 0:
+            delta = 7  # always next occurrence for event creation
+        target_date = current.date() + timedelta(days=delta)
+        # Use original case for rest extraction
+        # Find where the weekday part ends in original text
+        orig_weekday_match = re.match(
+            r"^(?:в\s+)?(?:" + "|".join(re.escape(k) for k in _WEEKDAY_MAP) + r")\s+",
+            raw.lower(),
+        )
+        if orig_weekday_match:
+            after_weekday_orig = raw[orig_weekday_match.end():]
+        else:
+            after_weekday_orig = after_weekday
+        dt_and_rest = _extract_time_and_rest(after_weekday_orig, target_date)
+        if dt_and_rest is not None:
+            return dt_and_rest
+        raise ValueError("Формат времени: HH:MM")
+
+    # Strategy 6: DD.MM HH:MM prefix
+    dm_match = re.match(r"^(\d{1,2}[./\-]\d{1,2})\s+(\S+)(.*)?$", raw)
+    if dm_match:
+        date_part = dm_match.group(1)
+        time_part = dm_match.group(2)
+        rest_part = (dm_match.group(3) or "").strip()
+        for fmt in ("%d.%m %H:%M", "%d-%m %H:%M", "%d/%m %H:%M"):
+            try:
+                parsed = datetime.strptime(f"{date_part} {time_part}", fmt)
+            except ValueError:
+                continue
+            candidate = parsed.replace(year=current.year, tzinfo=timezone_val)
+            if candidate < current:
+                candidate = candidate.replace(year=current.year + 1)
+            return candidate, rest_part
+
+    # Nothing matched
+    raise ValueError(
+        "Не удалось распознать дату/время.\n"
+        "Примеры: завтра 19:00, через 2 часа, 07.02 12:00, в пятницу 10:15\n"
+        "Или: YYYY-MM-DD HH:MM, DD.MM.YYYY HH:MM"
+    )
+
+
+def _extract_time_and_rest(text: str, target_date: date) -> tuple[datetime, str] | None:
+    """Try to extract time from the beginning of text, return (datetime, rest_title).
+
+    Supports: "HH:MM ...", "N вечера ...", "N:MM вечера ...".
+    """
+    # Try "HH:MM rest"
+    m = re.match(r"^(\d{1,2}:\d{2})\s*(.*)?$", text)
+    if m:
+        parsed_time = _parse_time_with_period(m.group(1))
+        if parsed_time is not None:
+            rest = (m.group(2) or "").strip()
+            return _combine_local(target_date, parsed_time), rest
+
+    # Try "N вечера rest" or "N:MM вечера rest"
+    m = re.match(
+        r"^(\d{1,2}(?::\d{2})?)\s+(вечера|утра|дня|ночи)\s*(.*)?$",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        parsed_time = _parse_time_with_period(f"{m.group(1)} {m.group(2)}")
+        if parsed_time is not None:
+            rest = (m.group(3) or "").strip()
+            return _combine_local(target_date, parsed_time), rest
+
+    # Try bare hour "19 rest"
+    m = re.match(r"^(\d{1,2})\s+(.+)$", text)
+    if m:
+        hour_str = m.group(1)
+        rest = m.group(2).strip()
+        parsed_time = _parse_time_with_period(hour_str)
+        if parsed_time is not None:
+            # Only accept if it looks like a valid hour (not just any number)
+            hour = int(hour_str)
+            if 0 <= hour <= 23:
+                return _combine_local(target_date, parsed_time), rest
+
+    return None
 
 
 def parse_date(value: str) -> date:

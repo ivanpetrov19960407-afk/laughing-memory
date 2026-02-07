@@ -221,14 +221,24 @@ class WizardManager:
     ) -> OrchestratorResult:
         if state.step == STEP_AWAIT_DATETIME:
             try:
-                dt = calendar_store.parse_local_datetime(text)
+                dt, rest_title = calendar_store.parse_event_datetime(text)
             except ValueError as exc:
                 return refused(
-                    f"{exc}. Пример: 2026-02-05 18:30 или 05.02.2026 18:30",
+                    f"{exc}",
                     intent="wizard.calendar.datetime",
                     mode="local",
                     actions=_step_actions(),
                 )
+            rest_title = rest_title.strip()
+            if rest_title:
+                # Got both datetime and title in one line — skip to confirm
+                updated = _touch_state(
+                    state,
+                    step=STEP_CONFIRM,
+                    data={"dt": dt.isoformat(), "title": rest_title},
+                )
+                self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+                return _render_prompt(updated)
             updated = _touch_state(state, step=STEP_AWAIT_TITLE, data={"dt": dt.isoformat()})
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return ok(
@@ -569,8 +579,15 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
         )
     if state.step == STEP_AWAIT_DATETIME:
         return ok(
-            "Введи дату и время события в формате YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
-            "Пример: 2026-02-05 18:30 или 05.02.2026 18:30",
+            "Введи дату, время и (необязательно) название события одной строкой.\n\n"
+            "Примеры:\n"
+            "• завтра 19:00 врач\n"
+            "• сегодня 18:30 созвон\n"
+            "• через 2 часа тренировка\n"
+            "• 07.02 12:00 стоматолог\n"
+            "• в пятницу 10:15 встреча\n"
+            "• 2026-02-05 18:30\n\n"
+            "Также работают форматы: YYYY-MM-DD HH:MM, DD.MM.YYYY HH:MM",
             intent="wizard.calendar.datetime",
             mode="local",
             actions=_step_actions(),

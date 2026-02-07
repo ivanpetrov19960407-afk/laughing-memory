@@ -2687,7 +2687,8 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if command == "add":
         if len(args) < 4:
             result = refused(
-                "Использование: /calendar add YYYY-MM-DD HH:MM <title> (или DD.MM.YYYY HH:MM).",
+                "Использование: /calendar add YYYY-MM-DD HH:MM <title> (или DD.MM.YYYY HH:MM).\n\n"
+                "💡 Для свободного ввода (\"завтра 19:00 врач\") используй /menu → Календарь → Добавить.",
                 intent="utility_calendar.add",
                 mode="local",
             )
@@ -2719,7 +2720,8 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except ValueError:
             result = refused(
                 "Неверный формат даты. Пример: /calendar add 2026-02-05 18:30 Врач "
-                "(или /calendar add 05.02.2026 18:30 Врач).",
+                "(или /calendar add 05.02.2026 18:30 Врач).\n\n"
+                "💡 Для свободного ввода (\"завтра 19:00 врач\") используй /menu → Календарь → Добавить.",
                 intent="utility_calendar.add",
                 mode="local",
             )
