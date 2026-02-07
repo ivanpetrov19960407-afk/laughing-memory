@@ -22,6 +22,7 @@ from app.infra.llm import OpenAIClient, PerplexityClient
 from app.infra.rate_limit import RateLimiter as LLMRateLimiter
 from app.infra.rate_limiter import RateLimiter
 from app.infra.storage import TaskStorage
+from app.infra.trace_store import TraceStore
 from app.stores.google_tokens import GoogleTokenStore
 from app.tools import NullSearchClient, PerplexityWebSearchClient
 from app.storage.wizard_store import WizardStore
@@ -37,6 +38,7 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("ask", handlers.ask))
     application.add_handler(CommandHandler("summary", handlers.summary))
     application.add_handler(CommandHandler("search", handlers.search))
+    application.add_handler(CommandHandler("trace", handlers.trace_command))
     application.add_handler(CommandHandler("facts_on", handlers.facts_on))
     application.add_handler(CommandHandler("facts_off", handlers.facts_off))
     application.add_handler(CommandHandler("context_on", handlers.context_on))
@@ -183,6 +185,7 @@ def main() -> None:
         ttl_seconds=settings.action_ttl_seconds,
         max_items=settings.action_max_size,
     )
+    application.bot_data["trace_store"] = TraceStore(max_items=20, ttl_seconds=86400)
     wizard_store = WizardStore(
         settings.wizard_store_path,
         timeout_seconds=settings.wizard_timeout_seconds,

@@ -257,6 +257,14 @@ def log_error(
     }
     if env == "dev":
         payload["stack"] = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    if request_context is not None:
+        request_context.meta.setdefault(
+            "error",
+            {
+                "where": where,
+                "exc_type": type(exc).__name__,
+            },
+        )
     if extra:
         payload.update(extra)
     log_event(
