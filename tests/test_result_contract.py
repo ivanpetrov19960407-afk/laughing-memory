@@ -15,6 +15,7 @@ from app.core.result import (
     STRICT_REFUSAL_TEXT,
     ensure_safe_text_strict,
     ensure_valid,
+    normalize_to_orchestrator_result,
     ok,
     ratelimited,
 )
@@ -206,6 +207,41 @@ def test_ensure_valid_dict_result_defaults() -> None:
     assert result.actions == []
     assert result.attachments == []
     assert result.debug == {}
+
+
+def test_normalize_string_result_defaults() -> None:
+    result = normalize_to_orchestrator_result("hello")
+    assert result.status == "ok"
+    assert result.text == "hello"
+    assert result.intent == "unknown"
+    assert result.actions == []
+    assert result.attachments == []
+
+
+def test_ensure_valid_moves_extra_fields_to_debug() -> None:
+    result = ensure_valid({"status": "ok", "text": "x", "intent": "test", "mode": "local", "foo": "bar"})
+    assert result.debug.get("extra_fields", {}).get("foo") == "bar"
+    assert "actions" not in result.debug
+
+
+def test_ensure_valid_separates_action_debug() -> None:
+    result = ensure_valid(
+        {
+            "status": "ok",
+            "text": "x",
+            "intent": "test",
+            "mode": "local",
+            "actions": [{"id": "x", "label": "Open", "payload": {"debug": {"trace": 1}, "foo": "bar"}}],
+        }
+    )
+    assert result.actions[0].payload == {"foo": "bar"}
+    assert result.debug.get("action_debug")[0]["debug"] == {"trace": 1}
+
+
+def test_ensure_valid_invalid_actions_type_moves_to_debug() -> None:
+    result = ensure_valid({"status": "ok", "text": "x", "intent": "test", "actions": "oops"})
+    assert result.actions == []
+    assert result.debug.get("invalid_actions") == ["oops"]
 
 
 def test_strict_guard_allows_text_when_sources_present() -> None:

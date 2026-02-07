@@ -56,7 +56,7 @@ class OrchestratorResult:
     text: str
     status: ResultStatus
     mode: ResultMode
-    intent: str
+    intent: str | None
     request_id: str = ""
     sources: list[Source] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)
@@ -94,8 +94,8 @@ class OrchestratorResult:
             errors.append("status must be ok/refused/error/ratelimited")
         if self.mode not in {"local", "llm", "tool"}:
             errors.append("mode must be local/llm/tool")
-        if not isinstance(self.intent, str) or not self.intent.strip():
-            errors.append("intent must be non-empty str")
+        if self.intent is not None and (not isinstance(self.intent, str) or not self.intent.strip()):
+            errors.append("intent must be non-empty str or None")
         if not isinstance(self.request_id, str):
             errors.append("request_id must be str")
         if not isinstance(self.sources, list) or any(not _is_valid_source(item) for item in self.sources):
@@ -208,8 +208,17 @@ def ratelimited(
     )
 
 
+def normalize_to_orchestrator_result(
+    result: OrchestratorResult | dict[str, Any] | str | None,
+    *,
+    logger: logging.Logger | None = None,
+    fallback_intent: str | None = None,
+) -> OrchestratorResult:
+    return ensure_valid(result, logger=logger, fallback_intent=fallback_intent)
+
+
 def ensure_valid(
-    result: OrchestratorResult | dict[str, Any] | None,
+    result: OrchestratorResult | dict[str, Any] | str | None,
     *,
     logger: logging.Logger | None = None,
     fallback_intent: str | None = None,
@@ -234,6 +243,8 @@ def ensure_valid(
             "attachments": result.attachments,
             "debug": result.debug,
         }
+    elif isinstance(result, str):
+        payload = {"text": result}
     elif isinstance(result, dict):
         payload = result
     else:
@@ -243,29 +254,35 @@ def ensure_valid(
     status = payload.get("status")
     if status == "ratelimited":
         status = "refused"
-    if status not in {"ok", "refused", "error"}:
-        status = "error"
-
     text = payload.get("text")
+    if status not in {"ok", "refused", "error"}:
+        status = "ok" if isinstance(text, str) and text.strip() else "error"
+
     if text is None:
         text = ""
     elif not isinstance(text, str):
         text = str(text)
 
     intent_value = payload.get("intent")
-    if not isinstance(intent_value, str) or not intent_value:
+    if intent_value is None:
+        intent_value = fallback_intent or "unknown"
+    elif not isinstance(intent_value, str) or not intent_value.strip():
         intent_value = fallback_intent or "unknown"
 
     mode_value = payload.get("mode")
-    if not isinstance(mode_value, str):
+    if mode_value not in {"local", "llm", "tool"}:
         mode_value = "local"
 
     request_id_value = payload.get("request_id")
     if not isinstance(request_id_value, str):
         request_id_value = ""
 
+    known_keys = {"text", "status", "mode", "intent", "request_id", "sources", "actions", "attachments", "debug"}
+    extra_fields = {key: value for key, value in payload.items() if key not in known_keys}
+
     raw_sources = payload.get("sources")
     sources: list[Source] = []
+    invalid_sources: list[Any] = []
     if isinstance(raw_sources, list):
         for item in raw_sources:
             if isinstance(item, Source):
@@ -277,23 +294,44 @@ def ensure_valid(
                 snippet = item.get("snippet")
                 if isinstance(title, str) and isinstance(url, str) and isinstance(snippet, str):
                     sources.append(Source(title=title, url=url, snippet=snippet))
+                else:
+                    invalid_sources.append(item)
+            else:
+                invalid_sources.append(item)
+    elif raw_sources is not None:
+        invalid_sources.append(raw_sources)
 
     raw_actions = payload.get("actions")
     actions: list[Action] = []
+    invalid_actions: list[Any] = []
+    action_debug: list[dict[str, Any]] = []
     if isinstance(raw_actions, list):
         for item in raw_actions:
             if isinstance(item, Action):
-                actions.append(item)
+                payload_copy = dict(item.payload)
+                if "debug" in payload_copy:
+                    action_debug.append({"id": item.id, "debug": payload_copy.pop("debug")})
+                actions.append(Action(id=item.id, label=item.label, payload=payload_copy))
                 continue
             if isinstance(item, dict):
                 action_id = item.get("id")
                 label = item.get("label")
                 action_payload = item.get("payload")
                 if isinstance(action_id, str) and isinstance(label, str) and isinstance(action_payload, dict):
-                    actions.append(Action(id=action_id, label=label, payload=action_payload))
+                    payload_copy = dict(action_payload)
+                    if "debug" in payload_copy:
+                        action_debug.append({"id": action_id, "debug": payload_copy.pop("debug")})
+                    actions.append(Action(id=action_id, label=label, payload=payload_copy))
+                else:
+                    invalid_actions.append(item)
+            else:
+                invalid_actions.append(item)
+    elif raw_actions is not None:
+        invalid_actions.append(raw_actions)
 
     raw_attachments = payload.get("attachments")
     attachments: list[Attachment] = []
+    invalid_attachments: list[Any] = []
     if isinstance(raw_attachments, list):
         for item in raw_attachments:
             if isinstance(item, Attachment):
@@ -315,10 +353,34 @@ def ensure_valid(
                             url=url,
                         )
                     )
+                else:
+                    invalid_attachments.append(item)
+            else:
+                invalid_attachments.append(item)
+    elif raw_attachments is not None:
+        invalid_attachments.append(raw_attachments)
 
     debug = payload.get("debug")
     if not isinstance(debug, dict):
+        if debug is not None:
+            extra_fields["debug"] = debug
         debug = {}
+    else:
+        debug = dict(debug)
+
+    if "actions" in debug:
+        extra_fields["actions_from_debug"] = debug.pop("actions")
+
+    if extra_fields:
+        debug.setdefault("extra_fields", {}).update(extra_fields)
+    if invalid_sources:
+        debug.setdefault("invalid_sources", []).extend(invalid_sources)
+    if invalid_actions:
+        debug.setdefault("invalid_actions", []).extend(invalid_actions)
+    if invalid_attachments:
+        debug.setdefault("invalid_attachments", []).extend(invalid_attachments)
+    if action_debug:
+        debug.setdefault("action_debug", []).extend(action_debug)
 
     if not sources:
         text = _strip_pseudo_sources(text)

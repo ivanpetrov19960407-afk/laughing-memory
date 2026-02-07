@@ -27,6 +27,7 @@ from app.core.result import (
     ensure_safe_text_strict,
     ensure_valid,
     error,
+    normalize_to_orchestrator_result,
     ok,
     ratelimited,
     refused,
@@ -715,7 +716,7 @@ async def send_result(
     *,
     reply_markup=None,
 ) -> None:
-    public_result = ensure_valid(result)
+    public_result = normalize_to_orchestrator_result(result)
     user_id = update.effective_user.id if update.effective_user else 0
     facts_enabled = False
     orchestrator = context.application.bot_data.get("orchestrator")
