@@ -30,8 +30,10 @@ from app.core.calendar_nlp_ru import (
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMemory, DialogMessage
 from app.core.last_state_resolver import ResolutionResult, resolve_short_message
-from app.core.memory_store import MemoryStore, build_llm_context
+from app.core.memory_layers import ActionsLogLayer, UserProfileLayer, build_memory_layers_context
+from app.core.memory_store import MemoryStore
 from app.core.orchestrator import Orchestrator
+from app.core.user_profile import UserProfile
 from app.core.result import (
     Action,
     OrchestratorResult,
@@ -47,6 +49,7 @@ from app.core.tools_calendar import create_event, delete_event, list_calendar_it
 from app.core.recurrence_scope import RecurrenceScope, normalize_scope, parse_recurrence_scope
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
+from app.infra.actions_log_store import ActionsLogStore
 from app.infra.last_state_store import LastStateStore
 from app.infra.draft_store import DraftStore
 from app.infra.messaging import safe_edit_text, safe_send_text
@@ -68,6 +71,7 @@ from app.infra.request_context import (
 from app.infra.version import resolve_app_version
 from app.infra.trace_store import TraceEntry, TraceStore
 from app.infra.storage import TaskStorage
+from app.infra.user_profile_store import UserProfileStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -105,6 +109,20 @@ def _get_dialog_memory(context: ContextTypes.DEFAULT_TYPE) -> DialogMemory | Non
 def _get_memory_store(context: ContextTypes.DEFAULT_TYPE) -> MemoryStore | None:
     store = context.application.bot_data.get("memory_store")
     if isinstance(store, MemoryStore):
+        return store
+    return None
+
+
+def _get_profile_store(context: ContextTypes.DEFAULT_TYPE) -> UserProfileStore | None:
+    store = context.application.bot_data.get("profile_store")
+    if isinstance(store, UserProfileStore):
+        return store
+    return None
+
+
+def _get_actions_log_store(context: ContextTypes.DEFAULT_TYPE) -> ActionsLogStore | None:
+    store = context.application.bot_data.get("actions_log_store")
+    if isinstance(store, ActionsLogStore):
         return store
     return None
 
@@ -172,10 +190,20 @@ def _get_draft_store(context: ContextTypes.DEFAULT_TYPE) -> DraftStore | None:
 
 def _build_memory_context(context: ContextTypes.DEFAULT_TYPE) -> str | None:
     request_context = get_request_context(context)
-    memory_store = _get_memory_store(context)
-    if request_context is None or memory_store is None:
+    if request_context is None:
         return None
-    return build_llm_context(request_context, memory_store, limit=10)
+    memory_store = _get_memory_store(context)
+    profile_store = _get_profile_store(context)
+    actions_store = _get_actions_log_store(context)
+    profile_layer = UserProfileLayer(profile_store) if profile_store is not None else None
+    actions_layer = ActionsLogLayer(actions_store) if actions_store is not None else None
+    return build_memory_layers_context(
+        request_context,
+        memory_store=memory_store,
+        profile_layer=profile_layer,
+        actions_layer=actions_layer,
+        max_chars=2000,
+    )
 
 
 def _wizards_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -603,6 +631,44 @@ def _format_history(history: list[tuple[datetime, str, str]]) -> str:
     return "Ок. Последние сообщения:\n" + "\n".join(lines)
 
 
+def _format_profile(profile: UserProfile) -> str:
+    reminders = profile.default_reminders
+    lines = [
+        "Профиль пользователя:",
+        f"- язык: {profile.language}",
+        f"- таймзона: {profile.timezone}",
+        f"- подробность: {profile.verbosity}",
+        f"- режим фактов по умолчанию: {'on' if profile.facts_mode_default else 'off'}",
+        f"- напоминания по умолчанию: {'on' if reminders.enabled else 'off'}",
+        f"- смещение напоминаний: {reminders.offset_minutes} минут",
+    ]
+    if profile.style:
+        lines.append(f"- стиль: {profile.style}")
+    if profile.notes:
+        lines.append("Заметки:")
+        for note in profile.notes[:5]:
+            lines.append(f"- {note.text} (id: {note.id})")
+    return "\n".join(lines)
+
+
+def _format_actions_history(entries: list[object]) -> str:
+    if not entries:
+        return "Ок. История действий пуста."
+    lines = ["Последние действия:"]
+    for entry in entries:
+        ts_value = getattr(entry, "ts", None)
+        ts_label = ts_value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M") if ts_value else "-"
+        action_type = getattr(entry, "action_type", "-")
+        payload = getattr(entry, "payload", {}) if isinstance(entry, object) else {}
+        summary = payload.get("summary") if isinstance(payload, dict) else None
+        if isinstance(summary, str) and summary.strip():
+            text = summary.strip()
+        else:
+            text = action_type
+        lines.append(f"- {ts_label} | {action_type} | {text}")
+    return "\n".join(lines)
+
+
 async def _reply_with_history(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -695,6 +761,57 @@ def _update_last_state(
         reminder_id=refs.get("reminder_id"),
         calendar_id=refs.get("calendar_id"),
         query=refs.get("query"),
+    )
+
+
+def _log_action_from_result(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    result: OrchestratorResult,
+    user_id: int,
+    request_context: RequestContext | None,
+) -> None:
+    if result.status != "ok" or not user_id:
+        return
+    actions_store = _get_actions_log_store(context)
+    if actions_store is None:
+        return
+    intent = result.intent or ""
+    mapping = {
+        "utility_calendar.add": "calendar.create",
+        "utility_calendar.delete": "calendar.delete",
+        "utility_calendar.update": "calendar.update",
+        "utility_calendar.move": "calendar.update",
+        "utility_reminders.create": "reminder.create",
+        "utility_reminders.add": "reminder.create",
+        "utility_reminders.delete": "reminder.delete",
+        "utility_reminders.disable": "reminder.disable",
+        "utility_reminders.off": "reminder.disable",
+        "utility_reminders.on": "reminder.enable",
+        "utility_reminders.reschedule": "reminder.reschedule",
+        "command.facts_on": "mode.facts_on",
+        "command.facts_off": "mode.facts_off",
+        "command.context_on": "mode.context_on",
+        "command.context_off": "mode.context_off",
+    }
+    action_type = mapping.get(intent)
+    if not action_type:
+        return
+    summary = (result.text or "").replace("\n", " ").strip()
+    if len(summary) > 160:
+        summary = summary[:160].rstrip() + "…"
+    payload = {
+        "intent": intent,
+        "summary": summary or action_type,
+        "refs": _extract_result_refs(result),
+    }
+    correlation_id = request_context.correlation_id if request_context else result.request_id
+    actions_store.append(
+        user_id=user_id,
+        action_type=action_type,
+        payload=payload,
+        ts=request_context.ts if request_context else None,
+        correlation_id=correlation_id,
     )
 
 
@@ -1268,6 +1385,12 @@ async def send_result(
         result=public_result,
         user_id=user_id,
         chat_id=chat_id,
+        request_context=request_context,
+    )
+    _log_action_from_result(
+        context,
+        result=public_result,
+        user_id=user_id,
         request_context=request_context,
     )
     guarded_text = public_result.text
@@ -1955,6 +2078,190 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 @_with_error_handling
+async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    profile_store = _get_profile_store(context)
+    if profile_store is None:
+        result = _build_simple_result(
+            "Профиль не настроен.",
+            intent="command.profile",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    profile = profile_store.get(user_id)
+    result = _build_simple_result(
+        _format_profile(profile),
+        intent="command.profile",
+        status="ok",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def profile_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context, bucket="ui"):
+        return
+    if not _wizards_enabled(context):
+        result = refused("Сценарии отключены.", intent="command.profile_set", mode="local")
+        await send_result(update, context, result)
+        return
+    manager = _get_wizard_manager(context)
+    if manager is None:
+        result = error("Сценарии не настроены.", intent="command.profile_set", mode="local")
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    result = manager.start_profile_set(user_id=user_id, chat_id=chat_id)
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    profile_store = _get_profile_store(context)
+    if profile_store is None:
+        result = _build_simple_result(
+            "Профиль не настроен.",
+            intent="command.remember",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    note_text = " ".join(context.args).strip() if context.args else ""
+    if not note_text:
+        result = _build_simple_result(
+            "Использование: /remember <текст>.",
+            intent="command.remember",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    profile = profile_store.add_note(user_id, note_text)
+    note_id = profile.notes[0].id if profile.notes else ""
+    result = _build_simple_result(
+        f"Запомнил. id: {note_id}",
+        intent="command.remember",
+        status="ok",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    profile_store = _get_profile_store(context)
+    if profile_store is None:
+        result = _build_simple_result(
+            "Профиль не настроен.",
+            intent="command.forget",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    key = " ".join(context.args).strip() if context.args else ""
+    if not key:
+        result = _build_simple_result(
+            "Использование: /forget <id|ключ>.",
+            intent="command.forget",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    _, removed = profile_store.remove_note(user_id, key)
+    if not removed:
+        result = _build_simple_result(
+            "Не нашёл заметку для удаления.",
+            intent="command.forget",
+            status="ok",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    result = _build_simple_result(
+        "Удалил.",
+        intent="command.forget",
+        status="ok",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    actions_store = _get_actions_log_store(context)
+    if actions_store is None:
+        result = _build_simple_result(
+            "История действий не настроена.",
+            intent="command.history",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    entries = actions_store.search(user_id=user_id, query=None, limit=10)
+    result = _build_simple_result(
+        _format_actions_history(entries),
+        intent="command.history",
+        status="ok",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def history_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    actions_store = _get_actions_log_store(context)
+    if actions_store is None:
+        result = _build_simple_result(
+            "История действий не настроена.",
+            intent="command.history_search",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    query = " ".join(context.args).strip() if context.args else ""
+    if not query:
+        result = _build_simple_result(
+            "Использование: /history_find <запрос|type:...>.",
+            intent="command.history_search",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    entries = actions_store.search(user_id=user_id, query=query, limit=10)
+    result = _build_simple_result(
+        _format_actions_history(entries),
+        intent="command.history_search",
+        status="ok",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
 async def allow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_admin(update, context):
         return
@@ -2269,6 +2576,21 @@ async def _handle_menu_section(
                         "command": "/context_off" if context_enabled else "/context_on",
                         "args": "",
                     },
+                ),
+                Action(
+                    id="settings.profile",
+                    label="👤 Профиль",
+                    payload={"op": "run_command", "command": "/profile", "args": ""},
+                ),
+                Action(
+                    id="settings.profile_set",
+                    label="🛠 Профиль: настроить",
+                    payload={"op": "run_command", "command": "/profile_set", "args": ""},
+                ),
+                Action(
+                    id="settings.history",
+                    label="📜 История",
+                    payload={"op": "run_command", "command": "/history", "args": ""},
                 ),
                 _menu_action(),
             ],

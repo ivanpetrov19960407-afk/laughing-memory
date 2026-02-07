@@ -3,28 +3,45 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from app.core import calendar_store
 from app.core.result import Action, OrchestratorResult, error, ok, refused
 from app.core.tools_calendar import create_event
+from app.core.user_profile import UserProfile
 from app.storage.wizard_store import WizardState, WizardStore
+from app.infra.user_profile_store import UserProfileStore
 
 LOGGER = logging.getLogger(__name__)
 
 WIZARD_CALENDAR_ADD = "calendar.add_event"
 WIZARD_REMINDER_CREATE = "reminder.create"
 WIZARD_REMINDER_RESCHEDULE = "reminder.reschedule"
+WIZARD_PROFILE_SET = "profile.set"
 STEP_AWAIT_DATETIME = "await_datetime"
 STEP_AWAIT_TITLE = "await_title"
 STEP_AWAIT_RECURRENCE = "await_recurrence"
 STEP_CONFIRM = "confirm"
+STEP_PROFILE_LANGUAGE = "profile_language"
+STEP_PROFILE_TIMEZONE = "profile_timezone"
+STEP_PROFILE_VERBOSITY = "profile_verbosity"
+STEP_PROFILE_REMINDERS_ENABLED = "profile_reminders_enabled"
+STEP_PROFILE_REMINDERS_OFFSET = "profile_reminders_offset"
 
 
 class WizardManager:
-    def __init__(self, store: WizardStore, *, reminder_scheduler=None, settings=None) -> None:
+    def __init__(
+        self,
+        store: WizardStore,
+        *,
+        reminder_scheduler=None,
+        settings=None,
+        profile_store: UserProfileStore | None = None,
+    ) -> None:
         self._store = store
         self._reminder_scheduler = reminder_scheduler
         self._settings = settings
+        self._profile_store = profile_store
 
     def get_state(self, *, user_id: int, chat_id: int) -> tuple[WizardState | None, bool]:
         return self._store.load_state(user_id=user_id, chat_id=chat_id)
@@ -47,6 +64,8 @@ class WizardManager:
             return await self._handle_reminder_create_text(state, user_id=user_id, chat_id=chat_id, text=text)
         if state.wizard_id == WIZARD_REMINDER_RESCHEDULE:
             return await self._handle_reminder_reschedule_text(state, user_id=user_id, chat_id=chat_id, text=text)
+        if state.wizard_id == WIZARD_PROFILE_SET:
+            return await self._handle_profile_set_text(state, user_id=user_id, chat_id=chat_id, text=text)
         return refused(
             "Неизвестный сценарий. Открой /menu.",
             intent="wizard.unknown",
@@ -74,6 +93,8 @@ class WizardManager:
                 if not isinstance(reminder_id, str) or not reminder_id:
                     return refused("Некорректный reminder_id.", intent="wizard.start", mode="local")
                 return await self.start_reminder_reschedule(user_id=user_id, chat_id=chat_id, reminder_id=reminder_id)
+            if wizard_id == WIZARD_PROFILE_SET:
+                return self.start_profile_set(user_id=user_id, chat_id=chat_id)
             return self._start_wizard(
                 wizard_id,
                 user_id=user_id,
@@ -205,6 +226,28 @@ class WizardManager:
                 "reminder_id": reminder_id,
                 "old_trigger_at": reminder.trigger_at.isoformat(),
             },
+            started_at=now,
+            updated_at=now,
+        )
+        self._store.save_state(user_id=user_id, chat_id=chat_id, state=state)
+        return _render_prompt(state)
+
+    def start_profile_set(self, *, user_id: int, chat_id: int) -> OrchestratorResult:
+        state, expired = self._store.load_state(user_id=user_id, chat_id=chat_id)
+        if expired:
+            return _expired_result()
+        if state is not None:
+            return ok(
+                "У тебя уже есть активный сценарий. Продолжить или начать заново?",
+                intent="wizard.resume_prompt",
+                mode="local",
+                actions=_resume_actions(state.wizard_id, resume_target=WIZARD_PROFILE_SET),
+            )
+        now = datetime.now(timezone.utc)
+        state = WizardState(
+            wizard_id=WIZARD_PROFILE_SET,
+            step=STEP_PROFILE_LANGUAGE,
+            data={},
             started_at=now,
             updated_at=now,
         )
@@ -539,6 +582,141 @@ class WizardManager:
             actions=_menu_actions(),
         )
 
+    async def _handle_profile_set_text(
+        self,
+        state: WizardState,
+        *,
+        user_id: int,
+        chat_id: int,
+        text: str,
+    ) -> OrchestratorResult:
+        if self._profile_store is None:
+            return error("Профиль не настроен.", intent="wizard.profile.missing", mode="local")
+        if state.step == STEP_PROFILE_LANGUAGE:
+            language = _parse_language(text)
+            if language is None:
+                return refused(
+                    "Выбери язык: ru или en.",
+                    intent="wizard.profile.language",
+                    mode="local",
+                    actions=_step_actions(),
+                )
+            updated = _touch_state(state, step=STEP_PROFILE_TIMEZONE, data={"language": language})
+            self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+            return ok(
+                "Укажи таймзону (IANA), например Europe/Vilnius.",
+                intent="wizard.profile.timezone",
+                mode="local",
+                actions=_step_actions(),
+            )
+        if state.step == STEP_PROFILE_TIMEZONE:
+            timezone_value = _normalize_timezone(text)
+            if timezone_value is None:
+                return refused(
+                    "Не похоже на таймзону. Пример: Europe/Vilnius.",
+                    intent="wizard.profile.timezone",
+                    mode="local",
+                    actions=_step_actions(),
+                )
+            updated = _touch_state(state, step=STEP_PROFILE_VERBOSITY, data={"timezone": timezone_value})
+            self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+            return ok(
+                "Насколько подробно отвечать? short/detailed.",
+                intent="wizard.profile.verbosity",
+                mode="local",
+                actions=_step_actions(),
+            )
+        if state.step == STEP_PROFILE_VERBOSITY:
+            verbosity = _parse_verbosity(text)
+            if verbosity is None:
+                return refused(
+                    "Варианты: short или detailed.",
+                    intent="wizard.profile.verbosity",
+                    mode="local",
+                    actions=_step_actions(),
+                )
+            updated = _touch_state(state, step=STEP_PROFILE_REMINDERS_ENABLED, data={"verbosity": verbosity})
+            self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+            return ok(
+                "Создавать напоминания по умолчанию? да/нет",
+                intent="wizard.profile.reminders",
+                mode="local",
+                actions=_step_actions(),
+            )
+        if state.step == STEP_PROFILE_REMINDERS_ENABLED:
+            enabled = _parse_yes_no(text)
+            if enabled is None:
+                return refused(
+                    "Ответь: да или нет.",
+                    intent="wizard.profile.reminders",
+                    mode="local",
+                    actions=_step_actions(),
+                )
+            if not enabled:
+                return self._finalize_profile(
+                    state,
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    reminders_enabled=False,
+                    offset_minutes=None,
+                )
+            updated = _touch_state(state, step=STEP_PROFILE_REMINDERS_OFFSET, data={"reminders_enabled": True})
+            self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+            return ok(
+                "За сколько минут до события напоминать? (например 10 или 2h)",
+                intent="wizard.profile.reminders_offset",
+                mode="local",
+                actions=_step_actions(),
+            )
+        if state.step == STEP_PROFILE_REMINDERS_OFFSET:
+            offset = _parse_offset_minutes(text)
+            if offset is None:
+                return refused(
+                    "Нужно число минут или формат 2h.",
+                    intent="wizard.profile.reminders_offset",
+                    mode="local",
+                    actions=_step_actions(),
+                )
+            return self._finalize_profile(
+                state,
+                user_id=user_id,
+                chat_id=chat_id,
+                reminders_enabled=True,
+                offset_minutes=offset,
+            )
+        return refused("Шаг сценария не распознан.", intent="wizard.profile.step", mode="local")
+
+    def _finalize_profile(
+        self,
+        state: WizardState,
+        *,
+        user_id: int,
+        chat_id: int,
+        reminders_enabled: bool,
+        offset_minutes: int | None,
+    ) -> OrchestratorResult:
+        if self._profile_store is None:
+            return error("Профиль не настроен.", intent="wizard.profile.missing", mode="local")
+        patch: dict[str, object] = {}
+        if isinstance(state.data.get("language"), str):
+            patch["language"] = state.data["language"]
+        if isinstance(state.data.get("timezone"), str):
+            patch["timezone"] = state.data["timezone"]
+        if isinstance(state.data.get("verbosity"), str):
+            patch["verbosity"] = state.data["verbosity"]
+        reminder_patch: dict[str, object] = {"enabled": reminders_enabled}
+        if offset_minutes is not None:
+            reminder_patch["offset_minutes"] = offset_minutes
+        patch["default_reminders"] = reminder_patch
+        profile = self._profile_store.update(user_id, patch)
+        self._store.clear_state(user_id=user_id, chat_id=chat_id)
+        return ok(
+            _profile_summary(profile),
+            intent="wizard.profile.done",
+            mode="local",
+            actions=_menu_actions(),
+        )
+
 
 def _touch_state(state: WizardState, *, step: str | None = None, data: dict[str, object] | None = None) -> WizardState:
     updated = datetime.now(timezone.utc)
@@ -554,6 +732,36 @@ def _touch_state(state: WizardState, *, step: str | None = None, data: dict[str,
 
 
 def _render_prompt(state: WizardState) -> OrchestratorResult:
+    if state.wizard_id == WIZARD_PROFILE_SET and state.step == STEP_PROFILE_LANGUAGE:
+        return ok("Выбери язык: ru или en.", intent="wizard.profile.language", mode="local", actions=_step_actions())
+    if state.wizard_id == WIZARD_PROFILE_SET and state.step == STEP_PROFILE_TIMEZONE:
+        return ok(
+            "Укажи таймзону (IANA), например Europe/Vilnius.",
+            intent="wizard.profile.timezone",
+            mode="local",
+            actions=_step_actions(),
+        )
+    if state.wizard_id == WIZARD_PROFILE_SET and state.step == STEP_PROFILE_VERBOSITY:
+        return ok(
+            "Насколько подробно отвечать? short/detailed.",
+            intent="wizard.profile.verbosity",
+            mode="local",
+            actions=_step_actions(),
+        )
+    if state.wizard_id == WIZARD_PROFILE_SET and state.step == STEP_PROFILE_REMINDERS_ENABLED:
+        return ok(
+            "Создавать напоминания по умолчанию? да/нет",
+            intent="wizard.profile.reminders",
+            mode="local",
+            actions=_step_actions(),
+        )
+    if state.wizard_id == WIZARD_PROFILE_SET and state.step == STEP_PROFILE_REMINDERS_OFFSET:
+        return ok(
+            "За сколько минут до события напоминать? (например 10 или 2h)",
+            intent="wizard.profile.reminders_offset",
+            mode="local",
+            actions=_step_actions(),
+        )
     if state.wizard_id == WIZARD_REMINDER_CREATE and state.step == STEP_AWAIT_TITLE:
         return ok("Что напомнить? Напиши текст напоминания.", intent="wizard.reminder_create.title", mode="local", actions=_step_actions())
     if state.wizard_id == WIZARD_REMINDER_CREATE and state.step == STEP_AWAIT_DATETIME:
@@ -759,6 +967,74 @@ def _recurrence_label(recurrence: dict[str, object] | None) -> str:
     if isinstance(freq, str):
         return freq
     return "без повтора"
+
+
+def _parse_yes_no(raw: str) -> bool | None:
+    value = raw.strip().lower()
+    if value in {"да", "yes", "y", "true", "on", "1"}:
+        return True
+    if value in {"нет", "no", "n", "false", "off", "0"}:
+        return False
+    return None
+
+
+def _parse_language(raw: str) -> str | None:
+    value = raw.strip().lower()
+    if value in {"ru", "рус", "русский", "russian"}:
+        return "ru"
+    if value in {"en", "eng", "english", "англ", "английский"}:
+        return "en"
+    return None
+
+
+def _parse_verbosity(raw: str) -> str | None:
+    value = raw.strip().lower()
+    if value in {"short", "коротко", "кратко"}:
+        return "short"
+    if value in {"detailed", "подробно", "развернуто"}:
+        return "detailed"
+    return None
+
+
+def _parse_offset_minutes(raw: str) -> int | None:
+    value = raw.strip().lower()
+    if not value:
+        return None
+    if value.endswith("h") and value[:-1].isdigit():
+        hours = int(value[:-1])
+        return hours * 60 if hours >= 0 else None
+    if value.endswith("m") and value[:-1].isdigit():
+        minutes = int(value[:-1])
+        return minutes if minutes >= 0 else None
+    if value.isdigit():
+        minutes = int(value)
+        return minutes if minutes >= 0 else None
+    return None
+
+
+def _normalize_timezone(raw: str) -> str | None:
+    value = raw.strip()
+    if not value:
+        return None
+    try:
+        ZoneInfo(value)
+    except Exception:
+        return None
+    return value
+
+
+def _profile_summary(profile: UserProfile) -> str:
+    reminders = profile.default_reminders
+    lines = [
+        "Профиль обновлён:",
+        f"- язык: {profile.language}",
+        f"- таймзона: {profile.timezone}",
+        f"- подробность: {profile.verbosity}",
+        f"- напоминания по умолчанию: {'on' if reminders.enabled else 'off'}",
+        f"- смещение: {reminders.offset_minutes} минут",
+    ]
+    return "\n".join(lines)
+
 def _expired_result() -> OrchestratorResult:
     return refused(
         "Сценарий истёк, начни заново.",
@@ -806,6 +1082,8 @@ def _wizard_target_label(wizard_id: str | None) -> str | None:
         return "calendar.add"
     if wizard_id == WIZARD_REMINDER_RESCHEDULE:
         return "reminder.reschedule"
+    if wizard_id == WIZARD_PROFILE_SET:
+        return "profile.set"
     return None
 
 
