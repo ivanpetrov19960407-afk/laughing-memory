@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ _CONTEXT_KEY = "_request_context"
 _DEV_ENVS = {"dev", "development", "local"}
 _SECRET_KEYS = {"authorization", "api_key", "apikey", "token", "password", "secret", "headers", "cookie"}
 _TEXT_KEYS = {"text", "prompt", "input_text", "message", "payload", "response", "content"}
+_RAW_TEXT_KEYS = {"where", "exc_type", "mode", "model", "provider", "tool_name", "intent", "handler"}
 
 
 @dataclass
@@ -147,6 +149,25 @@ def add_trace(
     )
 
 
+def build_args_shape(data: Any) -> Any:
+    if isinstance(data, dict):
+        return {str(key): build_args_shape(value) for key, value in data.items()}
+    if isinstance(data, (list, tuple)):
+        return [build_args_shape(item) for item in data]
+    return type(data).__name__
+
+
+def _sanitize_error_message(request_context: RequestContext | None, message: str) -> str:
+    env = request_context.env if request_context else "prod"
+    if env == "dev":
+        return message
+    return _truncate_text(message, limit=120)
+
+
+def elapsed_ms(start_time: float) -> float:
+    return max((time.monotonic() - start_time) * 1000, 0.01)
+
+
 def safe_log_payload(request_context: RequestContext | None, data: Any) -> Any:
     env = request_context.env if request_context else "prod"
 
@@ -169,6 +190,9 @@ def safe_log_payload(request_context: RequestContext | None, data: Any) -> Any:
             key_lower = str(key).lower()
             if key_lower in _SECRET_KEYS:
                 sanitized[key] = "***"
+                continue
+            if key_lower in _RAW_TEXT_KEYS and isinstance(value, str):
+                sanitized[key] = value
                 continue
             if key_lower in _TEXT_KEYS:
                 sanitized[key] = _safe_text(str(value))
@@ -213,8 +237,40 @@ def log_event(
         logger.info(message)
 
 
+def log_error(
+    logger: logging.Logger,
+    request_context: RequestContext | None,
+    *,
+    component: str,
+    where: str,
+    exc: Exception,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    env = request_context.env if request_context else "prod"
+    exc_msg = _sanitize_error_message(request_context, str(exc))
+    payload: dict[str, Any] = {
+        "where": where,
+        "exc_type": type(exc).__name__,
+        "exc_msg": exc_msg,
+        "user_id": request_context.user_id if request_context else 0,
+        "chat_id": request_context.chat_id if request_context else 0,
+    }
+    if env == "dev":
+        payload["stack"] = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    if extra:
+        payload.update(extra)
+    log_event(
+        logger,
+        request_context,
+        component=component,
+        event="error",
+        status="error",
+        **payload,
+    )
+
+
 def log_request(logger: logging.Logger, request_context: RequestContext) -> None:
-    duration_ms = (time.monotonic() - request_context.start_time) * 1000
+    duration_ms = elapsed_ms(request_context.start_time)
     log_event(
         logger,
         request_context,
