@@ -79,8 +79,22 @@ async def create_event(
     location: str | None = None,
     tz: str | None = None,
     uid: str | None = None,
+    rrule: str | None = None,
+    exdates: list[datetime] | None = None,
 ) -> CreatedEvent:
-    return await asyncio.to_thread(_create_event_sync, config, start_at, end_at, title, description, location, tz, uid)
+    return await asyncio.to_thread(
+        _create_event_sync,
+        config,
+        start_at,
+        end_at,
+        title,
+        description,
+        location,
+        tz,
+        uid,
+        rrule,
+        exdates,
+    )
 
 
 async def list_events(
@@ -115,6 +129,8 @@ def _create_event_sync(
     location: str | None,
     tz: str | None,
     uid: str | None,
+    rrule: str | None,
+    exdates: list[datetime] | None,
 ) -> CreatedEvent:
     calendar, calendar_name = _resolve_calendar(config)
     start_utc = _to_utc(_ensure_aware(start_at, tz))
@@ -128,6 +144,8 @@ def _create_event_sync(
         title=title,
         description=description,
         location=location,
+        rrule=rrule,
+        exdates=exdates,
     )
     calendar_url = _calendar_url(calendar)
     href = _build_event_url(calendar_url, uid)
@@ -379,6 +397,8 @@ def _build_ical_event(
     title: str,
     description: str | None,
     location: str | None,
+    rrule: str | None,
+    exdates: list[datetime] | None,
 ) -> str:
     dtstamp = datetime.now(timezone.utc)
     lines = [
@@ -396,6 +416,12 @@ def _build_ical_event(
         lines.append(f"DESCRIPTION:{_escape_ical_text(description)}")
     if location:
         lines.append(f"LOCATION:{_escape_ical_text(location)}")
+    if rrule:
+        lines.append(f"RRULE:{rrule}")
+    if exdates:
+        formatted = ",".join(_format_utc(value) for value in exdates)
+        if formatted:
+            lines.append(f"EXDATE:{formatted}")
     lines.extend(["END:VEVENT", "END:VCALENDAR"])
     return "\r\n".join(lines) + "\r\n"
 

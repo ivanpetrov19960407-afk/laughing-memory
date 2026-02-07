@@ -7,7 +7,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from app.core import calendar_store, tools_calendar_caldav
+from app.core import calendar_store, recurrence_parse, tools_calendar_caldav
 from app.core.calendar_backend import CalendarCreateResult, LocalCalendarBackend
 from app.core.error_messages import map_error_text
 from app.core.result import Action, OrchestratorResult, ensure_valid, error, ok, refused
@@ -76,6 +76,7 @@ async def create_event(
     circuit_breakers: CircuitBreakerRegistry | None = None,
     retry_policy: RetryPolicy | None = None,
     timeouts: TimeoutConfig | None = None,
+    recurrence_text: str | None = None,
 ) -> OrchestratorResult:
     request_label = request_id or "-"
     LOGGER.info(
@@ -87,6 +88,11 @@ async def create_event(
     )
     backend_mode = _resolve_backend_mode()
     end_at = start_at + timedelta(hours=1)
+    recurrence_input = recurrence_text if isinstance(recurrence_text, str) else title
+    recurrence = recurrence_parse.parse_recurrence(recurrence_input, start_at, calendar_store.BOT_TZ)
+    rrule = recurrence.rrule if recurrence else None
+    exdates = recurrence.exdates if recurrence else None
+    recurrence_human = recurrence.human if recurrence else None
     if backend_mode == "caldav":
         timeouts = _resolve_timeouts(timeouts)
         retry_policy = _resolve_retry_policy(retry_policy)
@@ -106,6 +112,9 @@ async def create_event(
                 user_id=user_id,
                 intent=intent,
                 caldav_error="missing_config",
+                rrule=rrule,
+                exdates=exdates,
+                recurrence_human=recurrence_human,
                 reminder_scheduler=reminder_scheduler,
                 reminders_enabled=reminders_enabled,
             )
@@ -164,6 +173,8 @@ async def create_event(
                     end_at=end_at,
                     title=title,
                     uid=uid,
+                    rrule=rrule,
+                    exdates=exdates,
                 ),
                 policy=retry_policy,
                 timeout_seconds=timeouts.external_api_seconds,
@@ -181,6 +192,8 @@ async def create_event(
                 user_id=user_id,
                 reminders_enabled=False,
                 event_id=created_remote.uid,
+                rrule=rrule,
+                exdates=exdates,
             )
             event_payload = created_local.get("event") if isinstance(created_local, dict) else None
             event_id = event_payload.get("event_id") if isinstance(event_payload, dict) else None
@@ -213,9 +226,13 @@ async def create_event(
             return _build_create_result(
                 created,
                 start_at=start_at,
+                end_at=end_at,
                 title=title,
                 intent=intent,
                 calendar_backend="caldav",
+                recurrence_human=recurrence_human,
+                rrule=rrule,
+                exdates=exdates,
             )
         except asyncio.TimeoutError as exc:
             status = "error"
@@ -272,6 +289,9 @@ async def create_event(
                 user_id=user_id,
                 intent=intent,
                 caldav_error=_safe_caldav_error_label(exc),
+                rrule=rrule,
+                exdates=exdates,
+                recurrence_human=recurrence_human,
                 reminder_scheduler=reminder_scheduler,
                 reminders_enabled=reminders_enabled,
             )
@@ -287,7 +307,13 @@ async def create_event(
             )
     try:
         backend = LocalCalendarBackend(chat_id=chat_id, user_id=user_id, reminders_enabled=False)
-        created = await backend.create_event(title=title, start_dt=start_at, end_dt=end_at)
+        created = await backend.create_event(
+            title=title,
+            start_dt=start_at,
+            end_dt=end_at,
+            rrule=rrule,
+            exdates=exdates,
+        )
     except Exception as exc:
         LOGGER.error(
             "calendar.create local error: request_id=%s user_id=%s error=%s",
@@ -301,24 +327,44 @@ async def create_event(
         reminder_scheduler=reminder_scheduler,
         reminders_enabled=reminders_enabled,
     )
-    return _build_create_result(created, start_at=start_at, title=title, intent=intent, calendar_backend="local")
+    return _build_create_result(
+        created,
+        start_at=start_at,
+        end_at=end_at,
+        title=title,
+        intent=intent,
+        calendar_backend="local",
+        recurrence_human=recurrence_human,
+        rrule=rrule,
+        exdates=exdates,
+    )
 
 
 def _build_create_result(
     created,
     *,
     start_at: datetime,
+    end_at: datetime,
     title: str,
     intent: str,
     calendar_backend: str,
     caldav_error: str | None = None,
+    recurrence_human: str | None = None,
+    rrule: str | None = None,
+    exdates: list[datetime] | None = None,
 ) -> OrchestratorResult:
     event_id = getattr(created, "event_id", None)
     if not isinstance(event_id, str) or not event_id:
         return ensure_valid(refused("Не удалось создать событие.", intent=intent, mode="tool", debug={"reason": "missing_event_id"}))
     start_value = _ensure_aware_for_label(start_at)
     dt_label = start_value.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-    text = f"Событие создано: {dt_label} | {title}"
+    duration_label = _format_duration(end_at - start_at)
+    if recurrence_human:
+        text = f"Создал повтор: {recurrence_human}, старт {dt_label}, длительность {duration_label} | {title}"
+        if exdates:
+            text = f"{text} (исключения: {_format_exdates(exdates)})"
+    else:
+        text = f"Событие создано: {dt_label} | {title}"
     debug: dict[str, str] = {"event_id": event_id, "calendar_backend": calendar_backend}
     created_debug = getattr(created, "debug", None)
     if isinstance(created_debug, dict):
@@ -327,6 +373,8 @@ def _build_create_result(
                 debug[key] = value
     if caldav_error:
         debug["caldav_error"] = caldav_error
+    if rrule:
+        debug["rrule"] = rrule
     return ensure_valid(ok(text, intent=intent, mode="tool", debug=debug))
 
 
@@ -339,12 +387,21 @@ async def _create_event_local_fallback(
     user_id: int,
     intent: str,
     caldav_error: str,
+    rrule: str | None,
+    exdates: list[datetime] | None,
+    recurrence_human: str | None,
     reminder_scheduler: ReminderScheduler | None,
     reminders_enabled: bool,
 ) -> OrchestratorResult:
     try:
         backend = LocalCalendarBackend(chat_id=chat_id, user_id=user_id, reminders_enabled=False)
-        created = await backend.create_event(title=title, start_dt=start_at, end_dt=end_at)
+        created = await backend.create_event(
+            title=title,
+            start_dt=start_at,
+            end_dt=end_at,
+            rrule=rrule,
+            exdates=exdates,
+        )
     except Exception as exc:
         LOGGER.error(
             "calendar.create local fallback error: user_id=%s error=%s",
@@ -360,10 +417,14 @@ async def _create_event_local_fallback(
     return _build_create_result(
         created,
         start_at=start_at,
+        end_at=end_at,
         title=title,
         intent=intent,
         calendar_backend="local_fallback",
         caldav_error=caldav_error,
+        recurrence_human=recurrence_human,
+        rrule=rrule,
+        exdates=exdates,
     )
 
 
@@ -856,6 +917,24 @@ def _short_label(value: str, limit: int = 24) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _format_duration(value: timedelta) -> str:
+    total_seconds = int(value.total_seconds())
+    if total_seconds < 0:
+        total_seconds = 0
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes = remainder // 60
+    return f"{hours}:{minutes:02d}"
+
+
+def _format_exdates(exdates: list[datetime]) -> str:
+    labels = []
+    for item in exdates:
+        if not isinstance(item, datetime):
+            continue
+        labels.append(item.astimezone(calendar_store.BOT_TZ).strftime("%d.%m.%Y"))
+    return ", ".join(labels)
 
 
 def is_caldav_configured(settings: object | None = None) -> bool:

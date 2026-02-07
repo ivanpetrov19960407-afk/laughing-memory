@@ -26,6 +26,8 @@ class CalendarBackend(Protocol):
         description: str | None = None,
         location: str | None = None,
         tz: str | ZoneInfo | None = None,
+        rrule: str | None = None,
+        exdates: list[datetime] | None = None,
     ) -> CalendarCreateResult:
         raise NotImplementedError
 
@@ -62,6 +64,8 @@ class LocalCalendarBackend:
         description: str | None = None,
         location: str | None = None,
         tz: str | ZoneInfo | None = None,
+        rrule: str | None = None,
+        exdates: list[datetime] | None = None,
     ) -> CalendarCreateResult:
         start_at = _ensure_aware(start_dt, tz)
         _ensure_aware(end_dt, tz)
@@ -72,6 +76,8 @@ class LocalCalendarBackend:
             remind_at=None,
             user_id=self._user_id,
             reminders_enabled=self._reminders_enabled,
+            rrule=rrule,
+            exdates=exdates,
         )
         event_payload = created.get("event") if isinstance(created, dict) else None
         event_id = event_payload.get("event_id") if isinstance(event_payload, dict) else None
@@ -94,6 +100,8 @@ class CalDAVCalendarBackend:
         description: str | None = None,
         location: str | None = None,
         tz: str | ZoneInfo | None = None,
+        rrule: str | None = None,
+        exdates: list[datetime] | None = None,
     ) -> CalendarCreateResult:
         start_at = _ensure_aware(start_dt, tz)
         end_at = _ensure_aware(end_dt, tz)
@@ -105,6 +113,8 @@ class CalDAVCalendarBackend:
             description=description,
             location=location,
             tz=tz,
+            rrule=rrule,
+            exdates=exdates,
         )
         event_id = created_remote.uid
         created_local = await calendar_store.add_item(
@@ -115,6 +125,8 @@ class CalDAVCalendarBackend:
             user_id=self._user_id,
             reminders_enabled=False,
             event_id=event_id,
+            rrule=rrule,
+            exdates=exdates,
         )
         event_payload = created_local.get("event") if isinstance(created_local, dict) else None
         stored_id = event_payload.get("event_id") if isinstance(event_payload, dict) else None
