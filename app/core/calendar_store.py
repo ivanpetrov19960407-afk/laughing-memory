@@ -25,6 +25,8 @@ class CalendarItem:
     dt: datetime
     chat_id: int
     user_id: int
+    rrule: str | None = None
+    exdates: list[datetime] | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +161,23 @@ def _parse_triggered_at(value: object) -> datetime | None:
     return parsed.astimezone(VIENNA_TZ)
 
 
+def _parse_exdates(value: object) -> list[datetime] | None:
+    if not isinstance(value, list):
+        return None
+    parsed: list[datetime] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        try:
+            dt_value = datetime.fromisoformat(item)
+        except ValueError:
+            continue
+        if dt_value.tzinfo is None:
+            dt_value = dt_value.replace(tzinfo=VIENNA_TZ)
+        parsed.append(dt_value.astimezone(VIENNA_TZ))
+    return parsed or None
+
+
 def _build_reminder_item(
     *,
     reminder_id: str,
@@ -196,6 +215,8 @@ async def add_item(
     user_id: int = 0,
     reminders_enabled: bool = True,
     event_id: str | None = None,
+    rrule: str | None = None,
+    exdates: list[datetime] | None = None,
 ) -> dict[str, object]:
     async with _STORE_LOCK:
         store = load_store()
@@ -218,6 +239,11 @@ async def add_item(
         reminder_id = _generate_id({item_id for item_id in reminder_ids if isinstance(item_id, str)})
         now_iso = datetime.now(tz=VIENNA_TZ).isoformat()
         remind_at_value = (remind_at or dt).astimezone(VIENNA_TZ).isoformat()
+        event_exdates = (
+            [value.astimezone(VIENNA_TZ).isoformat() for value in exdates if isinstance(value, datetime)]
+            if exdates
+            else None
+        )
         event = {
             "event_id": event_id,
             "dt_start": dt.astimezone(VIENNA_TZ).isoformat(),
@@ -225,6 +251,8 @@ async def add_item(
             "created_at": now_iso,
             "chat_id": chat_id,
             "user_id": user_id,
+            "rrule": rrule,
+            "exdates": event_exdates,
         }
         reminder: dict[str, object] | None = None
         if remind_at is not None or reminders_enabled:
@@ -320,6 +348,8 @@ async def list_items(start: datetime | None = None, end: datetime | None = None)
                 dt=dt,
                 chat_id=int(chat_id) if isinstance(chat_id, int) else 0,
                 user_id=int(user_id) if isinstance(user_id, int) else 0,
+                rrule=item.get("rrule") if isinstance(item.get("rrule"), str) else None,
+                exdates=_parse_exdates(item.get("exdates")),
             )
         )
     result.sort(key=lambda item: item.dt)
@@ -568,6 +598,8 @@ async def get_event(event_id: str) -> CalendarItem | None:
             dt=dt,
             chat_id=int(chat_id) if isinstance(chat_id, int) else 0,
             user_id=int(user_id) if isinstance(user_id, int) else 0,
+            rrule=item.get("rrule") if isinstance(item.get("rrule"), str) else None,
+            exdates=_parse_exdates(item.get("exdates")),
         )
     return None
 
