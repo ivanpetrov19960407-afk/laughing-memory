@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import os
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -17,7 +18,7 @@ from telegram.ext import ContextTypes
 
 from app.bot import menu, routing, wizard
 from app.bot.actions import ActionStore, StoredAction, build_inline_keyboard, parse_callback_token
-from app.core import calendar_store, tools_calendar
+from app.core import calendar_nlp_ru, calendar_store, tools_calendar
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMemory, DialogMessage
 from app.core.last_state_resolver import ResolutionResult, resolve_short_message
@@ -38,10 +39,12 @@ from app.core.tools_calendar import create_event, delete_event, list_calendar_it
 from app.core.recurrence_scope import RecurrenceScope, normalize_scope, parse_recurrence_scope
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
+from app.infra.draft_store import DraftStore
 from app.infra.last_state_store import LastStateStore
 from app.infra.messaging import safe_edit_text, safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limiter import RateLimiter
+from app.infra.resilience import RetryPolicy, TimeoutConfig
 from app.infra.request_context import (
     RequestContext,
     add_trace,
@@ -54,6 +57,7 @@ from app.infra.request_context import (
     set_status,
     start_request,
 )
+from app.infra.version import resolve_app_version
 from app.infra.trace_store import TraceEntry, TraceStore
 from app.infra.storage import TaskStorage
 
@@ -147,6 +151,13 @@ def _get_action_store(context: ContextTypes.DEFAULT_TYPE) -> ActionStore:
 def _get_trace_store(context: ContextTypes.DEFAULT_TYPE) -> TraceStore | None:
     store = context.application.bot_data.get("trace_store")
     if isinstance(store, TraceStore):
+        return store
+    return None
+
+
+def _get_draft_store(context: ContextTypes.DEFAULT_TYPE) -> DraftStore | None:
+    store = context.application.bot_data.get("draft_store")
+    if isinstance(store, DraftStore):
         return store
     return None
 
@@ -1333,32 +1344,153 @@ async def _build_health_message(
     user_id: int | None = None,
 ) -> str:
     settings = context.application.bot_data["settings"]
-    rate_limiter = _get_rate_limiter(context)
+    request_context = get_request_context(context)
+    env_label = request_context.env if request_context else "prod"
     start_time = context.application.bot_data.get("start_time", time.monotonic())
     uptime = _format_uptime(start_time)
-    python_version = sys.version.split()[0]
-    telegram_version = telegram.__version__
-    modes = "-"
-    if user_id is not None:
-        orchestrator = _get_orchestrator(context)
-        dialog_memory = _get_dialog_memory(context)
-        facts_status = "on" if orchestrator.is_facts_only(user_id) else "off"
-        if dialog_memory is None:
-            context_status = "off"
-        else:
-            context_status = "on" if await dialog_memory.is_enabled(user_id) else "off"
-        reminders_status = "on" if settings.reminders_enabled else "off"
-        modes = f"facts={facts_status}, context={context_status}, reminders={reminders_status}"
+    orchestrator = _get_orchestrator(context)
+    version = resolve_app_version(orchestrator.config.get("system_metadata", {}))
+    timezone_label = calendar_store.BOT_TZ.key
+    caldav_status = "ok" if tools_calendar.is_caldav_configured(settings) else "error"
+    google_configured = bool(
+        settings.google_oauth_client_id and settings.google_oauth_client_secret and settings.public_base_url
+    )
+    google_partial = any(
+        [settings.google_oauth_client_id, settings.google_oauth_client_secret, settings.public_base_url]
+    )
+    if google_configured:
+        google_status = "ok"
+    elif google_partial:
+        google_status = "error"
+    else:
+        google_status = "disabled"
+    llm_status = "ok" if settings.openai_api_key or settings.perplexity_api_key else "error"
+    store = calendar_store.load_store()
+    reminders_count = len(store.get("reminders") or [])
+    memory_store = _get_memory_store(context)
+    memory_count = memory_store.count_entries() if memory_store else 0
+    trace_store = _get_trace_store(context)
+    trace_count = trace_store.count_entries() if trace_store else 0
+    breaker_registry = _get_circuit_breakers(context)
+    breaker_states = breaker_registry.snapshot() if breaker_registry else {}
+    breaker_label = ", ".join(f"{name}={state}" for name, state in breaker_states.items()) or "none"
     return (
         "Health:\n"
-        f"Uptime: {uptime}\n"
-        f"Rate limits: {rate_limiter.per_minute}/min, {rate_limiter.per_day}/day\n"
-        f"Python: {python_version}\n"
-        f"Telegram: {telegram_version}\n"
-        f"Orchestrator config: {settings.orchestrator_config_path}\n"
-        f"Rate limit cache: {rate_limiter.cache_size} users\n"
-        f"Modes: {modes}"
+        f"App: v{version}, uptime {uptime}, env {env_label}, tz {timezone_label}\n"
+        f"Integrations: CalDAV {caldav_status}, Google {google_status}, LLM {llm_status}\n"
+        f"Stores: reminders {reminders_count}, memory {memory_count}, trace {trace_count}\n"
+        f"Circuit breakers: {breaker_label}"
     )
+
+
+def _build_config_message(context: ContextTypes.DEFAULT_TYPE) -> str:
+    settings = context.application.bot_data["settings"]
+    timeouts = _get_timeouts(context) or TimeoutConfig()
+    retry_policy = _get_retry_policy(context) or RetryPolicy()
+    circuit_breakers = _get_circuit_breakers(context)
+    log_level = logging.getLevelName(logging.getLogger().getEffectiveLevel())
+    integrations = {
+        "caldav": bool(settings.caldav_url and settings.caldav_username and settings.caldav_password),
+        "google": bool(
+            settings.google_oauth_client_id
+            and settings.google_oauth_client_secret
+            and settings.public_base_url
+        ),
+        "openai": bool(settings.openai_api_key),
+        "perplexity": bool(settings.perplexity_api_key),
+        "web_search": bool(settings.feature_web_search),
+    }
+    breaker_config = circuit_breakers.config if circuit_breakers else None
+    breaker_line = "n/a"
+    if breaker_config:
+        breaker_line = (
+            f"failure_threshold={breaker_config.failure_threshold}, "
+            f"window_seconds={breaker_config.window_seconds}, "
+            f"cooldown_seconds={breaker_config.cooldown_seconds}"
+        )
+    storage_lines = [
+        f"db_path={settings.db_path}",
+        f"allowlist_path={settings.allowlist_path}",
+        f"dialog_memory_path={settings.dialog_memory_path}",
+        f"wizard_store_path={settings.wizard_store_path}",
+        f"google_tokens_path={settings.google_tokens_path}",
+    ]
+    lines = [
+        "Config:",
+        f"env={os.getenv('APP_ENV', 'prod')}",
+        f"calendar_backend={settings.calendar_backend}",
+        f"reminders_enabled={settings.reminders_enabled}",
+        f"enable_wizards={settings.enable_wizards}",
+        f"enable_menu={settings.enable_menu}",
+        f"strict_no_pseudo_sources={settings.strict_no_pseudo_sources}",
+        f"log_level={log_level}",
+        "integrations=" + ", ".join(f"{key}={'on' if value else 'off'}" for key, value in integrations.items()),
+        f"timeouts=tool:{timeouts.tool_call_seconds}s web:{timeouts.web_tool_call_seconds}s llm:{timeouts.llm_seconds}s ext:{timeouts.external_api_seconds}s",
+        f"retry=max_attempts={retry_policy.max_attempts} base_delay_ms={retry_policy.base_delay_ms} max_delay_ms={retry_policy.max_delay_ms} jitter_ms={retry_policy.jitter_ms}",
+        f"breaker={breaker_line}",
+        "storage=" + ", ".join(storage_lines),
+    ]
+    return "\n".join(lines)
+
+
+def _format_draft_datetime(value: datetime | None) -> str:
+    if not isinstance(value, datetime):
+        return "неизвестно"
+    return value.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+
+
+def _render_event_draft(draft: calendar_nlp_ru.EventDraft) -> str:
+    start_label = _format_draft_datetime(draft.start_at)
+    end_label = _format_draft_datetime(draft.end_at)
+    title = draft.title.strip() if isinstance(draft.title, str) else ""
+    if not title:
+        title = "Событие"
+    lines = [
+        "Черновик события:",
+        f"Название: {title}",
+        f"Начало: {start_label}",
+    ]
+    if draft.end_at:
+        lines.append(f"Окончание: {end_label}")
+    if draft.recurrence:
+        lines.append(f"Повтор: {draft.recurrence.human}")
+    return "\n".join(lines)
+
+
+def _build_calendar_draft_actions(draft_id: str, *, include_edit: bool = True) -> list[Action]:
+    actions = [
+        Action(
+            id="calendar.create_confirm",
+            label="✅ Подтвердить",
+            payload={"op": "calendar.create_confirm", "draft_id": draft_id},
+        ),
+    ]
+    if include_edit:
+        actions.append(
+            Action(
+                id="calendar.create_edit",
+                label="✏️ Изменить",
+                payload={"op": "calendar.create_edit", "draft_id": draft_id},
+            )
+        )
+    actions.append(
+        Action(
+            id="calendar.create_cancel",
+            label="❌ Отмена",
+            payload={"op": "calendar.create_cancel", "draft_id": draft_id},
+        )
+    )
+    return actions
+
+
+def _prompt_for_missing_field(field: str) -> str:
+    if field == "start_at":
+        return "Укажи дату и время события (например: завтра 15:00)."
+    if field == "title":
+        return "Укажи название события."
+    if field == "duration":
+        return "Укажи длительность (например: на 45 минут)."
+    return "Уточни данные для события."
 
 
 @_with_error_handling
@@ -2535,6 +2667,51 @@ async def _dispatch_action_payload(
             payload={"wizard_id": wizard.WIZARD_CALENDAR_ADD},
         )
         return result if result is not None else refused("Сценарий не активен.", intent="wizard.inactive", mode="local")
+    if op_value in {"calendar.create_confirm", "calendar.create_edit", "calendar.create_cancel"}:
+        draft_store = _get_draft_store(context)
+        draft_id = payload.get("draft_id")
+        if draft_store is None or not isinstance(draft_id, str):
+            return refused("Черновик не найден.", intent="calendar.nlp.draft", mode="local")
+        entry = draft_store.get(draft_id=draft_id, chat_id=chat_id, user_id=user_id)
+        if entry is None or not isinstance(entry.draft, calendar_nlp_ru.EventDraft):
+            return refused("Черновик устарел.", intent="calendar.nlp.draft", mode="local")
+        if op_value == "calendar.create_cancel":
+            draft_store.remove(draft_id=draft_id)
+            return refused("Ок, отменил.", intent="calendar.nlp.cancel", mode="local")
+        if op_value == "calendar.create_edit":
+            entry.expect_reparse = True
+            entry.status = "awaiting"
+            draft_store.update(entry)
+            return ok(
+                "Пришли новую фразу для события.",
+                intent="calendar.nlp.edit",
+                mode="local",
+                actions=[
+                    Action(
+                        id="calendar.create_cancel",
+                        label="❌ Отмена",
+                        payload={"op": "calendar.create_cancel", "draft_id": draft_id},
+                    )
+                ],
+            )
+        draft = entry.draft
+        if draft.start_at is None:
+            return refused("Не хватает даты/времени.", intent="calendar.nlp.confirm", mode="local")
+        tool_result = await create_event(
+            start_at=draft.start_at,
+            end_at=draft.end_at,
+            title=draft.title,
+            chat_id=chat_id,
+            user_id=user_id,
+            intent="utility_calendar.add",
+            request_context=request_context,
+            recurrence_text=draft.recurrence.raw_text if draft.recurrence else None,
+            circuit_breakers=_get_circuit_breakers(context),
+            retry_policy=_get_retry_policy(context),
+            timeouts=_get_timeouts(context),
+        )
+        draft_store.remove(draft_id=draft_id)
+        return replace(tool_result, mode="local", intent="utility_calendar.add")
     if op_value == "calendar.list":
         days = payload.get("days", 7)
         days_value = days if isinstance(days, int) else 7
@@ -2634,6 +2811,39 @@ async def _dispatch_action_payload(
             event_id=event_id,
             user_id=user_id,
             chat_id=chat_id,
+            scope=scope,
+            instance_dt=instance_dt,
+        )
+    if op_value == "calendar.move_custom":
+        event_id = payload.get("event_id")
+        scope = normalize_scope(payload.get("scope"))
+        instance_raw = payload.get("instance_dt")
+        new_dt_raw = payload.get("new_dt")
+        instance_dt = None
+        new_dt = None
+        if isinstance(instance_raw, str):
+            try:
+                instance_dt = datetime.fromisoformat(instance_raw)
+            except ValueError:
+                instance_dt = None
+        if isinstance(new_dt_raw, str):
+            try:
+                new_dt = datetime.fromisoformat(new_dt_raw)
+            except ValueError:
+                new_dt = None
+        if not isinstance(event_id, str) or not event_id or new_dt is None:
+            return error(
+                "Некорректные данные действия.",
+                intent="utility_calendar.move",
+                mode="local",
+                debug={"reason": "invalid_event_id"},
+            )
+        return await _handle_event_move_to_datetime(
+            context,
+            event_id=event_id,
+            user_id=user_id,
+            chat_id=chat_id,
+            new_dt=new_dt,
             scope=scope,
             instance_dt=instance_dt,
         )
@@ -2876,6 +3086,11 @@ async def _dispatch_command_payload(
         user_id = update.effective_user.id if update.effective_user else 0
         message = await _build_health_message(context, user_id=user_id)
         return ok(message, intent="menu.status", mode="local")
+    if normalized == "/config":
+        request_context = get_request_context(context)
+        if request_context is None or request_context.env != "dev":
+            return refused("Команда недоступна в prod.", intent="command.config", mode="local")
+        return ok(_build_config_message(context), intent="command.config", mode="local")
     if normalized == "/summary":
         return ok(
             "Summary: /summary <текст> или summary: <текст>.",
@@ -3222,6 +3437,88 @@ async def _handle_event_move_tomorrow(
         debug={
             "refs": {"event_id": event_id},
         },
+    )
+
+
+async def _handle_event_move_to_datetime(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    event_id: str,
+    user_id: int,
+    chat_id: int,
+    new_dt: datetime,
+    scope: RecurrenceScope | str | None = None,
+    instance_dt: datetime | None = None,
+) -> OrchestratorResult:
+    event = await calendar_store.get_event(event_id)
+    if event is None or event.user_id != user_id or event.chat_id != chat_id:
+        return refused("Событие не найдено.", intent="utility_calendar.move", mode="local")
+    is_recurring = bool(event.rrule)
+    scope_value = normalize_scope(scope)
+    if is_recurring and scope_value is None:
+        instance_value = instance_dt or event.dt
+        new_dt_iso = new_dt.isoformat()
+        return ok(
+            "Это повторяющееся событие. Что изменить?",
+            intent="utility_calendar.move",
+            mode="local",
+            actions=[
+                Action(
+                    id="utility_calendar.move_this",
+                    label="Только это",
+                    payload={
+                        "op": "calendar.move_custom",
+                        "event_id": event_id,
+                        "instance_dt": instance_value.isoformat(),
+                        "new_dt": new_dt_iso,
+                        "scope": "THIS",
+                    },
+                ),
+                Action(
+                    id="utility_calendar.move_all",
+                    label="Всю серию",
+                    payload={
+                        "op": "calendar.move_custom",
+                        "event_id": event_id,
+                        "instance_dt": instance_value.isoformat(),
+                        "new_dt": new_dt_iso,
+                        "scope": "ALL",
+                    },
+                ),
+                Action(
+                    id="utility_calendar.move_future",
+                    label="Это и будущие",
+                    payload={
+                        "op": "calendar.move_custom",
+                        "event_id": event_id,
+                        "instance_dt": instance_value.isoformat(),
+                        "new_dt": new_dt_iso,
+                        "scope": "FUTURE",
+                    },
+                ),
+            ],
+        )
+    tool_result = await update_event(
+        event_id,
+        {"start_at": new_dt},
+        scope=scope_value or RecurrenceScope.ALL,
+        instance_dt=instance_dt or event.dt,
+        user_id=user_id,
+        chat_id=chat_id,
+        intent="utility_calendar.move",
+        request_context=get_request_context(context),
+        circuit_breakers=_get_circuit_breakers(context),
+        retry_policy=_get_retry_policy(context),
+        timeouts=_get_timeouts(context),
+    )
+    if tool_result.status != "ok":
+        return replace(tool_result, mode="local", intent="utility_calendar.move")
+    when_label = new_dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+    return ok(
+        f"Ок, перенёс на {when_label}.",
+        intent="utility_calendar.move",
+        mode="local",
+        debug={"refs": {"event_id": event_id}},
     )
 
 
@@ -3852,6 +4149,106 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if wizard_result is not None:
                 await send_result(update, context, wizard_result)
                 return
+    draft_store = _get_draft_store(context)
+    if draft_store is not None:
+        active_draft = draft_store.find_active(chat_id=chat_id, user_id=user_id)
+        if active_draft is not None and isinstance(active_draft.draft, calendar_nlp_ru.EventDraft):
+            draft = active_draft.draft
+            now = datetime.now(tz=calendar_store.BOT_TZ)
+            if active_draft.expect_reparse:
+                reparsed = calendar_nlp_ru.event_from_text_ru(
+                    prompt,
+                    now=now,
+                    tz=calendar_store.BOT_TZ,
+                )
+                if reparsed.title:
+                    draft.title = reparsed.title
+                if reparsed.start_at:
+                    draft.start_at = reparsed.start_at
+                if reparsed.end_at:
+                    draft.end_at = reparsed.end_at
+                if reparsed.recurrence:
+                    draft.recurrence = reparsed.recurrence
+                draft.missing_fields = reparsed.missing_fields
+                active_draft.expect_reparse = False
+            elif draft.missing_fields:
+                field = draft.missing_fields[0]
+                if field == "title":
+                    draft.title = prompt.strip() or draft.title
+                elif field == "start_at":
+                    parsed_dt = calendar_nlp_ru.parse_datetime_phrase_ru(
+                        prompt,
+                        now=now,
+                        tz=calendar_store.BOT_TZ,
+                    )
+                    if parsed_dt is None:
+                        result = refused(
+                            _prompt_for_missing_field(field),
+                            intent="calendar.nlp.missing",
+                            mode="local",
+                            actions=[
+                                Action(
+                                    id="calendar.create_cancel",
+                                    label="❌ Отмена",
+                                    payload={"op": "calendar.create_cancel", "draft_id": active_draft.draft_id},
+                                )
+                            ],
+                        )
+                        await send_result(update, context, result)
+                        return
+                    draft.start_at = parsed_dt
+                elif field == "duration":
+                    duration = calendar_nlp_ru.parse_duration_minutes(prompt.lower())
+                    if duration is None:
+                        result = refused(
+                            _prompt_for_missing_field(field),
+                            intent="calendar.nlp.missing",
+                            mode="local",
+                            actions=[
+                                Action(
+                                    id="calendar.create_cancel",
+                                    label="❌ Отмена",
+                                    payload={"op": "calendar.create_cancel", "draft_id": active_draft.draft_id},
+                                )
+                            ],
+                        )
+                        await send_result(update, context, result)
+                        return
+                    if draft.start_at:
+                        draft.end_at = draft.start_at + timedelta(minutes=duration)
+                if draft.missing_fields:
+                    draft.missing_fields = draft.missing_fields[1:]
+            if draft.start_at and draft.end_at is None:
+                draft.end_at = draft.start_at + timedelta(minutes=60)
+            active_draft.draft = draft
+            if draft.missing_fields:
+                prompt_text = _prompt_for_missing_field(draft.missing_fields[0])
+                active_draft.status = "awaiting"
+                draft_store.update(active_draft)
+                result = ok(
+                    prompt_text,
+                    intent="calendar.nlp.missing",
+                    mode="local",
+                    actions=[
+                        Action(
+                            id="calendar.create_cancel",
+                            label="❌ Отмена",
+                            payload={"op": "calendar.create_cancel", "draft_id": active_draft.draft_id},
+                        )
+                    ],
+                )
+                await send_result(update, context, result)
+                return
+            active_draft.status = "draft"
+            draft_store.update(active_draft)
+            result = ok(
+                _render_event_draft(draft),
+                intent="calendar.nlp.draft",
+                mode="local",
+                actions=_build_calendar_draft_actions(active_draft.draft_id),
+            )
+            await send_result(update, context, result)
+            return
     LOGGER.info("chat_ids user_id=%s chat_id=%s has_message=%s", user_id, chat_id, bool(update.message))
     dialog_memory = _get_dialog_memory(context)
     if user_id == 0 or chat_id == 0:
@@ -3882,6 +4279,30 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         last_state_store.get_state(chat_id=chat_id, user_id=user_id) if last_state_store else None
     )
     resolution = resolve_short_message(prompt, last_state)
+    if (
+        resolution.action == "move"
+        and last_state is not None
+        and isinstance(last_state.last_event_id, str)
+        and last_state.last_event_id
+    ):
+        new_dt = calendar_nlp_ru.parse_datetime_phrase_ru(
+            prompt,
+            now=datetime.now(tz=calendar_store.BOT_TZ),
+            tz=calendar_store.BOT_TZ,
+        )
+        if new_dt is not None:
+            result = await _handle_event_move_to_datetime(
+                context,
+                event_id=last_state.last_event_id,
+                user_id=user_id,
+                chat_id=chat_id,
+                new_dt=new_dt,
+                scope=resolution.scope,
+            )
+            await send_result(update, context, result)
+            if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
+                await dialog_memory.add_assistant(user_id, chat_id, result.text)
+            return
     if resolution.status != "skip":
         _log_memory_resolution(
             request_context,
@@ -3903,6 +4324,35 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send_result(update, context, result)
         if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
             await dialog_memory.add_assistant(user_id, chat_id, result.text)
+        return
+    if draft_store is not None and calendar_nlp_ru.is_calendar_intent(prompt):
+        now = datetime.now(tz=calendar_store.BOT_TZ)
+        draft = calendar_nlp_ru.event_from_text_ru(prompt, now=now, tz=calendar_store.BOT_TZ)
+        status = "draft" if not draft.missing_fields else "awaiting"
+        entry = draft_store.create(chat_id=chat_id, user_id=user_id, draft=draft, status=status)
+        if draft.missing_fields:
+            prompt_text = _prompt_for_missing_field(draft.missing_fields[0])
+            result = ok(
+                prompt_text,
+                intent="calendar.nlp.missing",
+                mode="local",
+                actions=[
+                    Action(
+                        id="calendar.create_cancel",
+                        label="❌ Отмена",
+                        payload={"op": "calendar.create_cancel", "draft_id": entry.draft_id},
+                    )
+                ],
+            )
+            await send_result(update, context, result)
+            return
+        result = ok(
+            _render_event_draft(draft),
+            intent="calendar.nlp.draft",
+            mode="local",
+            actions=_build_calendar_draft_actions(entry.draft_id),
+        )
+        await send_result(update, context, result)
         return
     try:
         result = await orchestrator.handle(
@@ -3947,9 +4397,43 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context, bucket="ui"):
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    result = _build_simple_result(
+    request_context = get_request_context(context)
+    actions: list[Action] = []
+    if request_context is not None and request_context.env == "dev":
+        actions.append(Action(id="debug.trace_last", label="Trace last", payload={"op": "trace_last"}))
+        actions.append(
+            Action(
+                id="debug.show_config",
+                label="Show config",
+                payload={"op": "run_command", "command": "/config", "args": ""},
+            )
+        )
+    result = ok(
         await _build_health_message(context, user_id=user_id),
         intent="command.health",
+        mode="local",
+        actions=actions,
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context, bucket="ui"):
+        return
+    request_context = get_request_context(context)
+    if request_context is None or request_context.env != "dev":
+        result = _build_simple_result(
+            "Команда недоступна в prod.",
+            intent="command.config",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    result = _build_simple_result(
+        _build_config_message(context),
+        intent="command.config",
         status="ok",
         mode="local",
     )
