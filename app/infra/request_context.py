@@ -58,11 +58,16 @@ def _extract_message_id(update: Update | None) -> int:
     if update is None:
         return 0
     if update.callback_query and getattr(update.callback_query, "message", None):
-        return update.callback_query.message.message_id
+        message_id = getattr(update.callback_query.message, "message_id", None)
+        if isinstance(message_id, int):
+            return message_id
     message = update.effective_message
     if not message:
         return 0
-    return message.message_id
+    message_id = getattr(message, "message_id", None)
+    if isinstance(message_id, int):
+        return message_id
+    return 0
 
 
 def _extract_input_text(update: Update | None) -> str:
