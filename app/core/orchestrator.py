@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+import traceback
 from typing import Any
 
 from app.core.decision import Decision
@@ -25,6 +26,7 @@ from app.core.tasks import TaskDefinition, TaskError, get_task_registry
 from app.infra.access import AccessController
 from app.infra.llm import LLMAPIError, LLMClient, LLMGuardError, ensure_plain_text
 from app.infra.rate_limit import RateLimiter
+from app.infra.request_context import RequestContext, add_trace, log_event
 from app.infra.storage import TaskStorage
 from app.tools.web_search import NullSearchClient, SearchClient
 
@@ -67,6 +69,28 @@ def detect_intent(text: str) -> str:
     if any(marker in lowered for marker in smalltalk_markers):
         return "smalltalk"
     return "question"
+
+
+def _tool_debug_payload(
+    request_context: RequestContext | None,
+    exc: Exception,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"reason": reason}
+    if request_context and request_context.env == "dev":
+        payload["error_type"] = type(exc).__name__
+        payload["error_message"] = str(exc)
+        payload["stacktrace"] = traceback.format_exc()
+    return payload
+
+
+def _llm_error_payload(request_context: RequestContext | None, exc: Exception) -> dict[str, Any]:
+    payload: dict[str, Any] = {"error_type": type(exc).__name__}
+    if request_context and request_context.env == "dev":
+        payload["error_message"] = str(exc)
+        payload["stacktrace"] = traceback.format_exc()
+    return payload
 
 
 class TaskNotFoundError(TaskError):
@@ -114,14 +138,31 @@ class Orchestrator:
         enabled = self._enabled_tasks()
         return [self._registry[name] for name in enabled if name in self._registry]
 
-    async def handle(self, text: str, user_context: dict[str, Any]) -> OrchestratorResult:
+    async def handle(
+        self,
+        text: str,
+        user_context: dict[str, Any],
+        *,
+        request_context: RequestContext | None = None,
+    ) -> OrchestratorResult:
         user_id = int(user_context.get("user_id") or 0)
         dialog_context = user_context.get("dialog_context")
         dialog_message_count = user_context.get("dialog_message_count")
         request_id = user_context.get("request_id")
+        request_context = request_context or user_context.get("request_context")
+        start_time = time.monotonic()
+        log_event(
+            LOGGER,
+            request_context,
+            component="orchestrator",
+            event="orchestrator.start",
+            status="ok",
+            user_id=user_id,
+            input_text=text,
+        )
         allowed, error_message = self._ensure_allowed(user_id)
         if not allowed:
-            return ensure_valid(
+            result = ensure_valid(
                 refused(
                     error_message,
                     intent="command",
@@ -129,6 +170,7 @@ class Orchestrator:
                     debug={"reason": "access_denied"},
                 )
             )
+            return self._finalize_request(request_context, start_time, result)
         trimmed = text.strip()
         decision = self._make_decision(trimmed)
         LOGGER.info(
@@ -139,11 +181,12 @@ class Orchestrator:
             decision.reason or "-",
         )
         if decision.status != "ok":
-            return ensure_valid(self._result_from_decision(decision))
+            result = ensure_valid(self._result_from_decision(decision))
+            return self._finalize_request(request_context, start_time, result)
 
         if decision.intent == "smalltalk":
             response = self._smalltalk_response(trimmed)
-            return ensure_valid(
+            result = ensure_valid(
                 ok(
                     response,
                     intent=decision.intent,
@@ -151,9 +194,11 @@ class Orchestrator:
                     debug={"strategy": "smalltalk_local"},
                 )
             )
+            return self._finalize_request(request_context, start_time, result)
 
         if decision.intent == "utility_summary":
-            return await self._handle_summary(user_id, trimmed)
+            result = await self._handle_summary(user_id, trimmed)
+            return self._finalize_request(request_context, start_time, result)
 
         if decision.intent == "command.ask":
             _, payload = _split_command(trimmed)
@@ -164,21 +209,25 @@ class Orchestrator:
                 dialog_context=dialog_context if isinstance(dialog_context, str) else None,
                 dialog_message_count=dialog_message_count if isinstance(dialog_message_count, int) else None,
                 request_id=request_id if isinstance(request_id, str) else None,
+                request_context=request_context,
             )
-            return self._build_llm_result(
+            result = self._build_llm_result(
                 execution,
                 intent=decision.intent,
                 facts_only=self.is_facts_only(user_id),
+                request_context=request_context,
             )
+            return self._finalize_request(request_context, start_time, result)
 
         if decision.intent == "command.search":
             _, payload = _split_command(trimmed)
-            return await self.run_fact_answer(
+            result = await self.run_fact_answer(
                 user_id,
                 payload,
                 facts_only=True,
                 intent="command.search",
             )
+            return self._finalize_request(request_context, start_time, result)
 
         execution, _ = await self._request_llm(
             user_id,
@@ -187,14 +236,51 @@ class Orchestrator:
             dialog_context=dialog_context if isinstance(dialog_context, str) else None,
             dialog_message_count=dialog_message_count if isinstance(dialog_message_count, int) else None,
             request_id=request_id if isinstance(request_id, str) else None,
+            request_context=request_context,
         )
-        return self._build_llm_result(
+        result = self._build_llm_result(
             execution,
             intent=decision.intent,
             facts_only=self.is_facts_only(user_id),
+            request_context=request_context,
         )
+        return self._finalize_request(request_context, start_time, result)
 
-    def execute_task(self, user_id: int, task_name: str, payload: str) -> OrchestratorResult:
+    def _finalize_request(
+        self,
+        request_context: RequestContext | None,
+        start_time: float,
+        result: OrchestratorResult,
+    ) -> OrchestratorResult:
+        duration_ms = (time.monotonic() - start_time) * 1000
+        log_event(
+            LOGGER,
+            request_context,
+            component="orchestrator",
+            event="orchestrator.end",
+            status=result.status,
+            duration_ms=duration_ms,
+            intent=result.intent,
+            mode=result.mode,
+        )
+        add_trace(
+            request_context,
+            step="orchestrator.end",
+            component="orchestrator",
+            name=result.intent,
+            status=result.status,
+            duration_ms=duration_ms,
+        )
+        return result
+
+    def execute_task(
+        self,
+        user_id: int,
+        task_name: str,
+        payload: str,
+        *,
+        request_context: RequestContext | None = None,
+    ) -> OrchestratorResult:
         executed_at = datetime.now(timezone.utc)
         allowed, error_message = self._ensure_allowed(user_id)
         if not allowed:
@@ -206,6 +292,16 @@ class Orchestrator:
             )
             self._record_task_result(user_id, task_name, payload, result, executed_at)
             return ensure_valid(result)
+        start_time = time.monotonic()
+        log_event(
+            LOGGER,
+            request_context,
+            component="tool",
+            event="tool.call.start",
+            status="ok",
+            tool_name=task_name,
+            payload=payload,
+        )
         try:
             task = self._get_task(task_name)
             result = task.handler(payload)
@@ -214,18 +310,64 @@ class Orchestrator:
                 str(exc),
                 intent=f"task.{task_name}",
                 mode="tool",
-                debug={"reason": "task_error"},
+                debug=_tool_debug_payload(request_context, exc, reason="task_error"),
             )
             LOGGER.warning("Task execution failed: %s", exc, exc_info=True)
+            log_event(
+                LOGGER,
+                request_context,
+                component="tool",
+                event="error",
+                status="error",
+                tool_name=task_name,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         except Exception as exc:  # pragma: no cover - safety net
             result = error(
                 "Unexpected error while executing task.",
                 intent=f"task.{task_name}",
                 mode="tool",
-                debug={"reason": "unexpected_exception"},
+                debug=_tool_debug_payload(request_context, exc, reason="unexpected_exception"),
             )
             LOGGER.exception("Unexpected error while executing task: %s", exc)
+            log_event(
+                LOGGER,
+                request_context,
+                component="tool",
+                event="error",
+                status="error",
+                tool_name=task_name,
+                error_type=type(exc).__name__,
+                error="Unexpected error while executing task.",
+            )
         self._record_task_result(user_id, task_name, payload, result, executed_at)
+        duration_ms = (time.monotonic() - start_time) * 1000
+        log_event(
+            LOGGER,
+            request_context,
+            component="tool",
+            event="tool.call.end",
+            status=result.status,
+            duration_ms=duration_ms,
+            tool_name=task_name,
+        )
+        add_trace(
+            request_context,
+            step="orchestrator.dispatch",
+            component="orchestrator",
+            name=task_name,
+            status=result.status,
+            duration_ms=duration_ms,
+        )
+        add_trace(
+            request_context,
+            step="tool.call",
+            component="tool",
+            name=task_name,
+            status=result.status,
+            duration_ms=duration_ms,
+        )
         return ensure_valid(result)
 
     async def ask_llm(
@@ -238,6 +380,7 @@ class Orchestrator:
         dialog_context: str | None = None,
         dialog_message_count: int | None = None,
         request_id: str | None = None,
+        request_context: RequestContext | None = None,
     ) -> TaskExecutionResult:
         execution, _ = await self._request_llm(
             user_id,
@@ -247,6 +390,7 @@ class Orchestrator:
             dialog_context=dialog_context,
             dialog_message_count=dialog_message_count,
             request_id=request_id,
+            request_context=request_context,
         )
         return execution
 
@@ -266,6 +410,7 @@ class Orchestrator:
         dialog_context: str | None = None,
         dialog_message_count: int | None = None,
         request_id: str | None = None,
+        request_context: RequestContext | None = None,
     ) -> tuple[TaskExecutionResult, list[str]]:
         executed_at = datetime.now(timezone.utc)
         trimmed = prompt.strip()
@@ -354,20 +499,19 @@ class Orchestrator:
                 messages.append({"role": "user", "content": combined_prompt})
                 return messages
 
-            def _log_request(messages: list[dict[str, Any]], *, attempt: str = "primary") -> None:
-                LOGGER.info(
-                    "LLM request: user_id=%s mode=%s prompt_len=%s history=%s attempt=%s",
-                    user_id,
-                    mode,
-                    len(trimmed),
-                    max(len(messages) - 1, 0),
-                    attempt,
-                )
-
             start_time = time.monotonic()
+            log_event(
+                LOGGER,
+                request_context,
+                component="llm",
+                event="llm.call.start",
+                status="ok",
+                mode=mode,
+                prompt=trimmed,
+                request_id=request_id or "-",
+            )
             try:
                 messages = _build_messages(trimmed)
-                _log_request(messages)
                 response_text = await llm_client.generate_text(
                     model=model,
                     messages=messages,
@@ -386,7 +530,6 @@ class Orchestrator:
                     )
                     regen_prompt = f"{trimmed}\n\n{regen_instruction}"
                     regen_messages = _build_messages(regen_prompt)
-                    _log_request(regen_messages, attempt="regen")
                     response_text = await llm_client.generate_text(
                         model=model,
                         messages=regen_messages,
@@ -414,22 +557,74 @@ class Orchestrator:
             except LLMGuardError as exc:
                 result = "Некорректный ответ LLM. Попробуйте позже."
                 status = "error"
+                if request_context:
+                    request_context.meta["llm_error"] = _llm_error_payload(request_context, exc)
                 LOGGER.warning("LLM guard error: %s", exc)
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="llm",
+                    event="error",
+                    status="error",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    mode=mode,
+                )
             except LLMAPIError as exc:
                 result = self._map_llm_error(exc)
                 status = "error"
+                if request_context:
+                    request_context.meta["llm_error"] = _llm_error_payload(request_context, exc)
                 LOGGER.warning(
                     "LLM API error: status=%s user_id=%s",
                     exc.status_code,
                     user_id,
                 )
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="llm",
+                    event="error",
+                    status="error",
+                    error_type=type(exc).__name__,
+                    error=exc.message,
+                    mode=mode,
+                )
             except Exception as exc:
                 result = "Временная ошибка сервиса. Попробуйте позже."
                 status = "error"
+                if request_context:
+                    request_context.meta["llm_error"] = _llm_error_payload(request_context, exc)
                 LOGGER.warning("LLM request failed: %s", exc, exc_info=True)
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="llm",
+                    event="error",
+                    status="error",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    mode=mode,
+                )
             finally:
-                duration = time.monotonic() - start_time
-                LOGGER.info("LLM response: user_id=%s mode=%s duration=%.2fs", user_id, mode, duration)
+                duration_ms = (time.monotonic() - start_time) * 1000
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="llm",
+                    event="llm.call.end",
+                    status=status,
+                    duration_ms=duration_ms,
+                    mode=mode,
+                )
+                add_trace(
+                    request_context,
+                    step="llm.call",
+                    component="llm",
+                    name=mode,
+                    status=status,
+                    duration_ms=duration_ms,
+                )
 
         execution = TaskExecutionResult(
             task_name=mode,
@@ -620,7 +815,7 @@ class Orchestrator:
 
         LOGGER.info("Routing: user_id=%s action=perplexity mode=ask", user_id)
         execution = await self.ask_llm(user_id, trimmed, mode="ask")
-        return self._build_llm_result(execution, intent="ask", facts_only=False)
+        return self._build_llm_result(execution, intent="ask", facts_only=False, request_context=None)
 
     async def run_fact_answer(self, user_id: int, query: str, *, facts_only: bool, intent: str) -> OrchestratorResult:
         if not self._feature_web_search:
@@ -800,6 +995,7 @@ class Orchestrator:
             execution,
             intent="utility_summary",
             facts_only=self.is_facts_only(user_id),
+            request_context=None,
         )
 
     def _build_llm_result(
@@ -808,6 +1004,7 @@ class Orchestrator:
         *,
         intent: str,
         facts_only: bool,
+        request_context: RequestContext | None,
     ) -> OrchestratorResult:
         status = "ok" if execution.status == "success" else "error"
         sources: list[Source] = []
@@ -821,13 +1018,18 @@ class Orchestrator:
                 )
             )
         final_text = execution.result
+        debug_payload: dict[str, Any] = {"task_name": execution.task_name}
+        if status == "error" and request_context:
+            llm_error = request_context.meta.get("llm_error")
+            if llm_error:
+                debug_payload["llm_error"] = llm_error
         result = (
             ok(
                 final_text,
                 intent=intent,
                 mode="llm",
                 sources=sources,
-                debug={"task_name": execution.task_name},
+                debug=debug_payload,
             )
             if status == "ok"
             else error(
@@ -835,7 +1037,7 @@ class Orchestrator:
                 intent=intent,
                 mode="llm",
                 sources=sources,
-                debug={"task_name": execution.task_name},
+                debug=debug_payload,
             )
         )
         return ensure_valid(result)
