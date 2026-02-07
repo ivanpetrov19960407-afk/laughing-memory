@@ -20,7 +20,6 @@ from app.core.memory_store import MemoryStore
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.config import load_settings, resolve_env_label, validate_startup_env
-from app.infra.draft_store import DraftStore
 from app.infra.google_oauth import GoogleOAuthConfig
 from app.infra.google_oauth_server import start_google_oauth_server
 from app.infra.request_context import RequestContext, log_event

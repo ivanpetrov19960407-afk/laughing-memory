@@ -1433,63 +1433,6 @@ def _build_config_message(context: ContextTypes.DEFAULT_TYPE) -> str:
     return "\n".join(lines)
 
 
-def _format_draft_datetime(value: datetime | None) -> str:
-    if not isinstance(value, datetime):
-        return "неизвестно"
-    return value.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-
-
-def _render_event_draft(draft: calendar_nlp_ru.EventDraft) -> str:
-    start_label = _format_draft_datetime(draft.start_at)
-    end_label = _format_draft_datetime(draft.end_at)
-    lines = [
-        "Черновик события:",
-        f"Название: {draft.title}",
-        f"Начало: {start_label}",
-    ]
-    if draft.end_at:
-        lines.append(f"Окончание: {end_label}")
-    if draft.recurrence:
-        lines.append(f"Повтор: {draft.recurrence.human}")
-    return "\n".join(lines)
-
-
-def _build_calendar_draft_actions(draft_id: str, *, include_edit: bool = True) -> list[Action]:
-    actions = [
-        Action(
-            id="calendar.create_confirm",
-            label="✅ Подтвердить",
-            payload={"op": "calendar.create_confirm", "draft_id": draft_id},
-        ),
-    ]
-    if include_edit:
-        actions.append(
-            Action(
-                id="calendar.create_edit",
-                label="✏️ Изменить",
-                payload={"op": "calendar.create_edit", "draft_id": draft_id},
-            )
-        )
-    actions.append(
-        Action(
-            id="calendar.create_cancel",
-            label="❌ Отмена",
-            payload={"op": "calendar.create_cancel", "draft_id": draft_id},
-        )
-    )
-    return actions
-
-
-def _prompt_for_missing_field(field: str) -> str:
-    if field == "start_at":
-        return "Укажи дату и время события (например: завтра 15:00)."
-    if field == "title":
-        return "Укажи название события."
-    if field == "duration":
-        return "Укажи длительность (например: на 45 минут)."
-    return "Уточни данные для события."
-
-
 @_with_error_handling
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     orchestrator = _get_orchestrator(context)
