@@ -118,6 +118,31 @@ def test_wizard_add_event_freeform_skips_title(tmp_path, monkeypatch) -> None:
     assert any(item.title.lower() == "врач" for item in items)
 
 
+def test_wizard_calendar_does_not_create_without_confirm(tmp_path, monkeypatch) -> None:
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    monkeypatch.setenv("CALENDAR_BACKEND", "local")
+    store = WizardStore(tmp_path / "wizards", timeout_seconds=600)
+    manager = WizardManager(store)
+
+    start = asyncio.run(
+        manager.handle_action(
+            user_id=4,
+            chat_id=40,
+            op="wizard_start",
+            payload={"wizard_id": WIZARD_CALENDAR_ADD},
+        )
+    )
+    assert start is not None
+
+    step_one = asyncio.run(manager.handle_text(user_id=4, chat_id=40, text="завтра 19:00 врач"))
+    assert step_one is not None
+    assert step_one.status in {"ok", "refused"}
+
+    items = asyncio.run(calendar_store.list_items(None, None))
+    assert not any(item.title.lower() == "врач" for item in items)
+
+
 def test_wizard_calendar_refuses_without_connection(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))

@@ -245,7 +245,8 @@ def test_calendar_create_explicit_date_ok(calendar_env) -> None:
 
 def test_calendar_create_human_date_ok(calendar_env) -> None:
     _ = calendar_env
-    start_at, title = calendar_store.parse_event_datetime("завтра 10 Встреча")
+    parsed = calendar_store.parse_calendar_event_from_text("завтра 10 Встреча")
+    start_at, title = parsed.start_at, parsed.title
     result = asyncio_run(
         create_event(start_at=start_at, title=title or "Встреча", chat_id=1, user_id=1)
     )
