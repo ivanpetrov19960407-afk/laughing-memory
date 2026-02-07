@@ -25,8 +25,11 @@ class CalendarItem:
     dt: datetime
     chat_id: int
     user_id: int
+    series_id: str | None = None
     rrule: str | None = None
     exdates: list[datetime] | None = None
+    overrides: dict[str, dict[str, object]] | None = None
+    timezone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -50,7 +53,7 @@ def _calendar_path() -> Path:
 
 def _default_store(now: datetime | None = None) -> dict[str, object]:
     timestamp = (now or datetime.now(tz=VIENNA_TZ)).isoformat()
-    return {"events": [], "reminders": [], "updated_at": timestamp}
+    return {"schema_version": 2, "events": [], "reminders": [], "updated_at": timestamp}
 
 
 def load_store() -> dict[str, object]:
@@ -81,6 +84,8 @@ def _normalize_store(store: dict[str, object]) -> dict[str, object]:
     if not isinstance(store, dict):
         return _default_store()
     if "events" in store and "reminders" in store:
+        if "schema_version" not in store:
+            store["schema_version"] = 1
         return store
     items = store.get("items") or []
     events: list[dict[str, object]] = []
@@ -120,7 +125,7 @@ def _normalize_store(store: dict[str, object]) -> dict[str, object]:
             }
         )
     timestamp = store.get("updated_at") or datetime.now(tz=VIENNA_TZ).isoformat()
-    return {"events": events, "reminders": reminders, "updated_at": timestamp}
+    return {"schema_version": 1, "events": events, "reminders": reminders, "updated_at": timestamp}
 
 
 def _parse_datetime(value: str | None, fallback: datetime) -> datetime:
@@ -178,6 +183,64 @@ def _parse_exdates(value: object) -> list[datetime] | None:
     return parsed or None
 
 
+def _parse_overrides(value: object, tz: ZoneInfo) -> dict[str, dict[str, object]] | None:
+    if not isinstance(value, dict):
+        return None
+    parsed: dict[str, dict[str, object]] = {}
+    for key, patch in value.items():
+        if not isinstance(key, str) or not isinstance(patch, dict):
+            continue
+        parsed_patch: dict[str, object] = {}
+        for field, patch_value in patch.items():
+            if field == "start_at" and isinstance(patch_value, str):
+                try:
+                    dt_value = datetime.fromisoformat(patch_value)
+                except ValueError:
+                    continue
+                if dt_value.tzinfo is None:
+                    dt_value = dt_value.replace(tzinfo=tz)
+                parsed_patch[field] = dt_value.astimezone(tz)
+            elif isinstance(patch_value, (str, int, float, bool)) or patch_value is None:
+                parsed_patch[field] = patch_value
+        if parsed_patch:
+            parsed[key] = parsed_patch
+    return parsed or None
+
+
+def _serialize_overrides(overrides: dict[str, dict[str, object]] | None) -> dict[str, dict[str, object]] | None:
+    if not overrides:
+        return None
+    serialized: dict[str, dict[str, object]] = {}
+    for key, patch in overrides.items():
+        if not isinstance(key, str) or not isinstance(patch, dict):
+            continue
+        payload: dict[str, object] = {}
+        for field, patch_value in patch.items():
+            if isinstance(patch_value, datetime):
+                payload[field] = patch_value.astimezone(VIENNA_TZ).isoformat()
+            else:
+                payload[field] = patch_value
+        if payload:
+            serialized[key] = payload
+    return serialized or None
+
+
+def _parse_timezone(value: object, fallback: ZoneInfo) -> ZoneInfo:
+    if isinstance(value, str):
+        try:
+            return ZoneInfo(value)
+        except Exception:
+            return fallback
+    return fallback
+
+
+def _format_timezone(value: datetime) -> str:
+    tzinfo = value.tzinfo
+    if isinstance(tzinfo, ZoneInfo):
+        return tzinfo.key
+    return VIENNA_TZ.key
+
+
 def _build_reminder_item(
     *,
     reminder_id: str,
@@ -217,6 +280,9 @@ async def add_item(
     event_id: str | None = None,
     rrule: str | None = None,
     exdates: list[datetime] | None = None,
+    overrides: dict[str, dict[str, object]] | None = None,
+    series_id: str | None = None,
+    timezone: str | None = None,
 ) -> dict[str, object]:
     async with _STORE_LOCK:
         store = load_store()
@@ -244,6 +310,9 @@ async def add_item(
             if exdates
             else None
         )
+        event_overrides = _serialize_overrides(overrides)
+        event_timezone = timezone if isinstance(timezone, str) else _format_timezone(dt)
+        event_series_id = series_id if isinstance(series_id, str) else event_id
         event = {
             "event_id": event_id,
             "dt_start": dt.astimezone(VIENNA_TZ).isoformat(),
@@ -251,8 +320,11 @@ async def add_item(
             "created_at": now_iso,
             "chat_id": chat_id,
             "user_id": user_id,
+            "series_id": event_series_id,
             "rrule": rrule,
             "exdates": event_exdates,
+            "overrides": event_overrides,
+            "timezone": event_timezone,
         }
         reminder: dict[str, object] | None = None
         if remind_at is not None or reminders_enabled:
@@ -272,6 +344,7 @@ async def add_item(
         events.append(event)
         if reminder is not None:
             reminders.append(reminder)
+        store["schema_version"] = 2
         store["events"] = events
         store["reminders"] = reminders
         store["updated_at"] = now_iso
@@ -339,6 +412,12 @@ async def list_items(start: datetime | None = None, end: datetime | None = None)
             continue
         chat_id = item.get("chat_id")
         user_id = item.get("user_id")
+        tzinfo = _parse_timezone(
+            item.get("timezone"),
+            dt.tzinfo if isinstance(dt.tzinfo, ZoneInfo) else VIENNA_TZ,
+        )
+        dt = dt.astimezone(tzinfo)
+        series_id = item.get("series_id") if isinstance(item.get("series_id"), str) else item_id
         result.append(
             CalendarItem(
                 id=item_id,
@@ -348,8 +427,11 @@ async def list_items(start: datetime | None = None, end: datetime | None = None)
                 dt=dt,
                 chat_id=int(chat_id) if isinstance(chat_id, int) else 0,
                 user_id=int(user_id) if isinstance(user_id, int) else 0,
+                series_id=series_id,
                 rrule=item.get("rrule") if isinstance(item.get("rrule"), str) else None,
                 exdates=_parse_exdates(item.get("exdates")),
+                overrides=_parse_overrides(item.get("overrides"), tzinfo),
+                timezone=tzinfo.key,
             )
         )
     result.sort(key=lambda item: item.dt)
@@ -377,6 +459,7 @@ async def delete_item(item_id: str) -> tuple[bool, str | None]:
             kept_reminders.append(reminder)
         store["events"] = kept_events
         store["reminders"] = kept_reminders
+        store["schema_version"] = 2
         store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
         save_store_atomic(store)
         return True, removed_reminder_id if isinstance(removed_reminder_id, str) else None
@@ -590,6 +673,12 @@ async def get_event(event_id: str) -> CalendarItem | None:
             dt = dt.replace(tzinfo=VIENNA_TZ)
         chat_id = item.get("chat_id")
         user_id = item.get("user_id")
+        tzinfo = _parse_timezone(
+            item.get("timezone"),
+            dt.tzinfo if isinstance(dt.tzinfo, ZoneInfo) else VIENNA_TZ,
+        )
+        dt = dt.astimezone(tzinfo)
+        series_id = item.get("series_id") if isinstance(item.get("series_id"), str) else event_id
         return CalendarItem(
             id=event_id,
             ts=ts,
@@ -598,8 +687,11 @@ async def get_event(event_id: str) -> CalendarItem | None:
             dt=dt,
             chat_id=int(chat_id) if isinstance(chat_id, int) else 0,
             user_id=int(user_id) if isinstance(user_id, int) else 0,
+            series_id=series_id,
             rrule=item.get("rrule") if isinstance(item.get("rrule"), str) else None,
             exdates=_parse_exdates(item.get("exdates")),
+            overrides=_parse_overrides(item.get("overrides"), tzinfo),
+            timezone=tzinfo.key,
         )
     return None
 
@@ -615,6 +707,9 @@ async def update_event_fields(
     new_title: str | None = None,
     new_rrule: str | None = None,
     new_exdates: list[datetime] | None = None,
+    new_overrides: dict[str, dict[str, object]] | None = None,
+    new_timezone: str | None = None,
+    new_series_id: str | None = None,
 ) -> tuple[CalendarItem | None, str | None]:
     if new_dt is not None and new_dt.tzinfo is None:
         new_dt = new_dt.replace(tzinfo=VIENNA_TZ)
@@ -638,6 +733,12 @@ async def update_event_fields(
                     for value in new_exdates
                     if isinstance(value, datetime)
                 ] or None
+            if new_overrides is not None:
+                item["overrides"] = _serialize_overrides(new_overrides)
+            if new_timezone is not None:
+                item["timezone"] = new_timezone
+            if new_series_id is not None:
+                item["series_id"] = new_series_id
             updated_event = item
             break
         if updated_event is None:
@@ -654,6 +755,7 @@ async def update_event_fields(
             break
         store["events"] = events
         store["reminders"] = reminders
+        store["schema_version"] = 2
         store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
         save_store_atomic(store)
     return await get_event(event_id), reminder_id
