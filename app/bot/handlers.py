@@ -794,8 +794,23 @@ def _build_recurrence_scope_actions(
 def _reminder_list_controls_actions() -> list[Action]:
     return [
         Action(id="utility_reminders.create", label="➕ Создать", payload={"op": "reminder.create"}),
-        Action(id="utility_reminders.list", label="🔄 Обновить", payload={"op": "reminder.list"}),
+        Action(id="utility_reminders.list", label="🔄 Обновить", payload={"op": "reminder.list", "limit": 10}),
         _menu_action(),
+    ]
+
+
+def _reminder_delete_confirm_actions(reminder_id: str) -> list[Action]:
+    return [
+        Action(
+            id="utility_reminders.delete_confirmed",
+            label="✅ Удалить",
+            payload={"op": "reminder.delete_confirmed", "reminder_id": reminder_id},
+        ),
+        Action(
+            id="utility_reminders.delete_cancel",
+            label="↩ Отмена",
+            payload={"op": "reminder.list", "limit": 10},
+        ),
     ]
 
 
@@ -835,7 +850,14 @@ async def _build_reminders_list_result(
             Action(
                 id="utility_reminders.delete",
                 label=f"🗑 Удалить: {_short_label(item.text)}",
-                payload={"op": "reminder.delete", "reminder_id": item.id},
+                payload={"op": "reminder.delete_confirm", "reminder_id": item.id},
+            )
+        )
+        actions.append(
+            Action(
+                id="utility_reminders.reschedule",
+                label=f"✏ Перенести: {_short_label(item.text)}",
+                payload={"op": "reminder_reschedule", "reminder_id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
             )
         )
     return ok("\n".join(lines), intent=intent, mode="local", actions=actions)
@@ -2216,8 +2238,8 @@ async def _handle_menu_section(
                 ),
                 Action(
                     id="utility_reminders.list",
-                    label="📋 Список",
-                    payload={"op": "reminder.list"},
+                    label="📋 Ближайшие",
+                    payload={"op": "reminder.list", "limit": 10},
                 ),
                 _menu_action(),
             ],
@@ -2861,14 +2883,57 @@ async def _dispatch_action_payload(
         )
         return result if result is not None else refused("Сценарий не активен.", intent="wizard.inactive", mode="local")
     if op_value == "reminder.list":
-        limit = payload.get("limit", 5)
-        limit_value = limit if isinstance(limit, int) else 5
+        limit = payload.get("limit", 10)
+        limit_value = limit if isinstance(limit, int) else 10
         return await _handle_reminders_list(
             context,
             user_id=user_id,
             chat_id=chat_id,
             limit=max(1, limit_value),
             intent="utility_reminders.list",
+        )
+    if op_value == "reminder.delete_confirm":
+        reminder_id = payload.get("reminder_id") or payload.get("id")
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="utility_reminders.delete",
+                mode="local",
+                debug={"reason": "invalid_reminder_id"},
+            )
+        reminder = await calendar_store.get_reminder(reminder_id)
+        if reminder is None or reminder.user_id != user_id or reminder.chat_id != chat_id:
+            return refused(
+                "Напоминание не найдено.",
+                intent="utility_reminders.delete",
+                mode="local",
+            )
+        return ok(
+            f"Удалить напоминание: {reminder.text}?",
+            intent="utility_reminders.delete",
+            mode="local",
+            actions=_reminder_delete_confirm_actions(reminder_id),
+        )
+    if op_value == "reminder.delete_confirmed":
+        reminder_id = payload.get("reminder_id") or payload.get("id")
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="utility_reminders.delete",
+                mode="local",
+                debug={"reason": "invalid_reminder_id"},
+            )
+        result = await _handle_reminder_delete(
+            context,
+            reminder_id=reminder_id,
+            user_id=user_id,
+            chat_id=chat_id,
+        )
+        return replace(
+            result,
+            mode="local",
+            intent="utility_reminders.delete",
+            actions=_reminder_list_controls_actions(),
         )
     if op_value == "reminder.delete":
         reminder_id = payload.get("reminder_id") or payload.get("id")
@@ -3167,7 +3232,7 @@ async def _handle_reminders_list(
     *,
     user_id: int,
     chat_id: int,
-    limit: int = 5,
+    limit: int = 10,
     intent: str = "utility_reminders.list",
 ) -> OrchestratorResult:
     now = datetime.now(tz=calendar_store.BOT_TZ)
@@ -4175,7 +4240,7 @@ async def reminders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await chat(update, context)
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    limit = 5
+    limit = 10
     if context.args:
         try:
             limit = max(1, int(context.args[0]))

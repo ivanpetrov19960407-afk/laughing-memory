@@ -156,9 +156,26 @@ def _normalize_status(item: dict[str, object]) -> str:
 
 
 def _parse_recurrence(value: object) -> dict[str, object] | None:
-    if isinstance(value, dict) and value.get("freq"):
-        return dict(value)
-    return None
+    if not isinstance(value, dict):
+        return None
+    freq = value.get("freq")
+    if freq not in {"daily", "weekdays", "weekly", "monthly"}:
+        return None
+    recurrence: dict[str, object] = {"freq": freq}
+    interval = value.get("interval")
+    if isinstance(interval, int) and interval > 0:
+        recurrence["interval"] = interval
+    if freq == "weekly":
+        byweekday = value.get("byweekday")
+        if isinstance(byweekday, list):
+            days = sorted({day for day in byweekday if isinstance(day, int) and 0 <= day <= 6})
+            if days:
+                recurrence["byweekday"] = days
+    if freq == "monthly":
+        bymonthday = value.get("bymonthday")
+        if isinstance(bymonthday, int) and 1 <= bymonthday <= 31:
+            recurrence["bymonthday"] = bymonthday
+    return recurrence
 
 
 def _parse_triggered_at(value: object) -> datetime | None:
@@ -532,15 +549,22 @@ async def mark_reminder_sent(reminder_id: str, sent_at: datetime, missed: bool =
                     break
                 current_trigger = _parse_datetime(trigger_value, sent_at)
                 recurrence = _parse_recurrence(item.get("recurrence"))
+                base_trigger = current_trigger
                 if recurrence:
-                    next_trigger = _next_recurrence_trigger(current_trigger, recurrence)
+                    snooze_base_value = item.get("snooze_base_at")
+                    if isinstance(snooze_base_value, str):
+                        base_trigger = _parse_datetime(snooze_base_value, current_trigger)
+                if recurrence:
+                    next_trigger = _next_recurrence_trigger(base_trigger, recurrence)
                 if recurrence and next_trigger is not None:
                     item["trigger_at"] = next_trigger.astimezone(VIENNA_TZ).isoformat()
                     item["enabled"] = True
                     item["status"] = "active"
+                    item.pop("snooze_base_at", None)
                 else:
                     item["enabled"] = False
                     item["status"] = "done"
+                    item.pop("snooze_base_at", None)
                 if not missed:
                     item["sent_at"] = sent_at.astimezone(VIENNA_TZ).isoformat()
                 elif "sent_at" not in item:
@@ -851,11 +875,16 @@ async def apply_snooze(
             if not isinstance(trigger_value, str):
                 return None
             current_trigger = _parse_datetime(trigger_value, current_now)
+            recurrence = _parse_recurrence(item.get("recurrence"))
             base = max(current_now, base_trigger_at or current_trigger)
             new_trigger = base + timedelta(minutes=offset)
             item["trigger_at"] = new_trigger.astimezone(VIENNA_TZ).isoformat()
             item["enabled"] = True
             item["status"] = "active"
+            if recurrence:
+                existing_base = item.get("snooze_base_at")
+                if not isinstance(existing_base, str):
+                    item["snooze_base_at"] = current_trigger.astimezone(VIENNA_TZ).isoformat()
             updated_item = item
             break
         if updated_item is None or new_trigger is None:
@@ -1258,12 +1287,47 @@ def _combine_local(target_date: date, target_time: time) -> datetime:
     return datetime.combine(target_date, target_time).replace(tzinfo=VIENNA_TZ)
 
 
+def _recurrence_interval(recurrence: dict[str, object]) -> int:
+    value = recurrence.get("interval")
+    if isinstance(value, int) and value > 0:
+        return value
+    return 1
+
+
+def _next_weekday_with_interval(
+    trigger_at: datetime,
+    weekdays: set[int],
+    interval: int,
+) -> datetime | None:
+    if not weekdays:
+        return None
+    local_trigger = trigger_at.astimezone(VIENNA_TZ)
+    target_time = local_trigger.time()
+    candidate = local_trigger
+    for _ in range(1, 370):
+        candidate = candidate + timedelta(days=1)
+        weeks_since = (candidate.date() - local_trigger.date()).days // 7
+        if weeks_since % interval != 0:
+            continue
+        if candidate.weekday() in weekdays:
+            return _combine_local(candidate.date(), target_time)
+    return None
+
+
+def _add_months(year: int, month: int, months: int) -> tuple[int, int]:
+    total = (month - 1) + months
+    year += total // 12
+    month = (total % 12) + 1
+    return year, month
+
+
 def _next_recurrence_trigger(trigger_at: datetime, recurrence: dict[str, object]) -> datetime | None:
     freq = recurrence.get("freq")
     local_trigger = trigger_at.astimezone(VIENNA_TZ)
     target_time = local_trigger.time()
+    interval = _recurrence_interval(recurrence)
     if freq == "daily":
-        return _combine_local(local_trigger.date() + timedelta(days=1), target_time)
+        return _combine_local(local_trigger.date() + timedelta(days=interval), target_time)
     if freq == "weekdays":
         weekdays = {0, 1, 2, 3, 4}
     elif freq == "weekly":
@@ -1277,18 +1341,7 @@ def _next_recurrence_trigger(trigger_at: datetime, recurrence: dict[str, object]
     else:
         weekdays = set()
     if freq in {"weekly", "weekdays"}:
-        current_weekday = local_trigger.weekday()
-        candidates = []
-        for day in weekdays:
-            if 0 <= day <= 6:
-                delta = (day - current_weekday) % 7
-                if delta == 0:
-                    delta = 7
-                candidates.append(delta)
-        if not candidates:
-            return None
-        next_date = local_trigger.date() + timedelta(days=min(candidates))
-        return _combine_local(next_date, target_time)
+        return _next_weekday_with_interval(local_trigger, weekdays, interval)
     if freq == "monthly":
         bymonthday = recurrence.get("bymonthday")
         if isinstance(bymonthday, int) and bymonthday > 0:
@@ -1296,10 +1349,7 @@ def _next_recurrence_trigger(trigger_at: datetime, recurrence: dict[str, object]
         else:
             target_day = local_trigger.day
         year = local_trigger.year
-        month = local_trigger.month + 1
-        if month > 12:
-            month = 1
-            year += 1
+        year, month = _add_months(year, local_trigger.month, interval)
         last_day = calendar.monthrange(year, month)[1]
         target_day = min(target_day, last_day)
         return _combine_local(date(year, month, target_day), target_time)

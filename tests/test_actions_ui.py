@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import telegram
@@ -269,9 +269,10 @@ def test_callback_reminder_delete_disables_reminder(tmp_path, monkeypatch) -> No
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
 
+    now = datetime.now(tz=calendar_store.BOT_TZ)
     reminder = asyncio.run(
         calendar_store.add_reminder(
-            trigger_at=datetime(2026, 2, 5, 12, 0, tzinfo=calendar_store.BOT_TZ),
+            trigger_at=now + timedelta(hours=1),
             text="Ping",
             chat_id=10,
             user_id=1,
@@ -284,7 +285,7 @@ def test_callback_reminder_delete_disables_reminder(tmp_path, monkeypatch) -> No
     action = Action(
         id="utility_reminders.delete",
         label="Delete",
-        payload={"op": "reminder.delete", "reminder_id": reminder.id},
+        payload={"op": "reminder.delete_confirm", "reminder_id": reminder.id},
     )
     action_id = store.store_action(action=action, user_id=1, chat_id=10)
     update.callback_query = SimpleNamespace(data=f"a:{action_id}", answer=fake_answer)
@@ -297,8 +298,82 @@ def test_callback_reminder_delete_disables_reminder(tmp_path, monkeypatch) -> No
     result = captured["result"]
     assert result.status == "ok"
     assert result.intent == "utility_reminders.delete"
-    reminders = asyncio.run(calendar_store.list_reminders(datetime(2026, 2, 5, 11, 0, tzinfo=calendar_store.BOT_TZ), limit=10))
+    confirm_action = next(action for action in result.actions if action.payload.get("op") == "reminder.delete_confirmed")
+    confirm_id = store.store_action(action=confirm_action, user_id=1, chat_id=10)
+    update.callback_query = SimpleNamespace(data=f"a:{confirm_id}", answer=fake_answer)
+
+    asyncio.run(handlers.action_callback(update, context))
+
+    result = captured["result"]
+    assert result.status == "ok"
+    assert result.intent == "utility_reminders.delete"
+    reminders = asyncio.run(
+        calendar_store.list_reminders(datetime(2026, 2, 5, 11, 0, tzinfo=calendar_store.BOT_TZ), limit=10)
+    )
     assert all(item.id != reminder.id for item in reminders)
+
+
+def test_callback_reminder_snooze_updates_schedule(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    scheduled: dict[str, object] = {}
+
+    class DummyScheduler:
+        async def schedule_reminder(self, reminder):
+            scheduled["reminder_id"] = reminder.id
+            scheduled["trigger_at"] = reminder.trigger_at
+
+    async def fake_send_result(update, context, result, reply_markup=None):
+        captured["result"] = result
+
+    async def fake_guard_access(update, context, bucket="default"):
+        return True
+
+    async def fake_answer():
+        return None
+
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+
+    now = datetime.now(tz=calendar_store.BOT_TZ)
+    reminder = asyncio.run(
+        calendar_store.add_reminder(
+            trigger_at=now + timedelta(hours=1),
+            text="Ping",
+            chat_id=10,
+            user_id=1,
+        )
+    )
+
+    update = DummyUpdate()
+    context = DummyContext()
+    context.application.bot_data["reminder_scheduler"] = DummyScheduler()
+    context.application.bot_data["settings"] = SimpleNamespace(reminders_enabled=True)
+    store = context.application.bot_data["action_store"]
+    action = Action(
+        id="reminder_snooze",
+        label="Snooze",
+        payload={
+            "op": "reminder_snooze",
+            "reminder_id": reminder.id,
+            "minutes": 10,
+            "base_trigger_at": reminder.trigger_at.isoformat(),
+        },
+    )
+    action_id = store.store_action(action=action, user_id=1, chat_id=10)
+    update.callback_query = SimpleNamespace(data=f"a:{action_id}", answer=fake_answer)
+
+    monkeypatch.setattr(handlers, "send_result", fake_send_result)
+    monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
+
+    asyncio.run(handlers.action_callback(update, context))
+
+    result = captured["result"]
+    assert result.status == "ok"
+    assert result.intent == "utility_reminders.snooze"
+    updated = asyncio.run(calendar_store.get_reminder(reminder.id))
+    assert updated is not None
+    assert updated.trigger_at == reminder.trigger_at + timedelta(minutes=10)
+    assert scheduled["reminder_id"] == reminder.id
 
 
 def test_resume_prompt_restart_starts_reminder_wizard(tmp_path, monkeypatch) -> None:

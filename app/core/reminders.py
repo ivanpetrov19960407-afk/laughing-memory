@@ -125,7 +125,7 @@ class ReminderScheduler:
         for reminder in reminders:
             if not reminder.enabled:
                 continue
-            if reminder.sent_at is not None:
+            if reminder.sent_at is not None and reminder.recurrence is None:
                 continue
             trigger_at = reminder.trigger_at
             if trigger_at.tzinfo is None:
@@ -221,9 +221,8 @@ class ReminderScheduler:
 def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Action]:
     base_trigger = reminder.trigger_at.isoformat()
     snooze_options = [
-        (10, "⏸ Отложить 10 мин"),
-        (30, "⏸ +30 мин"),
-        (120, "⏸ +2 часа"),
+        (10, "⏸ Отложить на 10 минут"),
+        (60, "⏸ Отложить на 1 час"),
     ]
     actions: list[Action] = []
     for minutes, label in snooze_options:
@@ -243,14 +242,14 @@ def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Actio
         Action(
             id=f"reminder_reschedule:{reminder.id}",
             label="✏ Перенести",
-            payload={"op": "wizard_start", "wizard_id": "reminder.reschedule", "reminder_id": reminder.id},
+            payload={"op": "reminder_reschedule", "reminder_id": reminder.id, "base_trigger_at": base_trigger},
         )
     )
     actions.append(
         Action(
-            id=f"reminder_disable:{reminder.id}",
-            label="🗑 Отключить",
-            payload={"op": "reminder_disable", "reminder_id": reminder.id},
+            id="utility_reminders.delete",
+            label="🗑 Удалить",
+            payload={"op": "reminder.delete_confirm", "reminder_id": reminder.id},
         )
     )
     return actions

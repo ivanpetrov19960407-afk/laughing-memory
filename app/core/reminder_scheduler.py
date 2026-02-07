@@ -134,10 +134,8 @@ async def post_shutdown(application: Application) -> None:
 def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Action]:
     base_trigger = reminder.trigger_at.isoformat()
     snooze_options = [
-        (10, "⏸ Отложить 10 мин"),
-        (30, "⏸ Отложить 30 мин"),
-        (120, "⏸ Отложить 2 часа"),
-        (1440, "⏸ Отложить 1 день"),
+        (10, "⏸ Отложить на 10 минут"),
+        (60, "⏸ Отложить на 1 час"),
     ]
     actions: list[Action] = []
     for minutes, label in snooze_options:
@@ -164,7 +162,7 @@ def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Actio
         Action(
             id="utility_reminders.delete",
             label="🗑 Удалить",
-            payload={"op": "reminder.delete", "reminder_id": reminder.id},
+            payload={"op": "reminder.delete_confirm", "reminder_id": reminder.id},
         )
     )
     return actions
