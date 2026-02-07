@@ -47,6 +47,13 @@ class ReminderItem:
     last_triggered_at: datetime | None
 
 
+@dataclass(frozen=True)
+class ParsedEvent:
+    start_at: datetime
+    title: str
+    raw: str
+
+
 def _calendar_path() -> Path:
     return Path(os.getenv("CALENDAR_PATH", "data/calendar.json"))
 
@@ -1043,6 +1050,14 @@ def _contains_time_hint(value: str) -> bool:
 
 
 def _parse_time_fragment(raw: str, *, require_full: bool) -> tuple[time, str]:
+    special_match = re.match(r"^\s*(?:в\s+)?(полдень|полночь)\b", raw, re.IGNORECASE)
+    if special_match:
+        token = special_match.group(1).lower()
+        parsed_time = time(12, 0) if token == "полдень" else time(0, 0)
+        rest = raw[special_match.end() :].strip()
+        if require_full and rest:
+            raise ValueError("Формат времени: HH:MM")
+        return parsed_time, rest
     match = _TIME_PART_RE.match(raw)
     if not match:
         raise ValueError("Формат времени: HH:MM")
@@ -1116,6 +1131,18 @@ def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
                 raise ValueError("Формат времени: HH:MM")
             target_date = _next_weekday_date(current, weekday_value, parsed_time)
             return _combine_local(target_date, parsed_time)
+    date_match = re.match(r"^\s*(?P<day>\d{1,2})[./-](?P<month>\d{1,2})\s+(?P<rest>.+)$", raw)
+    if date_match:
+        day = int(date_match.group("day"))
+        month = int(date_match.group("month"))
+        parsed_time, remainder = _parse_time_fragment(date_match.group("rest"), require_full=True)
+        if remainder:
+            raise ValueError("Формат времени: HH:MM")
+        candidate_date = date(current.year, month, day)
+        candidate = _combine_local(candidate_date, parsed_time)
+        if candidate < current:
+            candidate = candidate.replace(year=current.year + 1)
+        return candidate
     for fmt in ("%d.%m %H:%M", "%d-%m %H:%M", "%d/%m %H:%M"):
         try:
             parsed = datetime.strptime(raw, fmt)
@@ -1129,15 +1156,20 @@ def parse_user_datetime(value: str, *, now: datetime | None = None) -> datetime:
 
 
 def parse_event_datetime(value: str, *, now: datetime | None = None) -> tuple[datetime, str]:
-    raw = value.strip()
+    parsed = parse_calendar_event_from_text(value, now=now, tz=VIENNA_TZ)
+    return parsed.start_at, parsed.title
+
+
+def parse_calendar_event_from_text(
+    text: str,
+    *,
+    now: datetime | None = None,
+    tz: ZoneInfo = VIENNA_TZ,
+) -> ParsedEvent:
+    raw = text.strip()
     if not raw:
         raise ValueError("Укажи дату и время")
-    try:
-        parsed = parse_local_datetime(raw)
-        return parsed, ""
-    except ValueError:
-        pass
-    current = (now or datetime.now(tz=VIENNA_TZ)).astimezone(VIENNA_TZ)
+    current = (now or datetime.now(tz=tz)).astimezone(tz)
     tokens = raw.split()
     error_with_time: ValueError | None = None
     last_error: ValueError | None = None
@@ -1151,7 +1183,7 @@ def parse_event_datetime(value: str, *, now: datetime | None = None) -> tuple[da
                 error_with_time = exc
             continue
         rest = " ".join(tokens[end:]).strip()
-        return parsed, rest
+        return ParsedEvent(start_at=parsed, title=rest, raw=raw)
     if error_with_time is not None:
         raise error_with_time
     if last_error is not None:
