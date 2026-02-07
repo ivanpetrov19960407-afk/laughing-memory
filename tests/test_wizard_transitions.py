@@ -4,7 +4,7 @@ import asyncio
 import time
 from datetime import datetime, timedelta, timezone
 
-from app.bot.wizard import WizardManager, WIZARD_CALENDAR_ADD
+from app.bot.wizard import STEP_CONFIRM, WizardManager, WIZARD_CALENDAR_ADD
 from app.storage.wizard_store import WizardStore, WizardState
 from app.core import calendar_store
 from app.core import tools_calendar_caldav
@@ -65,6 +65,57 @@ def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
 
     items = asyncio.run(calendar_store.list_items(None, None))
     assert any(item.title == "Врач" for item in items)
+
+
+def test_wizard_add_event_freeform_skips_title(tmp_path, monkeypatch) -> None:
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    monkeypatch.setenv("CALENDAR_BACKEND", "caldav")
+    monkeypatch.setenv("CALDAV_URL", "https://caldav.example.com")
+    monkeypatch.setenv("CALDAV_USERNAME", "user")
+    monkeypatch.setenv("CALDAV_PASSWORD", "pass")
+
+    async def fake_create_event(*args, **kwargs) -> tools_calendar_caldav.CreatedEvent:
+        return tools_calendar_caldav.CreatedEvent(uid="evt-2", href="https://caldav.example.com/e/2")
+
+    monkeypatch.setattr("app.core.tools_calendar_caldav.create_event", fake_create_event)
+    store = WizardStore(tmp_path / "wizards", timeout_seconds=600)
+    manager = WizardManager(store)
+
+    start = asyncio.run(
+        manager.handle_action(
+            user_id=3,
+            chat_id=30,
+            op="wizard_start",
+            payload={"wizard_id": WIZARD_CALENDAR_ADD},
+        )
+    )
+    assert start is not None
+
+    step_one = asyncio.run(manager.handle_text(user_id=3, chat_id=30, text="завтра 19:00 врач"))
+    assert step_one is not None
+    assert "врач" in step_one.text.lower()
+
+    state, _expired = store.load_state(user_id=3, chat_id=30)
+    assert state is not None
+    assert state.step == STEP_CONFIRM
+
+    items = asyncio.run(calendar_store.list_items(None, None))
+    assert not any(item.title == "врач" for item in items)
+
+    confirm = asyncio.run(
+        manager.handle_action(
+            user_id=3,
+            chat_id=30,
+            op="wizard_confirm",
+            payload={},
+        )
+    )
+    assert confirm is not None
+    assert confirm.status == "ok"
+
+    items = asyncio.run(calendar_store.list_items(None, None))
+    assert any(item.title.lower() == "врач" for item in items)
 
 
 def test_wizard_calendar_refuses_without_connection(tmp_path, monkeypatch) -> None:
