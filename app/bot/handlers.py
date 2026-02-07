@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import os
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -42,6 +43,7 @@ from app.infra.last_state_store import LastStateStore
 from app.infra.messaging import safe_edit_text, safe_send_text
 from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limiter import RateLimiter
+from app.infra.resilience import RetryPolicy, TimeoutConfig
 from app.infra.request_context import (
     RequestContext,
     add_trace,
@@ -54,6 +56,7 @@ from app.infra.request_context import (
     set_status,
     start_request,
 )
+from app.infra.version import resolve_app_version
 from app.infra.trace_store import TraceEntry, TraceStore
 from app.infra.storage import TaskStorage
 
@@ -1333,32 +1336,93 @@ async def _build_health_message(
     user_id: int | None = None,
 ) -> str:
     settings = context.application.bot_data["settings"]
-    rate_limiter = _get_rate_limiter(context)
+    request_context = get_request_context(context)
+    env_label = request_context.env if request_context else "prod"
     start_time = context.application.bot_data.get("start_time", time.monotonic())
     uptime = _format_uptime(start_time)
-    python_version = sys.version.split()[0]
-    telegram_version = telegram.__version__
-    modes = "-"
-    if user_id is not None:
-        orchestrator = _get_orchestrator(context)
-        dialog_memory = _get_dialog_memory(context)
-        facts_status = "on" if orchestrator.is_facts_only(user_id) else "off"
-        if dialog_memory is None:
-            context_status = "off"
-        else:
-            context_status = "on" if await dialog_memory.is_enabled(user_id) else "off"
-        reminders_status = "on" if settings.reminders_enabled else "off"
-        modes = f"facts={facts_status}, context={context_status}, reminders={reminders_status}"
+    orchestrator = _get_orchestrator(context)
+    version = resolve_app_version(orchestrator.config.get("system_metadata", {}))
+    timezone_label = calendar_store.BOT_TZ.key
+    caldav_status = "ok" if tools_calendar.is_caldav_configured(settings) else "error"
+    google_configured = bool(
+        settings.google_oauth_client_id and settings.google_oauth_client_secret and settings.public_base_url
+    )
+    google_partial = any(
+        [settings.google_oauth_client_id, settings.google_oauth_client_secret, settings.public_base_url]
+    )
+    if google_configured:
+        google_status = "ok"
+    elif google_partial:
+        google_status = "error"
+    else:
+        google_status = "disabled"
+    llm_status = "ok" if settings.openai_api_key or settings.perplexity_api_key else "error"
+    store = calendar_store.load_store()
+    reminders_count = len(store.get("reminders") or [])
+    memory_store = _get_memory_store(context)
+    memory_count = memory_store.count_entries() if memory_store else 0
+    trace_store = _get_trace_store(context)
+    trace_count = trace_store.count_entries() if trace_store else 0
+    breaker_registry = _get_circuit_breakers(context)
+    breaker_states = breaker_registry.snapshot() if breaker_registry else {}
+    breaker_label = ", ".join(f"{name}={state}" for name, state in breaker_states.items()) or "none"
     return (
         "Health:\n"
-        f"Uptime: {uptime}\n"
-        f"Rate limits: {rate_limiter.per_minute}/min, {rate_limiter.per_day}/day\n"
-        f"Python: {python_version}\n"
-        f"Telegram: {telegram_version}\n"
-        f"Orchestrator config: {settings.orchestrator_config_path}\n"
-        f"Rate limit cache: {rate_limiter.cache_size} users\n"
-        f"Modes: {modes}"
+        f"App: v{version}, uptime {uptime}, env {env_label}, tz {timezone_label}\n"
+        f"Integrations: CalDAV {caldav_status}, Google {google_status}, LLM {llm_status}\n"
+        f"Stores: reminders {reminders_count}, memory {memory_count}, trace {trace_count}\n"
+        f"Circuit breakers: {breaker_label}"
     )
+
+
+def _build_config_message(context: ContextTypes.DEFAULT_TYPE) -> str:
+    settings = context.application.bot_data["settings"]
+    timeouts = _get_timeouts(context) or TimeoutConfig()
+    retry_policy = _get_retry_policy(context) or RetryPolicy()
+    circuit_breakers = _get_circuit_breakers(context)
+    log_level = logging.getLevelName(logging.getLogger().getEffectiveLevel())
+    integrations = {
+        "caldav": bool(settings.caldav_url and settings.caldav_username and settings.caldav_password),
+        "google": bool(
+            settings.google_oauth_client_id
+            and settings.google_oauth_client_secret
+            and settings.public_base_url
+        ),
+        "openai": bool(settings.openai_api_key),
+        "perplexity": bool(settings.perplexity_api_key),
+        "web_search": bool(settings.feature_web_search),
+    }
+    breaker_config = circuit_breakers.config if circuit_breakers else None
+    breaker_line = "n/a"
+    if breaker_config:
+        breaker_line = (
+            f"failure_threshold={breaker_config.failure_threshold}, "
+            f"window_seconds={breaker_config.window_seconds}, "
+            f"cooldown_seconds={breaker_config.cooldown_seconds}"
+        )
+    storage_lines = [
+        f"db_path={settings.db_path}",
+        f"allowlist_path={settings.allowlist_path}",
+        f"dialog_memory_path={settings.dialog_memory_path}",
+        f"wizard_store_path={settings.wizard_store_path}",
+        f"google_tokens_path={settings.google_tokens_path}",
+    ]
+    lines = [
+        "Config:",
+        f"env={os.getenv('APP_ENV', 'prod')}",
+        f"calendar_backend={settings.calendar_backend}",
+        f"reminders_enabled={settings.reminders_enabled}",
+        f"enable_wizards={settings.enable_wizards}",
+        f"enable_menu={settings.enable_menu}",
+        f"strict_no_pseudo_sources={settings.strict_no_pseudo_sources}",
+        f"log_level={log_level}",
+        "integrations=" + ", ".join(f"{key}={'on' if value else 'off'}" for key, value in integrations.items()),
+        f"timeouts=tool:{timeouts.tool_call_seconds}s web:{timeouts.web_tool_call_seconds}s llm:{timeouts.llm_seconds}s ext:{timeouts.external_api_seconds}s",
+        f"retry=max_attempts={retry_policy.max_attempts} base_delay_ms={retry_policy.base_delay_ms} max_delay_ms={retry_policy.max_delay_ms} jitter_ms={retry_policy.jitter_ms}",
+        f"breaker={breaker_line}",
+        "storage=" + ", ".join(storage_lines),
+    ]
+    return "\n".join(lines)
 
 
 @_with_error_handling
@@ -2876,6 +2940,11 @@ async def _dispatch_command_payload(
         user_id = update.effective_user.id if update.effective_user else 0
         message = await _build_health_message(context, user_id=user_id)
         return ok(message, intent="menu.status", mode="local")
+    if normalized == "/config":
+        request_context = get_request_context(context)
+        if request_context is None or request_context.env != "dev":
+            return refused("Команда недоступна в prod.", intent="command.config", mode="local")
+        return ok(_build_config_message(context), intent="command.config", mode="local")
     if normalized == "/summary":
         return ok(
             "Summary: /summary <текст> или summary: <текст>.",
@@ -3947,9 +4016,43 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context, bucket="ui"):
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    result = _build_simple_result(
+    request_context = get_request_context(context)
+    actions: list[Action] = []
+    if request_context is not None and request_context.env == "dev":
+        actions.append(Action(id="debug.trace_last", label="Trace last", payload={"op": "trace_last"}))
+        actions.append(
+            Action(
+                id="debug.show_config",
+                label="Show config",
+                payload={"op": "run_command", "command": "/config", "args": ""},
+            )
+        )
+    result = ok(
         await _build_health_message(context, user_id=user_id),
         intent="command.health",
+        mode="local",
+        actions=actions,
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context, bucket="ui"):
+        return
+    request_context = get_request_context(context)
+    if request_context is None or request_context.env != "dev":
+        result = _build_simple_result(
+            "Команда недоступна в prod.",
+            intent="command.config",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    result = _build_simple_result(
+        _build_config_message(context),
+        intent="command.config",
         status="ok",
         mode="local",
     )
