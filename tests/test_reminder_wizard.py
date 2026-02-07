@@ -2,16 +2,40 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from app.bot import wizard
 from app.bot.wizard import WizardManager
 from app.core import calendar_store
+from app.core.reminders import ReminderScheduler
 from app.storage.wizard_store import WizardStore
 
 
 @dataclass
 class DummySettings:
     reminders_enabled: bool = True
+
+
+class DummyJob:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.removed = False
+
+    def schedule_removal(self) -> None:
+        self.removed = True
+
+
+class DummyJobQueue:
+    def __init__(self) -> None:
+        self.jobs: dict[str, list[DummyJob]] = {}
+
+    def run_once(self, callback, when, name: str, data: dict) -> DummyJob:
+        job = DummyJob(name=name)
+        self.jobs.setdefault(name, []).append(job)
+        return job
+
+    def get_jobs_by_name(self, name: str) -> list[DummyJob]:
+        return list(self.jobs.get(name, []))
 
 
 def test_reschedule_wizard_updates_trigger(tmp_path, monkeypatch) -> None:
@@ -65,6 +89,31 @@ def test_create_wizard_creates_reminder(tmp_path, monkeypatch) -> None:
     assert len(reminders) == 1
     assert reminders[0].text == "Позвонить маме"
     assert reminders[0].recurrence is None
+
+
+def test_calendar_add_schedules_reminder(tmp_path, monkeypatch) -> None:
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    store = WizardStore(tmp_path / "wizards")
+    job_queue = DummyJobQueue()
+    scheduler = ReminderScheduler(application=SimpleNamespace(job_queue=job_queue, bot=SimpleNamespace()))
+    manager = WizardManager(store, reminder_scheduler=scheduler, settings=DummySettings())
+
+    started = asyncio_run(
+        manager.handle_action(user_id=2, chat_id=3, op="wizard_start", payload={"wizard_id": wizard.WIZARD_CALENDAR_ADD})
+    )
+    assert started.status == "ok"
+    step1 = asyncio_run(manager.handle_text(user_id=2, chat_id=3, text="2026-02-05 12:30 Встреча"))
+    assert step1.status == "ok"
+    done = asyncio_run(manager.handle_action(user_id=2, chat_id=3, op="wizard_confirm", payload={}))
+    assert done.status == "ok"
+
+    reminders = asyncio_run(
+        calendar_store.list_reminders(datetime(2026, 2, 5, 12, 0, tzinfo=calendar_store.MOSCOW_TZ), limit=None)
+    )
+    assert len(reminders) == 1
+    assert reminders[0].trigger_at == datetime(2026, 2, 5, 12, 30, tzinfo=calendar_store.MOSCOW_TZ)
+    assert scheduler._job_name(reminders[0].id) in job_queue.jobs
 
 
 def test_resume_prompt_contains_restart_target(tmp_path, monkeypatch) -> None:

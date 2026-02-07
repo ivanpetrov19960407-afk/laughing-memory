@@ -290,6 +290,7 @@ class WizardManager:
             return refused("Дата повреждена, начни заново.", intent="wizard.calendar.confirm", mode="local")
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=calendar_store.BOT_TZ)
+        reminders_enabled = self._settings is None or bool(getattr(self._settings, "reminders_enabled", False))
         tool_result = await create_event(
             start_at=dt,
             title=title.strip(),
@@ -297,6 +298,8 @@ class WizardManager:
             user_id=user_id,
             request_id=None,
             intent="utility_calendar.add",
+            reminder_scheduler=self._reminder_scheduler,
+            reminders_enabled=reminders_enabled,
         )
         if tool_result.status != "ok":
             return replace(
@@ -404,7 +407,7 @@ class WizardManager:
         display_dt = reminder.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         LOGGER.info("Reminder created: reminder_id=%s user_id=%s trigger_at=%s", reminder.id, user_id, reminder.trigger_at.isoformat())
         return ok(
-            f"Ок, поставил на {display_dt} (Вильнюс).",
+            f"Ок, поставил на {display_dt} (МСК).",
             intent="utility_reminders.create",
             mode="local",
             actions=[
@@ -539,7 +542,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
         trigger = datetime.fromisoformat(trigger_raw) if isinstance(trigger_raw, str) else None
         display_dt = trigger.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M") if isinstance(trigger, datetime) else "неизвестно"
         return ok(
-            f"Создать напоминание: {title}\nКогда: {display_dt} (Вильнюс)?",
+            f"Создать напоминание: {title}\nКогда: {display_dt} (МСК)?",
             intent="wizard.reminder_create.confirm",
             mode="local",
             actions=_confirm_actions(),

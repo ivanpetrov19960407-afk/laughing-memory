@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from app.core import calendar_store, tools_calendar_caldav
 from app.core.calendar_backend import CalDAVCalendarBackend, LocalCalendarBackend
 from app.core.result import Action, OrchestratorResult, ensure_valid, ok, refused
+from app.core.reminders import ReminderScheduler
 
 LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +45,8 @@ async def create_event(
     user_id: int,
     request_id: str | None = None,
     intent: str = "utility_calendar.add",
+    reminder_scheduler: ReminderScheduler | None = None,
+    reminders_enabled: bool = True,
 ) -> OrchestratorResult:
     request_label = request_id or "-"
     LOGGER.info(
@@ -71,10 +74,17 @@ async def create_event(
                 user_id=user_id,
                 intent=intent,
                 caldav_error="missing_config",
+                reminder_scheduler=reminder_scheduler,
+                reminders_enabled=reminders_enabled,
             )
         try:
             backend = CalDAVCalendarBackend(config, chat_id=chat_id, user_id=user_id)
             created = await backend.create_event(title=title, start_dt=start_at, end_dt=end_at)
+            await _maybe_schedule_reminder(
+                created.event_id,
+                reminder_scheduler=reminder_scheduler,
+                reminders_enabled=reminders_enabled,
+            )
             return _build_create_result(
                 created,
                 start_at=start_at,
@@ -97,6 +107,8 @@ async def create_event(
                 user_id=user_id,
                 intent=intent,
                 caldav_error=_safe_caldav_error_label(exc),
+                reminder_scheduler=reminder_scheduler,
+                reminders_enabled=reminders_enabled,
             )
     try:
         backend = LocalCalendarBackend(chat_id=chat_id, user_id=user_id, reminders_enabled=False)
@@ -109,6 +121,11 @@ async def create_event(
             exc.__class__.__name__,
         )
         return ensure_valid(refused("Не удалось создать событие.", intent=intent, mode="tool", debug={"reason": "error"}))
+    await _maybe_schedule_reminder(
+        created.event_id,
+        reminder_scheduler=reminder_scheduler,
+        reminders_enabled=reminders_enabled,
+    )
     return _build_create_result(created, start_at=start_at, title=title, intent=intent, calendar_backend="local")
 
 
@@ -147,6 +164,8 @@ async def _create_event_local_fallback(
     user_id: int,
     intent: str,
     caldav_error: str,
+    reminder_scheduler: ReminderScheduler | None,
+    reminders_enabled: bool,
 ) -> OrchestratorResult:
     try:
         backend = LocalCalendarBackend(chat_id=chat_id, user_id=user_id, reminders_enabled=False)
@@ -158,6 +177,11 @@ async def _create_event_local_fallback(
             exc.__class__.__name__,
         )
         return ensure_valid(refused("Не удалось создать событие.", intent=intent, mode="tool", debug={"reason": "error"}))
+    await _maybe_schedule_reminder(
+        created.event_id,
+        reminder_scheduler=reminder_scheduler,
+        reminders_enabled=reminders_enabled,
+    )
     return _build_create_result(
         created,
         start_at=start_at,
@@ -166,6 +190,24 @@ async def _create_event_local_fallback(
         calendar_backend="local_fallback",
         caldav_error=caldav_error,
     )
+
+
+async def _maybe_schedule_reminder(
+    event_id: str,
+    *,
+    reminder_scheduler: ReminderScheduler | None,
+    reminders_enabled: bool,
+) -> None:
+    if not reminders_enabled:
+        return
+    if not isinstance(event_id, str) or not event_id:
+        return
+    event = await calendar_store.get_event(event_id)
+    if event is None:
+        return
+    reminder = await calendar_store.ensure_reminder_for_event(event, trigger_at=event.dt, enabled=True)
+    if reminder_scheduler is not None:
+        await reminder_scheduler.schedule_reminder(reminder)
 
 
 async def delete_event(

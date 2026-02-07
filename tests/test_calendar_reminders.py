@@ -125,7 +125,7 @@ def test_add_creates_reminder(calendar_path) -> None:
     assert any(rem.get("reminder_id") == reminder_id and rem.get("enabled") is True for rem in reminders)
 
 
-def test_calendar_command_add_does_not_create_reminder(calendar_path, monkeypatch) -> None:
+def test_calendar_command_add_schedules_reminder(calendar_path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     scheduled: dict[str, bool] = {"called": False}
     monkeypatch.setenv("CALENDAR_BACKEND", "caldav")
@@ -173,8 +173,27 @@ def test_calendar_command_add_does_not_create_reminder(calendar_path, monkeypatc
     reminders_after = len(after.get("reminders") or [])
 
     assert captured["result"].status == "ok"
-    assert reminders_after == reminders_before
-    assert scheduled["called"] is False
+    assert reminders_after == reminders_before + 1
+    assert scheduled["called"] is True
+
+
+def test_reminder_persists_and_restores(calendar_path) -> None:
+    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.MOSCOW_TZ)
+    future = now + timedelta(hours=2)
+    reminder = asyncio_run(
+        calendar_store.add_reminder(
+            trigger_at=future,
+            text="Follow up",
+            chat_id=1,
+            user_id=1,
+        )
+    )
+    assert reminder.trigger_at == future
+    job_queue = DummyJobQueue()
+    scheduler = ReminderScheduler(application=_build_application(job_queue))
+    restored = asyncio_run(scheduler.restore_all(now))
+    assert restored == 1
+    assert scheduler._job_name(reminder.id) in job_queue.jobs
 
 
 def test_del_cancels_reminder(calendar_path) -> None:

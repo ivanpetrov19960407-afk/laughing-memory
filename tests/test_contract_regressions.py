@@ -94,7 +94,7 @@ def test_actions_rendering_contract(monkeypatch) -> None:
 
 
 def test_datetime_timezone_vilnius() -> None:
-    assert str(calendar_store.BOT_TZ) == "Europe/Vilnius"
+    assert str(calendar_store.BOT_TZ) == "Europe/Moscow"
     parsed = calendar_store.parse_user_datetime("2026-02-05 10:00")
     assert parsed.tzinfo is not None
     assert parsed.tzinfo == calendar_store.BOT_TZ
