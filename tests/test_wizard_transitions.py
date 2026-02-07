@@ -67,6 +67,53 @@ def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
     assert any(item.title == "Врач" for item in items)
 
 
+def test_wizard_add_event_one_line_natural_ru(tmp_path, monkeypatch) -> None:
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    monkeypatch.setenv("CALENDAR_BACKEND", "caldav")
+    monkeypatch.setenv("CALDAV_URL", "https://caldav.example.com")
+    monkeypatch.setenv("CALDAV_USERNAME", "user")
+    monkeypatch.setenv("CALDAV_PASSWORD", "pass")
+
+    async def fake_create_event(*args, **kwargs) -> tools_calendar_caldav.CreatedEvent:
+        return tools_calendar_caldav.CreatedEvent(uid="evt-2", href="https://caldav.example.com/e/2")
+
+    monkeypatch.setattr("app.core.tools_calendar_caldav.create_event", fake_create_event)
+
+    fixed_now = datetime(2026, 2, 7, 10, 0, tzinfo=calendar_store.BOT_TZ)
+    monkeypatch.setattr(calendar_store, "now_local", lambda *, tz=None: fixed_now)
+
+    store = WizardStore(tmp_path / "wizards", timeout_seconds=600)
+    manager = WizardManager(store)
+
+    start = asyncio.run(
+        manager.handle_action(
+            user_id=1,
+            chat_id=10,
+            op="wizard_start",
+            payload={"wizard_id": WIZARD_CALENDAR_ADD},
+        )
+    )
+    assert start is not None
+
+    step = asyncio.run(manager.handle_text(user_id=1, chat_id=10, text="завтра 19:00 врач"))
+    assert step is not None
+    assert step.status == "ok"
+    assert "19:00" in step.text
+    assert "врач" in step.text.lower()
+
+    # Before confirm: event must NOT be created.
+    items_before = asyncio.run(calendar_store.list_items(None, None))
+    assert all(item.title.lower() != "врач" for item in items_before)
+
+    done = asyncio.run(manager.handle_action(user_id=1, chat_id=10, op="wizard_confirm", payload={}))
+    assert done is not None
+    assert done.status == "ok"
+
+    items_after = asyncio.run(calendar_store.list_items(None, None))
+    assert any(item.title.lower() == "врач" for item in items_after)
+
+
 def test_wizard_calendar_refuses_without_connection(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
