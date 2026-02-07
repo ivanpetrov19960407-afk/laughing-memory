@@ -87,3 +87,53 @@ def test_parse_event_datetime_evening_phrase() -> None:
     assert parsed.tzinfo == calendar_store.VIENNA_TZ
     assert (parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute) == (2026, 2, 5, 19, 0)
     assert title == "кино"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected", "title"),
+    [
+        ("завтра в 7 вечера созвон с Пашей", (2026, 2, 6, 19, 0), "созвон с Пашей"),
+        ("в понедельник 9:00 стоматолог", (2026, 2, 9, 9, 0), "стоматолог"),
+        ("25.12 в полдень обед с командой", (2026, 12, 25, 12, 0), "обед с командой"),
+        ("через 2 часа встреча", (2026, 2, 5, 12, 0), "встреча"),
+    ],
+)
+def test_parse_calendar_event_from_text(
+    value: str,
+    expected: tuple[int, int, int, int, int],
+    title: str,
+) -> None:
+    base = calendar_store.parse_local_datetime("2026-02-05 10:00")
+    parsed = calendar_store.parse_calendar_event_from_text(value, now=base, tz=calendar_store.VIENNA_TZ)
+    assert parsed.start_at.tzinfo == calendar_store.VIENNA_TZ
+    assert (
+        parsed.start_at.year,
+        parsed.start_at.month,
+        parsed.start_at.day,
+        parsed.start_at.hour,
+        parsed.start_at.minute,
+    ) == expected
+    assert parsed.title == title
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2026-02-10 13:30", (2026, 2, 10, 13, 30)),
+        ("10.02.2026 13:30", (2026, 2, 10, 13, 30)),
+    ],
+)
+def test_parse_calendar_event_from_text_strict_formats(
+    value: str,
+    expected: tuple[int, int, int, int, int],
+) -> None:
+    parsed = calendar_store.parse_calendar_event_from_text(value, tz=calendar_store.VIENNA_TZ)
+    assert parsed.start_at.tzinfo == calendar_store.VIENNA_TZ
+    assert (
+        parsed.start_at.year,
+        parsed.start_at.month,
+        parsed.start_at.day,
+        parsed.start_at.hour,
+        parsed.start_at.minute,
+    ) == expected
+    assert parsed.title == ""

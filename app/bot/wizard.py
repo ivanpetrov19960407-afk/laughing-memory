@@ -221,15 +221,17 @@ class WizardManager:
     ) -> OrchestratorResult:
         if state.step == STEP_AWAIT_DATETIME:
             try:
-                dt, extracted_title = calendar_store.parse_event_datetime(text)
+                parsed = calendar_store.parse_calendar_event_from_text(text)
             except ValueError as exc:
                 return refused(
-                    f"{exc}. Пример: 2026-02-05 18:30, завтра 19:00 врач, через 2 часа тренировка или в пятницу 10:15 встреча",
+                    f"{exc}. Пример: 2026-02-05 18:30, сегодня 18:30, через 10 минут, "
+                    "завтра в 7 вечера созвон или в пятницу 10:15 встреча",
                     intent="wizard.calendar.datetime",
                     mode="local",
                     actions=_step_actions(),
                 )
-            title = extracted_title.strip()
+            dt = parsed.start_at
+            title = parsed.title.strip()
             if title:
                 updated = _touch_state(state, step=STEP_CONFIRM, data={"dt": dt.isoformat(), "title": title})
                 self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
