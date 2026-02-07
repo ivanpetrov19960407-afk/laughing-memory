@@ -176,6 +176,7 @@ class Orchestrator:
         user_id = int(user_context.get("user_id") or 0)
         dialog_context = user_context.get("dialog_context")
         dialog_message_count = user_context.get("dialog_message_count")
+        memory_context = user_context.get("memory_context")
         request_id = user_context.get("request_id")
         request_context = request_context or user_context.get("request_context")
         start_time = time.monotonic()
@@ -236,6 +237,7 @@ class Orchestrator:
                 mode="ask",
                 dialog_context=dialog_context if isinstance(dialog_context, str) else None,
                 dialog_message_count=dialog_message_count if isinstance(dialog_message_count, int) else None,
+                memory_context=memory_context if isinstance(memory_context, str) else None,
                 request_id=request_id if isinstance(request_id, str) else None,
                 request_context=request_context,
             )
@@ -264,6 +266,7 @@ class Orchestrator:
             mode="ask",
             dialog_context=dialog_context if isinstance(dialog_context, str) else None,
             dialog_message_count=dialog_message_count if isinstance(dialog_message_count, int) else None,
+            memory_context=memory_context if isinstance(memory_context, str) else None,
             request_id=request_id if isinstance(request_id, str) else None,
             request_context=request_context,
         )
@@ -414,6 +417,7 @@ class Orchestrator:
         system_prompt: str | None = None,
         dialog_context: str | None = None,
         dialog_message_count: int | None = None,
+        memory_context: str | None = None,
         request_id: str | None = None,
         request_context: RequestContext | None = None,
     ) -> TaskExecutionResult:
@@ -424,6 +428,7 @@ class Orchestrator:
             system_prompt=system_prompt,
             dialog_context=dialog_context,
             dialog_message_count=dialog_message_count,
+            memory_context=memory_context,
             request_id=request_id,
             request_context=request_context,
         )
@@ -444,6 +449,7 @@ class Orchestrator:
         system_prompt: str | None = None,
         dialog_context: str | None = None,
         dialog_message_count: int | None = None,
+        memory_context: str | None = None,
         request_id: str | None = None,
         request_context: RequestContext | None = None,
     ) -> tuple[TaskExecutionResult, list[str]]:
@@ -517,7 +523,10 @@ class Orchestrator:
                         messages.append({"role": "user", "content": record["payload"]})
                         messages.append({"role": "assistant", "content": record["result"]})
                 combined_prompt = request_prompt
-                context_text = dialog_context.strip() if isinstance(dialog_context, str) else ""
+                memory_text = memory_context.strip() if isinstance(memory_context, str) else ""
+                dialog_text = dialog_context.strip() if isinstance(dialog_context, str) else ""
+                context_blocks = [block for block in [memory_text, dialog_text] if block]
+                context_text = "\n\n".join(context_blocks)
                 if context_text:
                     combined_prompt = f"{context_text}\n\n{request_prompt}"
                     count_messages = dialog_message_count if isinstance(dialog_message_count, int) else None

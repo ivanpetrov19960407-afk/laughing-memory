@@ -20,6 +20,7 @@ from app.bot.actions import ActionStore, StoredAction, build_inline_keyboard, pa
 from app.core import calendar_store, tools_calendar
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMemory, DialogMessage
+from app.core.memory_store import MemoryStore, build_llm_context
 from app.core.orchestrator import Orchestrator
 from app.core.result import (
     Action,
@@ -86,6 +87,13 @@ def _get_dialog_memory(context: ContextTypes.DEFAULT_TYPE) -> DialogMemory | Non
     return context.application.bot_data.get("dialog_memory")
 
 
+def _get_memory_store(context: ContextTypes.DEFAULT_TYPE) -> MemoryStore | None:
+    store = context.application.bot_data.get("memory_store")
+    if isinstance(store, MemoryStore):
+        return store
+    return None
+
+
 def _get_openai_client(context: ContextTypes.DEFAULT_TYPE) -> OpenAIClient | None:
     return context.application.bot_data.get("openai_client")
 
@@ -131,6 +139,14 @@ def _get_trace_store(context: ContextTypes.DEFAULT_TYPE) -> TraceStore | None:
     if isinstance(store, TraceStore):
         return store
     return None
+
+
+def _build_memory_context(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    request_context = get_request_context(context)
+    memory_store = _get_memory_store(context)
+    if request_context is None or memory_store is None:
+        return None
+    return build_llm_context(request_context, memory_store, limit=10)
 
 
 def _wizards_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -284,6 +300,33 @@ def _record_trace_summary(context: ContextTypes.DEFAULT_TYPE, request_context: R
     )
 
 
+def _record_user_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    request_context = get_request_context(context)
+    if request_context is None:
+        return
+    memory_store = _get_memory_store(context)
+    if memory_store is None:
+        return
+    chat = update.effective_chat
+    if chat is None or getattr(chat, "type", "private") != "private":
+        return
+    message = update.effective_message
+    text = ""
+    if message is not None:
+        text = message.text or message.caption or ""
+    if not text:
+        return
+    memory_store.add(
+        chat_id=int(request_context.chat_id or 0),
+        user_id=int(request_context.user_id or 0),
+        role="user",
+        kind="message",
+        content=text,
+        correlation_id=request_context.correlation_id,
+        env=request_context.env,
+    )
+
+
 def _with_error_handling(
     handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]],
 ) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]:
@@ -301,6 +344,7 @@ def _with_error_handling(
             message_id=request_context.message_id,
             text=request_context.input_text,
         )
+        _record_user_memory(update, context)
         try:
             await _log_route(update, context, handler.__name__)
             await handler(update, context)
@@ -550,6 +594,9 @@ def _build_user_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> d
     if request_context:
         payload["request_id"] = request_context.correlation_id
         payload["request_context"] = request_context
+    memory_context = _build_memory_context(context)
+    if memory_context:
+        payload["memory_context"] = memory_context
     return payload
 
 
@@ -678,6 +725,7 @@ def _build_user_context_with_dialog(
     *,
     dialog_context: str | None,
     dialog_message_count: int,
+    memory_context: str | None,
     request_id: str | None,
     request_context: RequestContext | None,
 ) -> dict[str, object]:
@@ -686,6 +734,8 @@ def _build_user_context_with_dialog(
     if dialog_context:
         payload["dialog_context"] = dialog_context
         payload["dialog_message_count"] = dialog_message_count
+    if memory_context:
+        payload["memory_context"] = memory_context
     if request_id:
         payload["request_id"] = request_id
     if request_context:
@@ -963,6 +1013,21 @@ async def send_result(
             LOGGER.warning("send_result skipped duplicate: request_id=%s intent=%s", request_id, public_result.intent)
             return
         context.chat_data[sent_key] = True
+    memory_store = _get_memory_store(context)
+    if memory_store and user_id and chat_id:
+        chat = update.effective_chat
+        if chat is not None and getattr(chat, "type", "private") == "private":
+            memory_store.add(
+                chat_id=chat_id,
+                user_id=user_id,
+                role="assistant",
+                kind="result",
+                content=public_result.text,
+                intent=public_result.intent,
+                status=public_result.status,
+                correlation_id=request_id,
+                env=request_context.env if request_context else "prod",
+            )
     _log_orchestrator_result(user_id, public_result, request_context=request_context)
     guarded_text = public_result.text
     if _strict_no_pseudo_sources(context):
@@ -1324,6 +1389,7 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     request_context = get_request_context(context)
     request_id = request_context.correlation_id if request_context else None
+    memory_context = _build_memory_context(context)
     try:
         result = await orchestrator.handle(
             f"/ask {prompt}",
@@ -1331,6 +1397,7 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 update,
                 dialog_context=dialog_context,
                 dialog_message_count=dialog_count,
+                memory_context=memory_context,
                 request_id=request_id,
                 request_context=request_context,
             ),
@@ -1506,6 +1573,79 @@ async def context_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     result = _build_simple_result(
         f"Контекст {status}. user_id={user_id} chat_id={chat_id}. Сообщений в истории: {count}.",
         intent="command.context_status",
+        status="ok",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    request_context = get_request_context(context)
+    if request_context is None or request_context.env != "dev":
+        result = _build_simple_result(
+            "Команда недоступна в prod.",
+            intent="command.memory",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    memory_store = _get_memory_store(context)
+    if memory_store is None:
+        result = _build_simple_result(
+            "Память не настроена.",
+            intent="command.memory",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    chat = update.effective_chat
+    if chat is None or getattr(chat, "type", "private") != "private":
+        result = _build_simple_result(
+            "Команда доступна только в личном чате.",
+            intent="command.memory",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    if context.args and context.args[0].strip().lower() == "clear":
+        memory_store.clear(chat_id=chat_id, user_id=user_id)
+        result = _build_simple_result(
+            "Память очищена.",
+            intent="command.memory",
+            status="ok",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    items = memory_store.get_recent(chat_id=chat_id, user_id=user_id, limit=10)
+    if not items:
+        result = _build_simple_result(
+            "Память пуста.",
+            intent="command.memory",
+            status="ok",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    lines = ["Последние записи памяти:"]
+    for item in items:
+        ts_label = item.ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        preview = item.content.replace("\n", " ").strip()
+        if len(preview) > 80:
+            preview = preview[:80].rstrip() + "…"
+        intent = item.intent or "-"
+        lines.append(f"- {ts_label} | {item.role}/{item.kind} | {intent} | {preview}")
+    result = _build_simple_result(
+        "\n".join(lines),
+        intent="command.memory",
         status="ok",
         mode="local",
     )
@@ -3311,6 +3451,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     request_context = get_request_context(context)
     request_id = request_context.correlation_id if request_context else None
+    memory_context = _build_memory_context(context)
     try:
         result = await orchestrator.handle(
             prompt,
@@ -3318,6 +3459,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 update,
                 dialog_context=dialog_context,
                 dialog_message_count=dialog_count,
+                memory_context=memory_context,
                 request_id=request_id,
                 request_context=request_context,
             ),
