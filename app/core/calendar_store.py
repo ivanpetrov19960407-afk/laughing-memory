@@ -915,13 +915,15 @@ def parse_event_datetime(value: str, *, now: datetime | None = None) -> tuple[da
     
     # Pattern: "через N минут/часов <title>"
     if lowered.startswith("через"):
-        match = re.match(r"через\s+(.+?)(?:\s+(минут|минуты|мин|м|час|часа|часов|ч))(\s+(.+))?", lowered)
+        # Match: через <number> <unit> <optional title>
+        match = re.match(r"через\s+(\d+)\s*(минут|минуты|мин|м|час|часа|часов|ч)\b\s*(.*)", lowered)
         if match:
-            # Try parsing the datetime part
-            datetime_part = match.group(0).rsplit(None, 1)[0] if match.group(4) else match.group(0)
-            title_part = match.group(4).strip() if match.group(4) else ""
+            number = match.group(1)
+            unit = match.group(2)
+            title_part = match.group(3).strip()
+            datetime_str = f"через {number} {unit}"
             try:
-                dt = parse_user_datetime(datetime_part, now=current)
+                dt = parse_user_datetime(datetime_str, now=current)
                 return (dt, title_part)
             except ValueError:
                 pass

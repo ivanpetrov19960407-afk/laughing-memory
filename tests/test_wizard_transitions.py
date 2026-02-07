@@ -34,7 +34,7 @@ def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
         )
     )
     assert start is not None
-    assert "YYYY-MM-DD" in start.text
+    assert "завтра" in start.text.lower() or "классический формат" in start.text.lower()
 
     invalid = asyncio.run(manager.handle_text(user_id=1, chat_id=10, text="wrong"))
     assert invalid is not None
