@@ -358,7 +358,26 @@ class WizardManager:
                     mode="local",
                     actions=_step_actions(),
                 )
-            updated = _touch_state(state, step=STEP_CONFIRM, data={"trigger_at": dt.isoformat()})
+            updated = _touch_state(state, step=STEP_AWAIT_RECURRENCE, data={"trigger_at": dt.isoformat()})
+            self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+            return ok(
+                "Нужен повтор? Напиши: none/daily/weekdays/weekly:1,3,5/monthly:15.\n"
+                "Можно указать интервал: daily/2, weekdays/2, weekly:1,3/2, monthly:15/2.",
+                intent="wizard.reminder_create.recurrence",
+                mode="local",
+                actions=_step_actions(),
+            )
+        if state.step == STEP_AWAIT_RECURRENCE:
+            try:
+                recurrence = _parse_recurrence_input(text)
+            except ValueError as exc:
+                return refused(
+                    f"{exc}. Пример: daily, weekdays/2, weekly:1,3/2, monthly:15.",
+                    intent="wizard.reminder_create.recurrence",
+                    mode="local",
+                    actions=_step_actions(),
+                )
+            updated = _touch_state(state, step=STEP_CONFIRM, data={"recurrence": recurrence})
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return _render_prompt(updated)
         if state.step == STEP_CONFIRM:
@@ -380,10 +399,14 @@ class WizardManager:
             return _render_prompt(updated)
         if op != "wizard_confirm":
             return refused("Действие не поддерживается.", intent="wizard.reminder_create.action", mode="local")
+        if state.step == STEP_AWAIT_RECURRENCE:
+            state = _touch_state(state, step=STEP_CONFIRM, data={"recurrence": None})
+            self._store.save_state(user_id=user_id, chat_id=chat_id, state=state)
         if state.step != STEP_CONFIRM:
             return refused("Сначала заполни данные.", intent="wizard.reminder_create.confirm", mode="local")
         title = state.data.get("title")
         trigger_value = state.data.get("trigger_at")
+        recurrence_value = state.data.get("recurrence")
         if not isinstance(title, str) or not isinstance(trigger_value, str):
             return refused("Не хватает данных для создания напоминания.", intent="wizard.reminder_create.confirm", mode="local")
         try:
@@ -392,13 +415,14 @@ class WizardManager:
             return refused("Дата повреждена, начни заново.", intent="wizard.reminder_create.confirm", mode="local")
         if trigger_at.tzinfo is None:
             trigger_at = trigger_at.replace(tzinfo=calendar_store.BOT_TZ)
+        recurrence = recurrence_value if isinstance(recurrence_value, dict) else None
         try:
             reminder = await calendar_store.add_reminder(
                 trigger_at=trigger_at,
                 text=title.strip(),
                 chat_id=chat_id,
                 user_id=user_id,
-                recurrence=None,
+                recurrence=recurrence,
                 enabled=True,
             )
         except Exception:
@@ -540,13 +564,23 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
             mode="local",
             actions=_step_actions(),
         )
+    if state.wizard_id == WIZARD_REMINDER_CREATE and state.step == STEP_AWAIT_RECURRENCE:
+        return ok(
+            "Нужен повтор? Напиши: none/daily/weekdays/weekly:1,3,5/monthly:15.\n"
+            "Интервал: daily/2, weekdays/2, weekly:1,3/2, monthly:15/2.",
+            intent="wizard.reminder_create.recurrence",
+            mode="local",
+            actions=_step_actions(),
+        )
     if state.wizard_id == WIZARD_REMINDER_CREATE and state.step == STEP_CONFIRM:
         title = state.data.get("title") if isinstance(state.data.get("title"), str) else "без текста"
         trigger_raw = state.data.get("trigger_at")
         trigger = datetime.fromisoformat(trigger_raw) if isinstance(trigger_raw, str) else None
+        recurrence_value = state.data.get("recurrence")
+        recurrence = recurrence_value if isinstance(recurrence_value, dict) else None
         display_dt = trigger.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M") if isinstance(trigger, datetime) else "неизвестно"
         return ok(
-            f"Создать напоминание: {title}\nКогда: {display_dt} (МСК)?",
+            f"Создать напоминание: {title}\nКогда: {display_dt} (МСК)\nПовтор: {_recurrence_label(recurrence)}?",
             intent="wizard.reminder_create.confirm",
             mode="local",
             actions=_confirm_actions(),
@@ -626,53 +660,102 @@ def _parse_recurrence_input(raw: str) -> dict[str, object] | None:
     value = raw.strip().lower()
     if value in {"", "none", "нет", "no"}:
         return None
-    if value == "daily":
-        return {"freq": "daily"}
-    if value == "weekdays":
-        return {"freq": "weekdays"}
-    if value.startswith("weekly"):
-        if ":" not in value:
-            return {"freq": "weekly", "byweekday": [0]}
-        _, days = value.split(":", 1)
-        values = []
-        for part in days.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            try:
-                day = int(part)
-            except ValueError as exc:
-                raise ValueError("weekly: укажи дни 0..6 через запятую") from exc
-            if day < 0 or day > 6:
-                raise ValueError("weekly: укажи дни 0..6")
-            values.append(day)
-        if not values:
-            raise ValueError("weekly: укажи минимум один день 0..6")
-        return {"freq": "weekly", "byweekday": sorted(set(values))}
-    if value.startswith("monthly"):
-        if ":" not in value:
+    base_value, interval = _split_recurrence_interval(value)
+    if base_value == "daily":
+        recurrence: dict[str, object] = {"freq": "daily"}
+        if interval:
+            recurrence["interval"] = interval
+        return recurrence
+    if base_value == "weekdays":
+        recurrence = {"freq": "weekdays"}
+        if interval:
+            recurrence["interval"] = interval
+        return recurrence
+    if base_value.startswith("weekly"):
+        if ":" not in base_value:
+            recurrence = {"freq": "weekly", "byweekday": [0]}
+        else:
+            _, days = base_value.split(":", 1)
+            values = []
+            for part in days.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    day = int(part)
+                except ValueError as exc:
+                    raise ValueError("weekly: укажи дни 0..6 через запятую") from exc
+                if day < 0 or day > 6:
+                    raise ValueError("weekly: укажи дни 0..6")
+                values.append(day)
+            if not values:
+                raise ValueError("weekly: укажи минимум один день 0..6")
+            recurrence = {"freq": "weekly", "byweekday": sorted(set(values))}
+        if interval:
+            recurrence["interval"] = interval
+        return recurrence
+    if base_value.startswith("monthly"):
+        if ":" not in base_value:
             raise ValueError("monthly: укажи число месяца, например monthly:15")
-        _, day_raw = value.split(":", 1)
+        _, day_raw = base_value.split(":", 1)
         try:
             day = int(day_raw.strip())
         except ValueError as exc:
             raise ValueError("monthly: число 1..31") from exc
         if day < 1 or day > 31:
             raise ValueError("monthly: число 1..31")
-        return {"freq": "monthly", "bymonthday": day}
+        recurrence = {"freq": "monthly", "bymonthday": day}
+        if interval:
+            recurrence["interval"] = interval
+        return recurrence
     raise ValueError("Повтор: none/daily/weekdays/weekly:1,3,5/monthly:15")
+
+
+def _split_recurrence_interval(value: str) -> tuple[str, int | None]:
+    interval: int | None = None
+    base = value
+    if "/" in value:
+        base, interval_raw = value.split("/", 1)
+    elif value.startswith(("daily:", "weekdays:")):
+        base, interval_raw = value.split(":", 1)
+    else:
+        interval_raw = ""
+    if interval_raw:
+        try:
+            interval = int(interval_raw.strip())
+        except ValueError as exc:
+            raise ValueError("Интервал: укажи целое число") from exc
+        if interval < 1:
+            raise ValueError("Интервал должен быть >= 1")
+    return base, interval
 
 
 def _recurrence_label(recurrence: dict[str, object] | None) -> str:
     if not recurrence:
         return "без повтора"
     freq = recurrence.get("freq")
+    interval = recurrence.get("interval")
+    interval_value = interval if isinstance(interval, int) and interval > 1 else None
     if freq == "weekly":
         days = recurrence.get("byweekday")
         if isinstance(days, list):
-            return f"еженедельно ({','.join(str(x) for x in days)})"
+            days_label = ",".join(str(x) for x in days)
+            if interval_value:
+                return f"каждые {interval_value} недель ({days_label})"
+            return f"еженедельно ({days_label})"
     if freq == "monthly":
-        return f"ежемесячно ({recurrence.get('bymonthday')})"
+        day_label = recurrence.get("bymonthday")
+        if interval_value:
+            return f"каждые {interval_value} месяцев ({day_label})"
+        return f"ежемесячно ({day_label})"
+    if freq == "weekdays":
+        if interval_value:
+            return f"по будням (каждые {interval_value} недель)"
+        return "по будням"
+    if freq == "daily":
+        if interval_value:
+            return f"каждые {interval_value} дней"
+        return "ежедневно"
     if isinstance(freq, str):
         return freq
     return "без повтора"

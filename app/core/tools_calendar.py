@@ -1363,49 +1363,26 @@ def _calendar_list_actions(event_ids: list[str], event_titles: list[str] | None 
 def _reminder_list_actions(items: list[calendar_store.ReminderItem], limit: int) -> list[Action]:
     actions = [
         Action(id="utility_reminders.create", label="➕ Создать", payload={"op": "reminder.create"}),
-        Action(id="utility_reminders.list", label="🔄 Обновить", payload={"op": "reminder.list"}),
+        Action(id="utility_reminders.list", label="🔄 Обновить", payload={"op": "reminder.list", "limit": limit}),
         Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}),
     ]
     return actions
 
 
 def _reminder_item_actions(item: calendar_store.ReminderItem) -> list[Action]:
-    actions: list[Action] = []
     label = f"🗑 Удалить: {_short_label(item.text)}"
-    actions.append(
+    return [
         Action(
             id="utility_reminders.delete",
             label=label,
-            payload={"op": "reminder.delete", "reminder_id": item.id},
-        )
-    )
-    actions.append(
-        Action(
-            id=f"reminder_snooze:{item.id}:10",
-            label="⏸ Отложить на 10 минут",
-            payload={
-                "op": "reminder_snooze",
-                "reminder_id": item.id,
-                "minutes": 10,
-                "base_trigger_at": item.trigger_at.isoformat(),
-            },
-        )
-    )
-    actions.append(
+            payload={"op": "reminder.delete_confirm", "reminder_id": item.id},
+        ),
         Action(
             id=f"reminder_reschedule:{item.id}",
             label="✏ Перенести",
             payload={"op": "reminder_reschedule", "reminder_id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
-        )
-    )
-    actions.append(
-        Action(
-            id=f"reminder_disable:{item.id}",
-            label="🗑 Отключить",
-            payload={"op": "reminder_disable", "reminder_id": item.id},
-        )
-    )
-    return actions
+        ),
+    ]
 
 
 def _short_label(value: str, limit: int = 24) -> str:

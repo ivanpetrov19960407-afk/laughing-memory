@@ -168,7 +168,9 @@ def test_list_reminders_includes_delete_actions(tmp_path, monkeypatch) -> None:
 
     assert result.status == "ok"
     assert any(action.id == "utility_reminders.delete" for action in result.actions)
-    assert any(action.payload.get("op") == "reminder.delete" and action.payload.get("reminder_id") for action in result.actions)
+    assert any(
+        action.payload.get("op") == "reminder.delete_confirm" and action.payload.get("reminder_id") for action in result.actions
+    )
 
 
 def test_calendar_tool_fallbacks_to_local_on_caldav_error(tmp_path, monkeypatch) -> None:

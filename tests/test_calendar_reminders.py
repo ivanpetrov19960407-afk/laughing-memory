@@ -279,6 +279,122 @@ def test_recurrence_creates_next_trigger(calendar_path) -> None:
     assert next_item.trigger_at == expected
 
 
+def test_recurrence_weekdays_next_trigger(calendar_path) -> None:
+    now = datetime(2026, 2, 6, 10, 0, tzinfo=calendar_store.MOSCOW_TZ)
+    store = {
+        "events": [
+            {
+                "event_id": "event2",
+                "dt_start": now.isoformat(),
+                "text": "Weekdays",
+                "created_at": now.isoformat(),
+                "chat_id": 1,
+                "user_id": 1,
+            }
+        ],
+        "reminders": [
+            {
+                "reminder_id": "rem2",
+                "event_id": "event2",
+                "user_id": 1,
+                "chat_id": 1,
+                "trigger_at": now.isoformat(),
+                "text": "Weekdays",
+                "enabled": True,
+                "sent_at": None,
+                "status": "active",
+                "recurrence": {"freq": "weekdays"},
+                "last_triggered_at": None,
+            }
+        ],
+        "updated_at": now.isoformat(),
+    }
+    _write_store(store)
+    next_item = asyncio_run(calendar_store.mark_reminder_sent("rem2", now, missed=False))
+    assert next_item is not None
+    expected = datetime(2026, 2, 9, 10, 0, tzinfo=calendar_store.MOSCOW_TZ)
+    assert next_item.trigger_at == expected
+
+
+def test_recurrence_weekly_next_trigger(calendar_path) -> None:
+    now = datetime(2026, 2, 2, 9, 0, tzinfo=calendar_store.MOSCOW_TZ)
+    store = {
+        "events": [
+            {
+                "event_id": "event3",
+                "dt_start": now.isoformat(),
+                "text": "Weekly",
+                "created_at": now.isoformat(),
+                "chat_id": 1,
+                "user_id": 1,
+            }
+        ],
+        "reminders": [
+            {
+                "reminder_id": "rem3",
+                "event_id": "event3",
+                "user_id": 1,
+                "chat_id": 1,
+                "trigger_at": now.isoformat(),
+                "text": "Weekly",
+                "enabled": True,
+                "sent_at": None,
+                "status": "active",
+                "recurrence": {"freq": "weekly", "byweekday": [2]},
+                "last_triggered_at": None,
+            }
+        ],
+        "updated_at": now.isoformat(),
+    }
+    _write_store(store)
+    next_item = asyncio_run(calendar_store.mark_reminder_sent("rem3", now, missed=False))
+    assert next_item is not None
+    expected = datetime(2026, 2, 4, 9, 0, tzinfo=calendar_store.MOSCOW_TZ)
+    assert next_item.trigger_at == expected
+
+
+def test_snooze_does_not_shift_recurrence_series(calendar_path) -> None:
+    now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.MOSCOW_TZ)
+    store = {
+        "events": [
+            {
+                "event_id": "event4",
+                "dt_start": now.isoformat(),
+                "text": "Daily",
+                "created_at": now.isoformat(),
+                "chat_id": 1,
+                "user_id": 1,
+            }
+        ],
+        "reminders": [
+            {
+                "reminder_id": "rem4",
+                "event_id": "event4",
+                "user_id": 1,
+                "chat_id": 1,
+                "trigger_at": now.isoformat(),
+                "text": "Daily",
+                "enabled": True,
+                "sent_at": None,
+                "status": "active",
+                "recurrence": {"freq": "daily"},
+                "last_triggered_at": None,
+            }
+        ],
+        "updated_at": now.isoformat(),
+    }
+    _write_store(store)
+    reminder = asyncio_run(calendar_store.get_reminder("rem4"))
+    updated = asyncio_run(
+        calendar_store.apply_snooze("rem4", minutes=10, now=now, base_trigger_at=reminder.trigger_at if reminder else None)
+    )
+    assert updated is not None
+    fired_at = now + timedelta(minutes=10)
+    next_item = asyncio_run(calendar_store.mark_reminder_sent("rem4", fired_at, missed=False))
+    assert next_item is not None
+    assert next_item.trigger_at == now + timedelta(days=1)
+
+
 def test_disable_reminder_updates_status(calendar_path) -> None:
     now = datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.MOSCOW_TZ)
     item = asyncio_run(
