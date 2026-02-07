@@ -220,15 +220,28 @@ class WizardManager:
         text: str,
     ) -> OrchestratorResult:
         if state.step == STEP_AWAIT_DATETIME:
+            # Try parsing as combined datetime + title input
             try:
-                dt = calendar_store.parse_local_datetime(text)
+                dt, title = calendar_store.parse_event_datetime(text)
             except ValueError as exc:
                 return refused(
-                    f"{exc}. Пример: 2026-02-05 18:30 или 05.02.2026 18:30",
+                    f"{exc}. Пример: завтра 19:00 врач или 05.02.2026 18:30",
                     intent="wizard.calendar.datetime",
                     mode="local",
                     actions=_step_actions(),
                 )
+            
+            # If we got both datetime and title, skip to confirmation
+            if title.strip():
+                updated = _touch_state(
+                    state,
+                    step=STEP_CONFIRM,
+                    data={"dt": dt.isoformat(), "title": title.strip()}
+                )
+                self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+                return _render_prompt(updated)
+            
+            # If we only got datetime, ask for title
             updated = _touch_state(state, step=STEP_AWAIT_TITLE, data={"dt": dt.isoformat()})
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return ok(
@@ -569,8 +582,14 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
         )
     if state.step == STEP_AWAIT_DATETIME:
         return ok(
-            "Введи дату и время события в формате YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
-            "Пример: 2026-02-05 18:30 или 05.02.2026 18:30",
+            "Введи дату, время и название события.\n"
+            "Примеры:\n"
+            "• завтра 19:00 врач\n"
+            "• сегодня 18:30 созвон\n"
+            "• в пятницу 10:15 встреча\n"
+            "• 07.02 12:00 стоматолог\n"
+            "• через 2 часа тренировка\n\n"
+            "Или классический формат: 2026-02-05 18:30",
             intent="wizard.calendar.datetime",
             mode="local",
             actions=_step_actions(),
