@@ -34,7 +34,8 @@ from app.core.result import (
     ratelimited,
     refused,
 )
-from app.core.tools_calendar import create_event, delete_event, list_calendar_items, list_reminders
+from app.core.tools_calendar import create_event, delete_event, list_calendar_items, list_reminders, update_event
+from app.core.recurrence_scope import RecurrenceScope, normalize_scope, parse_recurrence_scope
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
 from app.infra.last_state_store import LastStateStore
@@ -737,6 +738,34 @@ def _calendar_list_controls_actions() -> list[Action]:
         Action(id="utility_calendar.add", label="➕ Добавить", payload={"op": "calendar.add"}),
         Action(id="utility_calendar.list", label="🔄 Обновить", payload={"op": "calendar.list"}),
         _menu_action(),
+    ]
+
+
+def _build_recurrence_scope_actions(
+    op: str,
+    *,
+    event_id: str,
+    instance_dt: datetime | None,
+) -> list[Action]:
+    payload_base: dict[str, object] = {"op": op, "event_id": event_id}
+    if instance_dt is not None:
+        payload_base["instance_dt"] = instance_dt.isoformat()
+    return [
+        Action(
+            id=f"{op}.scope.this",
+            label="Только это",
+            payload={**payload_base, "scope": RecurrenceScope.THIS.value},
+        ),
+        Action(
+            id=f"{op}.scope.all",
+            label="Всю серию",
+            payload={**payload_base, "scope": RecurrenceScope.ALL.value},
+        ),
+        Action(
+            id=f"{op}.scope.future",
+            label="Это и будущие",
+            payload={**payload_base, "scope": RecurrenceScope.FUTURE.value},
+        ),
     ]
 
 
@@ -2520,6 +2549,14 @@ async def _dispatch_action_payload(
         )
     if op_value == "calendar.delete":
         event_id = payload.get("event_id")
+        scope = normalize_scope(payload.get("scope"))
+        instance_raw = payload.get("instance_dt")
+        instance_dt = None
+        if isinstance(instance_raw, str):
+            try:
+                instance_dt = datetime.fromisoformat(instance_raw)
+            except ValueError:
+                instance_dt = None
         if not isinstance(event_id, str) or not event_id:
             return error(
                 "Некорректные данные действия.",
@@ -2527,8 +2564,28 @@ async def _dispatch_action_payload(
                 mode="local",
                 debug={"reason": "invalid_event_id"},
             )
+        event = await calendar_store.get_event(event_id)
+        if event is None:
+            return refused(
+                "Событие не найдено.",
+                intent="utility_calendar.delete",
+                mode="local",
+            )
+        if event.rrule and scope is None:
+            return ok(
+                "Это повторяющееся событие. Что изменить?",
+                intent="utility_calendar.delete",
+                mode="local",
+                actions=_build_recurrence_scope_actions(
+                    "calendar.delete",
+                    event_id=event_id,
+                    instance_dt=instance_dt or event.dt,
+                ),
+            )
         deleted = await delete_event(
             event_id,
+            scope=scope or RecurrenceScope.ALL,
+            instance_dt=instance_dt or event.dt,
             intent="utility_calendar.delete",
             user_id=user_id,
             request_context=request_context,
@@ -2554,6 +2611,31 @@ async def _dispatch_action_payload(
             mode="local",
             intent="utility_calendar.delete",
             actions=_calendar_list_controls_actions(),
+        )
+    if op_value == "calendar.move_tomorrow":
+        event_id = payload.get("event_id")
+        scope = normalize_scope(payload.get("scope"))
+        instance_raw = payload.get("instance_dt")
+        instance_dt = None
+        if isinstance(instance_raw, str):
+            try:
+                instance_dt = datetime.fromisoformat(instance_raw)
+            except ValueError:
+                instance_dt = None
+        if not isinstance(event_id, str) or not event_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="utility_calendar.move",
+                mode="local",
+                debug={"reason": "invalid_event_id"},
+            )
+        return await _handle_event_move_tomorrow(
+            context,
+            event_id=event_id,
+            user_id=user_id,
+            chat_id=chat_id,
+            scope=scope,
+            instance_dt=instance_dt,
         )
     if op_value == "reminder.create":
         if not _wizards_enabled(context):
@@ -3041,11 +3123,28 @@ async def _handle_event_delete(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     event_id: str,
+    scope: RecurrenceScope | str | None = None,
+    instance_dt: datetime | None = None,
     user_id: int,
 ) -> OrchestratorResult:
+    event = await calendar_store.get_event(event_id)
+    scope_value = normalize_scope(scope)
+    if event is not None and event.rrule and scope_value is None:
+        return ok(
+            "Это повторяющееся событие. Что изменить?",
+            intent="utility_calendar.delete",
+            mode="local",
+            actions=_build_recurrence_scope_actions(
+                "calendar.delete",
+                event_id=event_id,
+                instance_dt=instance_dt or event.dt,
+            ),
+        )
     request_context = get_request_context(context)
     tool_result = await delete_event(
         event_id,
+        scope=scope_value or RecurrenceScope.ALL,
+        instance_dt=instance_dt or (event.dt if event else None),
         intent="utility_calendar.delete",
         user_id=user_id,
         request_context=request_context,
@@ -3069,16 +3168,44 @@ async def _handle_event_move_tomorrow(
     event_id: str,
     user_id: int,
     chat_id: int,
+    scope: RecurrenceScope | str | None = None,
+    instance_dt: datetime | None = None,
 ) -> OrchestratorResult:
     event = await calendar_store.get_event(event_id)
     if event is None or event.user_id != user_id or event.chat_id != chat_id:
         return refused("Событие не найдено.", intent="utility_calendar.move", mode="local")
+    is_recurring = bool(event.rrule)
+    scope_value = normalize_scope(scope)
+    if is_recurring and scope_value is None:
+        return ok(
+            "Это повторяющееся событие. Что изменить?",
+            intent="utility_calendar.move",
+            mode="local",
+            actions=_build_recurrence_scope_actions(
+                "calendar.move_tomorrow",
+                event_id=event_id,
+                instance_dt=instance_dt or event.dt,
+            ),
+        )
     new_dt = event.dt + timedelta(days=1)
-    updated, reminder_id = await calendar_store.update_event_dt(event_id, new_dt)
-    if updated is None:
-        return refused("Событие не найдено.", intent="utility_calendar.move", mode="local")
+    tool_result = await update_event(
+        event_id,
+        {"start_at": new_dt},
+        scope=scope_value or RecurrenceScope.ALL,
+        instance_dt=instance_dt or event.dt,
+        user_id=user_id,
+        chat_id=chat_id,
+        intent="utility_calendar.move",
+        request_context=get_request_context(context),
+        circuit_breakers=_get_circuit_breakers(context),
+        retry_policy=_get_retry_policy(context),
+        timeouts=_get_timeouts(context),
+    )
+    if tool_result.status != "ok":
+        return replace(tool_result, mode="local", intent="utility_calendar.move")
     scheduler = _get_reminder_scheduler(context)
     settings = _get_settings(context)
+    reminder_id = tool_result.debug.get("reminder_id") if isinstance(tool_result.debug, dict) else None
     if reminder_id and scheduler and settings is not None and settings.reminders_enabled:
         try:
             reminder = await calendar_store.get_reminder(reminder_id)
@@ -3087,14 +3214,13 @@ async def _handle_event_move_tomorrow(
         except Exception:
             LOGGER.exception("Failed to reschedule reminder: reminder_id=%s", reminder_id)
             return error("Не удалось перенести событие.", intent="utility_calendar.move", mode="local")
-    when_label = updated.dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+    when_label = new_dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
     return ok(
         f"Ок, перенёс на {when_label}.",
         intent="utility_calendar.move",
         mode="local",
         debug={
-            "refs": {"event_id": updated.id},
-            "reminder_id": reminder_id,
+            "refs": {"event_id": event_id},
         },
     )
 
@@ -3114,6 +3240,7 @@ async def _execute_resolution(
             event_id=resolution.target_id,
             user_id=user_id,
             chat_id=chat_id,
+            scope=resolution.scope,
         )
     if resolution.action == "cancel" and resolution.target_id:
         if resolution.target == "reminder":
@@ -3127,6 +3254,7 @@ async def _execute_resolution(
             return await _handle_event_delete(
                 context,
                 event_id=resolution.target_id,
+                scope=resolution.scope,
                 user_id=user_id,
             )
     if resolution.action == "repeat_search" and resolution.query:
@@ -3565,8 +3693,25 @@ async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             result = refused("Укажите id для удаления.", intent="utility_calendar.delete", mode="local")
             await send_result(update, context, result)
             return
+        scope = parse_recurrence_scope(" ".join(args[2:])) if len(args) > 2 else None
+        event = await calendar_store.get_event(item_id)
+        if event is not None and event.rrule and scope is None:
+            result = ok(
+                "Это повторяющееся событие. Что изменить?",
+                intent="utility_calendar.delete",
+                mode="local",
+                actions=_build_recurrence_scope_actions(
+                    "calendar.delete",
+                    event_id=item_id,
+                    instance_dt=event.dt,
+                ),
+            )
+            await send_result(update, context, result)
+            return
         tool_result = await delete_event(
             item_id,
+            scope=scope or RecurrenceScope.ALL,
+            instance_dt=event.dt if event else None,
             intent="utility_calendar.delete",
             user_id=user_id,
             request_context=request_context,

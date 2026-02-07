@@ -605,7 +605,18 @@ async def get_event(event_id: str) -> CalendarItem | None:
 
 
 async def update_event_dt(event_id: str, new_dt: datetime) -> tuple[CalendarItem | None, str | None]:
-    if new_dt.tzinfo is None:
+    return await update_event_fields(event_id, new_dt=new_dt)
+
+
+async def update_event_fields(
+    event_id: str,
+    *,
+    new_dt: datetime | None = None,
+    new_title: str | None = None,
+    new_rrule: str | None = None,
+    new_exdates: list[datetime] | None = None,
+) -> tuple[CalendarItem | None, str | None]:
+    if new_dt is not None and new_dt.tzinfo is None:
         new_dt = new_dt.replace(tzinfo=VIENNA_TZ)
     async with _STORE_LOCK:
         store = load_store()
@@ -613,18 +624,34 @@ async def update_event_dt(event_id: str, new_dt: datetime) -> tuple[CalendarItem
         reminders = list(store.get("reminders") or [])
         updated_event: dict[str, object] | None = None
         for item in events:
-            if isinstance(item, dict) and item.get("event_id") == event_id:
+            if not isinstance(item, dict) or item.get("event_id") != event_id:
+                continue
+            if new_dt is not None:
                 item["dt_start"] = new_dt.astimezone(VIENNA_TZ).isoformat()
-                updated_event = item
-                break
+            if new_title is not None:
+                item["text"] = new_title
+            if new_rrule is not None:
+                item["rrule"] = new_rrule
+            if new_exdates is not None:
+                item["exdates"] = [
+                    value.astimezone(VIENNA_TZ).isoformat()
+                    for value in new_exdates
+                    if isinstance(value, datetime)
+                ] or None
+            updated_event = item
+            break
         if updated_event is None:
             return None, None
         reminder_id: str | None = None
         for item in reminders:
-            if isinstance(item, dict) and item.get("event_id") == event_id:
+            if not isinstance(item, dict) or item.get("event_id") != event_id:
+                continue
+            if new_dt is not None:
                 item["trigger_at"] = new_dt.astimezone(VIENNA_TZ).isoformat()
-                reminder_id = item.get("reminder_id") if isinstance(item.get("reminder_id"), str) else None
-                break
+            if new_title is not None:
+                item["text"] = new_title
+            reminder_id = item.get("reminder_id") if isinstance(item.get("reminder_id"), str) else None
+            break
         store["events"] = events
         store["reminders"] = reminders
         store["updated_at"] = datetime.now(tz=VIENNA_TZ).isoformat()
