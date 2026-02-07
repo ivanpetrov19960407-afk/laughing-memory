@@ -49,6 +49,12 @@ def test_parse_user_datetime_day_month() -> None:
     assert parsed.minute == 0
 
 
+def test_parse_user_datetime_short_date_without_year() -> None:
+    base = calendar_store.parse_user_datetime("2026-02-01 10:00")
+    parsed = calendar_store.parse_user_datetime("10.02", now=base)
+    assert (parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute) == (2026, 2, 10, 0, 0)
+
+
 def test_parse_event_datetime_tomorrow_with_title() -> None:
     base = calendar_store.parse_local_datetime("2026-02-05 10:00")
     parsed, title = calendar_store.parse_event_datetime("завтра 19:00 врач", now=base)
@@ -137,3 +143,13 @@ def test_parse_calendar_event_from_text_strict_formats(
         parsed.start_at.minute,
     ) == expected
     assert parsed.title == ""
+
+
+def test_parse_full_date_with_year_and_time() -> None:
+    parsed = calendar_store.parse_user_datetime("10.02.2026 13:30")
+    assert (parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute) == (2026, 2, 10, 13, 30)
+
+
+def test_short_date_does_not_capture_year() -> None:
+    parsed = calendar_store.parse_user_datetime("10.02.2026 13:30")
+    assert (parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute) == (2026, 2, 10, 13, 30)
