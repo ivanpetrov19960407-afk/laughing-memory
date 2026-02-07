@@ -66,6 +66,7 @@ def _is_retryable_calendar_error(exc: Exception) -> bool:
 async def create_event(
     *,
     start_at: datetime,
+    end_at: datetime | None = None,
     title: str,
     chat_id: int,
     user_id: int,
@@ -88,7 +89,7 @@ async def create_event(
         title,
     )
     backend_mode = _resolve_backend_mode()
-    end_at = start_at + timedelta(hours=1)
+    end_at = end_at or (start_at + timedelta(hours=1))
     recurrence_input = recurrence_text if isinstance(recurrence_text, str) else title
     recurrence = recurrence_parse.parse_recurrence(recurrence_input, start_at, calendar_store.BOT_TZ)
     rrule = recurrence.rrule if recurrence else None

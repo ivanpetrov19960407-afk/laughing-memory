@@ -238,9 +238,16 @@ class CircuitBreakerRegistry:
         self._time_fn = time_fn
         self._breakers: dict[str, CircuitBreaker] = {}
 
+    @property
+    def config(self) -> CircuitBreakerConfig:
+        return self._config
+
     def get(self, name: str) -> CircuitBreaker:
         breaker = self._breakers.get(name)
         if breaker is None:
             breaker = CircuitBreaker(name=name, config=self._config, time_fn=self._time_fn)
             self._breakers[name] = breaker
         return breaker
+
+    def snapshot(self) -> dict[str, str]:
+        return {name: breaker.state for name, breaker in self._breakers.items()}

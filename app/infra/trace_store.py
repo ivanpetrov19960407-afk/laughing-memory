@@ -71,6 +71,15 @@ class TraceStore:
             return None
         return entries[-1]
 
+    def count_entries(self) -> int:
+        total = 0
+        for key in list(self._store.keys()):
+            self._cleanup(key)
+            entries = self._store.get(key)
+            if entries:
+                total += len(entries)
+        return total
+
     def find_entries(self, *, chat_id: int, user_id: int, correlation_id: str) -> list[TraceEntry]:
         key = (chat_id, user_id)
         self._cleanup(key)
