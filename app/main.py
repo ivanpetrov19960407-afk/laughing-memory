@@ -13,6 +13,7 @@ from app.bot import actions, handlers, wizard
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
 from app.core.reminders import ReminderScheduler
 from app.core.dialog_memory import DialogMemory
+from app.core.memory_store import MemoryStore
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.config import load_settings
@@ -51,6 +52,7 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("context_off", handlers.context_off))
     application.add_handler(CommandHandler("context_clear", handlers.context_clear))
     application.add_handler(CommandHandler("context_status", handlers.context_status))
+    application.add_handler(CommandHandler("memory", handlers.memory_command))
     application.add_handler(CommandHandler("allow", handlers.allow))
     application.add_handler(CommandHandler("deny", handlers.deny))
     application.add_handler(CommandHandler("allowlist", handlers.allowlist))
@@ -168,6 +170,7 @@ def main() -> None:
         max_turns=settings.context_max_turns,
     )
     asyncio.run(dialog_memory.load())
+    memory_store = MemoryStore()
 
     warnings.filterwarnings("ignore", message="No JobQueue set up", category=PTBUserWarning)
     application = Application.builder().token(settings.bot_token).build()
@@ -199,6 +202,7 @@ def main() -> None:
     application.bot_data["openai_client"] = openai_client
     application.bot_data["start_time"] = time.monotonic()
     application.bot_data["dialog_memory"] = dialog_memory
+    application.bot_data["memory_store"] = memory_store
     application.bot_data["action_store"] = actions.ActionStore(
         ttl_seconds=settings.action_ttl_seconds,
         max_items=settings.action_max_size,
