@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any
+from pathlib import Path
 
 import telegram
 from telegram import InlineKeyboardMarkup, InputFile, Update
@@ -29,10 +30,12 @@ from app.core.calendar_nlp_ru import (
 )
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMemory, DialogMessage
+from app.core.document_qa import select_relevant_chunks
 from app.core.last_state_resolver import ResolutionResult, resolve_short_message
 from app.core.memory_layers import ActionsLogLayer, UserProfileLayer, build_memory_layers_context
 from app.core.memory_store import MemoryStore
 from app.core.orchestrator import Orchestrator
+from app.core.file_text_extractor import FileTextExtractor, OCRNotAvailableError
 from app.core.user_profile import UserProfile
 from app.core.result import (
     Action,
@@ -52,7 +55,9 @@ from app.infra.allowlist import AllowlistStore
 from app.infra.actions_log_store import ActionsLogStore
 from app.infra.last_state_store import LastStateStore
 from app.infra.draft_store import DraftStore
+from app.infra.document_session_store import DocumentSessionStore
 from app.infra.messaging import safe_edit_text, safe_send_text
+from app.infra.llm import LLMClient, PerplexityClient, ensure_plain_text
 from app.infra.llm.openai_client import OpenAIClient
 from app.infra.rate_limiter import RateLimiter
 from app.infra.resilience import RetryPolicy, TimeoutConfig
@@ -138,6 +143,24 @@ def _get_openai_client(context: ContextTypes.DEFAULT_TYPE) -> OpenAIClient | Non
     return context.application.bot_data.get("openai_client")
 
 
+def _get_llm_client(context: ContextTypes.DEFAULT_TYPE) -> LLMClient | None:
+    client = context.application.bot_data.get("llm_client")
+    if isinstance(client, OpenAIClient):
+        return client
+    if isinstance(client, PerplexityClient):
+        return client
+    if hasattr(client, "generate_text"):
+        return client
+    return None
+
+
+def _get_document_store(context: ContextTypes.DEFAULT_TYPE) -> DocumentSessionStore | None:
+    store = context.application.bot_data.get("document_store")
+    if isinstance(store, DocumentSessionStore):
+        return store
+    return None
+
+
 def _get_reminder_scheduler(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data.get("reminder_scheduler")
 
@@ -148,6 +171,18 @@ def _get_settings(context: ContextTypes.DEFAULT_TYPE):
 
 def _get_timeouts(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data.get("resilience_timeouts")
+
+
+def _resolve_llm_model(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    settings = _get_settings(context)
+    if settings is None:
+        return None
+    client = _get_llm_client(context)
+    if isinstance(client, OpenAIClient):
+        return settings.openai_model
+    if isinstance(client, PerplexityClient):
+        return settings.perplexity_model
+    return settings.openai_model or settings.perplexity_model
 
 
 def _get_retry_policy(context: ContextTypes.DEFAULT_TYPE):
@@ -873,6 +908,181 @@ def _log_memory_resolution(
 
 def _menu_action() -> Action:
     return Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_section", "section": "home"})
+
+
+def _document_actions(doc_id: str) -> list[Action]:
+    return [
+        Action(
+            id="document.summary",
+            label="📝 Сделать резюме",
+            payload={"op": "document.summary", "doc_id": doc_id},
+        ),
+        Action(
+            id="document.qa",
+            label="❓ Вопрос по документу",
+            payload={"op": "document.qa", "doc_id": doc_id},
+        ),
+        Action(
+            id="document.close",
+            label="🗑 Закрыть документ",
+            payload={"op": "document.close", "doc_id": doc_id},
+        ),
+    ]
+
+
+def _document_qa_actions(doc_id: str) -> list[Action]:
+    return [
+        Action(
+            id="document.qa_exit",
+            label="🚪 Выйти из Q&A",
+            payload={"op": "document.qa_exit", "doc_id": doc_id},
+        ),
+        Action(
+            id="document.close",
+            label="🗑 Закрыть документ",
+            payload={"op": "document.close", "doc_id": doc_id},
+        ),
+    ]
+
+
+def _mime_extension(mime_type: str) -> str:
+    mapping = {
+        "application/pdf": ".pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+    }
+    return mapping.get(mime_type, "")
+
+
+def _detect_document_type(document: telegram.Document) -> tuple[str, str] | None:
+    mime_type = document.mime_type or ""
+    filename = document.file_name or ""
+    suffix = Path(filename).suffix.lower()
+    if mime_type == "application/pdf" or suffix == ".pdf":
+        return "pdf", suffix or ".pdf"
+    if (
+        mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        or suffix == ".docx"
+    ):
+        return "docx", suffix or ".docx"
+    if mime_type.startswith("image/"):
+        ext = suffix or _mime_extension(mime_type) or ".png"
+        return "image", ext
+    return None
+
+
+def _load_document_text(path: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def _trim_document_text(text: str, *, max_chars: int = 8000) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rsplit("\n", 1)[0].strip() or text[:max_chars]
+
+
+async def _handle_document_summary(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    doc_id: str,
+) -> OrchestratorResult:
+    document_store = _get_document_store(context)
+    if document_store is None:
+        return error("Хранилище документов недоступно.", intent="document.summary", mode="local")
+    session = document_store.get_session(doc_id) or document_store.get_active(user_id=user_id, chat_id=chat_id)
+    if session is None:
+        return refused("Сначала пришлите файл.", intent="document.summary", mode="local")
+    text = _load_document_text(session.text_path)
+    if not text.strip():
+        return error("Текст документа не найден.", intent="document.summary", mode="local")
+    llm_client = _get_llm_client(context)
+    model = _resolve_llm_model(context)
+    if llm_client is None or model is None:
+        return error("LLM не настроен.", intent="document.summary", mode="local")
+    orchestrator = _get_orchestrator(context)
+    facts_only = orchestrator.is_facts_only(user_id)
+    system_prompt = (
+        "Ты помощник. Сделай краткое тезисное резюме по документу. "
+        "Используй только текст документа."
+    )
+    if facts_only:
+        system_prompt += " Не добавляй домыслы. Если данных нет, так и скажи."
+    trimmed_text = _trim_document_text(text)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Текст документа:\n{trimmed_text}\n\nСделай резюме."},
+    ]
+    try:
+        response = await llm_client.generate_text(model=model, messages=messages)
+        response = ensure_plain_text(response)
+    except Exception:
+        return error("Не удалось получить резюме.", intent="document.summary", mode="local")
+    if not response.strip():
+        return error("Не удалось получить резюме.", intent="document.summary", mode="local")
+    return ok(
+        response.strip(),
+        intent="document.summary",
+        mode="local",
+        actions=_document_actions(session.doc_id),
+    )
+
+
+async def _handle_document_question(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    question: str,
+) -> OrchestratorResult:
+    document_store = _get_document_store(context)
+    if document_store is None:
+        return error("Хранилище документов недоступно.", intent="document.qa", mode="local")
+    session = document_store.get_active(user_id=user_id, chat_id=chat_id)
+    if session is None or session.state != "qa_mode":
+        return refused("Сначала пришлите файл.", intent="document.qa", mode="local")
+    text = _load_document_text(session.text_path)
+    if not text.strip():
+        return error("Текст документа не найден.", intent="document.qa", mode="local")
+    llm_client = _get_llm_client(context)
+    model = _resolve_llm_model(context)
+    if llm_client is None or model is None:
+        return error("LLM не настроен.", intent="document.qa", mode="local")
+    orchestrator = _get_orchestrator(context)
+    facts_only = orchestrator.is_facts_only(user_id)
+    chunks = select_relevant_chunks(text, question, top_k=4)
+    if not chunks:
+        return refused("В документе нет ответа.", intent="document.qa", mode="local")
+    system_prompt = (
+        "Отвечай только на основе предоставленных фрагментов документа. "
+        "Если ответа нет во фрагментах, скажи: \"В документе нет ответа\"."
+    )
+    if facts_only:
+        system_prompt += " Никаких домыслов, только факты из текста."
+    context_text = "\n\n".join(f"Фрагмент {idx + 1}:\n{chunk}" for idx, chunk in enumerate(chunks))
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Вопрос: {question}\n\n{context_text}"},
+    ]
+    try:
+        response = await llm_client.generate_text(model=model, messages=messages)
+        response = ensure_plain_text(response)
+    except Exception:
+        return error("Не удалось получить ответ.", intent="document.qa", mode="local")
+    if not response.strip():
+        return error("Не удалось получить ответ.", intent="document.qa", mode="local")
+    return ok(
+        response.strip(),
+        intent="document.qa",
+        mode="local",
+        actions=_document_qa_actions(session.doc_id),
+    )
 
 
 def _calendar_list_controls_actions() -> list[Action]:
@@ -2945,6 +3155,51 @@ async def _dispatch_action_payload(
                 debug={"reason": "invalid_section"},
             )
         return await _handle_menu_section(context, section=section, user_id=user_id, chat_id=chat_id)
+    if op_value == "document.summary":
+        doc_id = payload.get("doc_id")
+        if not isinstance(doc_id, str) or not doc_id:
+            return error("Некорректные данные действия.", intent="document.summary", mode="local")
+        return await _handle_document_summary(context, user_id=user_id, chat_id=chat_id, doc_id=doc_id)
+    if op_value == "document.qa":
+        doc_id = payload.get("doc_id")
+        if not isinstance(doc_id, str) or not doc_id:
+            return error("Некорректные данные действия.", intent="document.qa", mode="local")
+        document_store = _get_document_store(context)
+        if document_store is None:
+            return error("Хранилище документов недоступно.", intent="document.qa", mode="local")
+        session = document_store.set_state(doc_id=doc_id, state="qa_mode")
+        if session is None:
+            return refused("Сначала пришлите файл.", intent="document.qa", mode="local")
+        return ok(
+            "Задайте вопрос по документу.",
+            intent="document.qa.start",
+            mode="local",
+            actions=_document_qa_actions(doc_id),
+        )
+    if op_value == "document.qa_exit":
+        doc_id = payload.get("doc_id")
+        if not isinstance(doc_id, str) or not doc_id:
+            return error("Некорректные данные действия.", intent="document.qa.exit", mode="local")
+        document_store = _get_document_store(context)
+        if document_store is None:
+            return error("Хранилище документов недоступно.", intent="document.qa.exit", mode="local")
+        session = document_store.set_state(doc_id=doc_id, state="action_select")
+        if session is None:
+            return refused("Сначала пришлите файл.", intent="document.qa.exit", mode="local")
+        return ok(
+            "Вы вышли из Q&A. Что сделать?",
+            intent="document.qa.exit",
+            mode="local",
+            actions=_document_actions(doc_id),
+        )
+    if op_value == "document.close":
+        document_store = _get_document_store(context)
+        if document_store is None:
+            return error("Хранилище документов недоступно.", intent="document.close", mode="local")
+        closed = document_store.close_active(user_id=user_id, chat_id=chat_id)
+        if closed is None:
+            return refused("Нет активного документа.", intent="document.close", mode="local")
+        return ok("Документ закрыт.", intent="document.close", mode="local")
     if op_value == "wizard.resume":
         manager = _get_wizard_manager(context)
         if manager is None:
@@ -4627,6 +4882,105 @@ async def reminder_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 @_with_error_handling
+async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    message = update.message
+    if message is None:
+        return
+    settings = _get_settings(context)
+    if settings is None:
+        await send_result(update, context, error("Настройки не загружены.", intent="document.upload", mode="local"))
+        return
+    document_store = _get_document_store(context)
+    if document_store is None:
+        await send_result(
+            update,
+            context,
+            error("Хранилище документов недоступно.", intent="document.upload", mode="local"),
+        )
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    file_id = ""
+    file_type = ""
+    extension = ""
+    if message.document is not None:
+        detected = _detect_document_type(message.document)
+        if detected is None:
+            await send_result(
+                update,
+                context,
+                refused(
+                    "Поддерживаются PDF, DOCX и изображения с текстом.",
+                    intent="document.upload",
+                    mode="local",
+                ),
+            )
+            return
+        file_type, extension = detected
+        file_id = message.document.file_id
+    elif message.photo:
+        photo = message.photo[-1]
+        file_id = photo.file_id
+        file_type = "image"
+        extension = ".jpg"
+    else:
+        return
+    user_dir = settings.uploads_path / str(user_id)
+    user_dir.mkdir(parents=True, exist_ok=True)
+    file_path = user_dir / f"{file_id}{extension}"
+    file_obj = await context.bot.get_file(file_id)
+    await file_obj.download_to_drive(custom_path=str(file_path))
+    extractor = FileTextExtractor(ocr_enabled=settings.ocr_enabled)
+    try:
+        extracted = extractor.extract(path=file_path, file_type=file_type)
+    except OCRNotAvailableError:
+        await send_result(
+            update,
+            context,
+            error(
+                "OCR недоступен. Установите tesseract или отключите OCR.",
+                intent="document.ocr_missing",
+                mode="local",
+            ),
+        )
+        return
+    except Exception:
+        await send_result(
+            update,
+            context,
+            error("Не удалось извлечь текст из документа.", intent="document.extract", mode="local"),
+        )
+        return
+    if not extracted.text.strip():
+        await send_result(
+            update,
+            context,
+            refused("Не удалось извлечь текст.", intent="document.extract.empty", mode="local"),
+        )
+        return
+    text_dir = settings.document_texts_path / str(user_id)
+    text_dir.mkdir(parents=True, exist_ok=True)
+    text_path = text_dir / f"{file_id}.txt"
+    text_path.write_text(extracted.text, encoding="utf-8")
+    session = document_store.create_session(
+        user_id=user_id,
+        chat_id=chat_id,
+        file_path=str(file_path),
+        file_type=file_type,
+        text_path=str(text_path),
+    )
+    result = ok(
+        "Документ обработан. Что сделать?",
+        intent="document.processed",
+        mode="local",
+        actions=_document_actions(session.doc_id),
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     orchestrator = _get_orchestrator(context)
     if not await _guard_access(update, context):
@@ -4645,6 +4999,18 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         await send_result(update, context, result)
         return
+    document_store = _get_document_store(context)
+    if document_store is not None:
+        active_session = document_store.get_active(user_id=user_id, chat_id=chat_id)
+        if active_session and active_session.state == "qa_mode":
+            result = await _handle_document_question(
+                context,
+                user_id=user_id,
+                chat_id=chat_id,
+                question=prompt,
+            )
+            await send_result(update, context, result)
+            return
     if _wizards_enabled(context):
         manager = _get_wizard_manager(context)
         if manager is not None:

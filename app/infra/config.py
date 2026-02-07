@@ -11,6 +11,9 @@ DEFAULT_CONFIG_PATH = Path("config/orchestrator.json")
 DEFAULT_DB_PATH = Path("data/bot.db")
 DEFAULT_ALLOWLIST_PATH = Path("data/allowlist.json")
 DEFAULT_DIALOG_MEMORY_PATH = Path("data/dialog_memory.json")
+DEFAULT_UPLOADS_PATH = Path("data/uploads")
+DEFAULT_DOCUMENT_TEXTS_PATH = Path("data/document_texts")
+DEFAULT_DOCUMENT_SESSIONS_PATH = Path("data/document_sessions.json")
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,10 @@ class Settings:
     wizard_store_path: Path
     wizard_timeout_seconds: int
     feature_web_search: bool
+    uploads_path: Path
+    document_texts_path: Path
+    document_sessions_path: Path
+    ocr_enabled: bool
     calendar_backend: str
     caldav_url: str | None
     caldav_username: str | None
@@ -188,6 +195,14 @@ def load_settings() -> Settings:
     feature_web_search = _parse_optional_bool(os.getenv("FEATURE_WEB_SEARCH"))
     if feature_web_search is None:
         feature_web_search = True
+    uploads_path = Path(os.getenv("UPLOADS_PATH", DEFAULT_UPLOADS_PATH))
+    document_texts_path = Path(os.getenv("DOCUMENT_TEXTS_PATH", DEFAULT_DOCUMENT_TEXTS_PATH))
+    document_sessions_path = Path(
+        os.getenv("DOCUMENT_SESSIONS_PATH", DEFAULT_DOCUMENT_SESSIONS_PATH)
+    )
+    ocr_enabled = _parse_optional_bool(os.getenv("OCR_ENABLED"))
+    if ocr_enabled is None:
+        ocr_enabled = True
     calendar_backend = os.getenv("CALENDAR_BACKEND", "local").strip().lower()
     if calendar_backend not in {"local", "caldav"}:
         calendar_backend = "local"
@@ -239,6 +254,10 @@ def load_settings() -> Settings:
         wizard_store_path=wizard_store_path,
         wizard_timeout_seconds=wizard_timeout_seconds,
         feature_web_search=feature_web_search,
+        uploads_path=uploads_path,
+        document_texts_path=document_texts_path,
+        document_sessions_path=document_sessions_path,
+        ocr_enabled=ocr_enabled,
         calendar_backend=calendar_backend,
         caldav_url=caldav_url,
         caldav_username=caldav_username,
