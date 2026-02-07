@@ -1836,7 +1836,17 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         and result.intent != normalized_intent
     ):
         result = replace(result, intent=normalized_intent)
-    await send_result(update, context, result)
+    public_result = normalize_to_orchestrator_result(result)
+    LOGGER.info(
+        "Orchestrator result: status=%s mode=%s intent=%s sources=%d actions=%d attachments=%d",
+        public_result.status,
+        public_result.mode,
+        public_result.intent,
+        len(public_result.sources),
+        len(public_result.actions),
+        len(public_result.attachments),
+    )
+    await send_result(update, context, public_result)
 
 
 async def _dispatch_action(
