@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -10,6 +11,7 @@ import traceback
 from typing import Any
 
 from app.core.decision import Decision
+from app.core.error_messages import map_error_text
 from app.core.models import TaskExecutionResult
 from app.core.facts import build_sources_prompt, render_fact_response_with_sources
 from app.core.result import (
@@ -26,6 +28,17 @@ from app.core.tasks import TaskDefinition, TaskError, get_task_registry
 from app.infra.access import AccessController
 from app.infra.llm import LLMAPIError, LLMClient, LLMGuardError, ensure_plain_text
 from app.infra.rate_limit import RateLimiter
+from app.infra.resilience import (
+    CircuitBreakerRegistry,
+    RetryPolicy,
+    TimeoutConfig,
+    is_network_error,
+    is_timeout_error,
+    load_circuit_breaker_config,
+    load_retry_policy,
+    load_timeouts,
+    retry_async,
+)
 from app.infra.request_context import (
     RequestContext,
     add_trace,
@@ -123,6 +136,9 @@ class Orchestrator:
         llm_model: str | None = None,
         search_client: SearchClient | None = None,
         feature_web_search: bool = True,
+        timeouts: TimeoutConfig | None = None,
+        retry_policy: RetryPolicy | None = None,
+        circuit_breakers: CircuitBreakerRegistry | None = None,
     ) -> None:
         self._config = config
         self._storage = storage
@@ -136,6 +152,11 @@ class Orchestrator:
         self._feature_web_search = feature_web_search
         self._facts_only_default = _coerce_bool(config.get("facts_only_default", False))
         self._facts_only_by_user: dict[int, bool] = {}
+        self._timeouts = timeouts or load_timeouts(config)
+        self._retry_policy = retry_policy or load_retry_policy(config)
+        self._circuit_breakers = circuit_breakers or CircuitBreakerRegistry(
+            config=load_circuit_breaker_config(config),
+        )
 
     @property
     def config(self) -> dict[str, Any]:
@@ -233,6 +254,7 @@ class Orchestrator:
                 payload,
                 facts_only=True,
                 intent="command.search",
+                request_context=request_context,
             )
             return self._finalize_request(request_context, start_time, result)
 
@@ -514,6 +536,42 @@ class Orchestrator:
                 messages.append({"role": "user", "content": combined_prompt})
                 return messages
 
+            breaker = self._circuit_breakers.get("llm")
+            allowed, circuit_event = breaker.allow_request()
+            if circuit_event:
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="llm",
+                    event=circuit_event,
+                    status="ok",
+                    name=llm_trace_name,
+                )
+            if not allowed:
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="llm",
+                    event="circuit.short_circuit",
+                    status="error",
+                    name=llm_trace_name,
+                )
+                add_trace(
+                    request_context,
+                    step="llm.call",
+                    component="llm",
+                    name=llm_trace_name,
+                    status="error",
+                    duration_ms=0.0,
+                )
+                execution = self._error_execution(
+                    user_id,
+                    mode,
+                    trimmed,
+                    map_error_text("temporarily_unavailable"),
+                    executed_at,
+                )
+                return execution, []
             start_time = time.monotonic()
             log_event(
                 LOGGER,
@@ -537,10 +595,19 @@ class Orchestrator:
             )
             try:
                 messages = _build_messages(trimmed)
-                response_text = await llm_client.generate_text(
-                    model=model,
-                    messages=messages,
-                    web_search_options=None,
+                response_text = await retry_async(
+                    lambda: llm_client.generate_text(
+                        model=model,
+                        messages=messages,
+                        web_search_options=None,
+                    ),
+                    policy=self._retry_policy,
+                    timeout_seconds=self._timeouts.llm_seconds,
+                    logger=LOGGER,
+                    request_context=request_context,
+                    component="llm",
+                    name=llm_trace_name,
+                    is_retryable=self._is_retryable_exception,
                 )
                 result = ensure_plain_text(response_text)
                 sanitized, meta = sanitize_llm_text(
@@ -555,10 +622,19 @@ class Orchestrator:
                     )
                     regen_prompt = f"{trimmed}\n\n{regen_instruction}"
                     regen_messages = _build_messages(regen_prompt)
-                    response_text = await llm_client.generate_text(
-                        model=model,
-                        messages=regen_messages,
-                        web_search_options=None,
+                    response_text = await retry_async(
+                        lambda: llm_client.generate_text(
+                            model=model,
+                            messages=regen_messages,
+                            web_search_options=None,
+                        ),
+                        policy=self._retry_policy,
+                        timeout_seconds=self._timeouts.llm_seconds,
+                        logger=LOGGER,
+                        request_context=request_context,
+                        component="llm",
+                        name=llm_trace_name,
+                        is_retryable=self._is_retryable_exception,
                     )
                     result = ensure_plain_text(response_text)
                     sanitized, meta = sanitize_llm_text(
@@ -579,9 +655,29 @@ class Orchestrator:
                 else:
                     result = sanitized
                 status = "success"
+                circuit_event = breaker.record_success()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="llm",
+                        event=circuit_event,
+                        status="ok",
+                        name=llm_trace_name,
+                    )
             except LLMGuardError as exc:
                 result = "Некорректный ответ LLM. Попробуйте позже."
                 status = "error"
+                circuit_event = breaker.record_failure()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="llm",
+                        event=circuit_event,
+                        status="error",
+                        name=llm_trace_name,
+                    )
                 if request_context:
                     request_context.meta["llm_error"] = _llm_error_payload(request_context, exc)
                 LOGGER.warning("LLM guard error: %s", exc)
@@ -596,6 +692,16 @@ class Orchestrator:
             except LLMAPIError as exc:
                 result = self._map_llm_error(exc)
                 status = "error"
+                circuit_event = breaker.record_failure()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="llm",
+                        event=circuit_event,
+                        status="error",
+                        name=llm_trace_name,
+                    )
                 if request_context:
                     request_context.meta["llm_error"] = _llm_error_payload(request_context, exc)
                 LOGGER.warning(
@@ -611,9 +717,42 @@ class Orchestrator:
                     exc=exc,
                     extra={"mode": mode, "model": model, "provider": provider or "-"},
                 )
-            except Exception as exc:
-                result = "Временная ошибка сервиса. Попробуйте позже."
+            except asyncio.TimeoutError as exc:
+                result = map_error_text("timeout")
                 status = "error"
+                circuit_event = breaker.record_failure()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="llm",
+                        event=circuit_event,
+                        status="error",
+                        name=llm_trace_name,
+                    )
+                if request_context:
+                    request_context.meta["llm_error"] = _llm_error_payload(request_context, exc)
+                log_error(
+                    LOGGER,
+                    request_context,
+                    component="llm",
+                    where="llm.timeout",
+                    exc=exc,
+                    extra={"mode": mode, "model": model, "provider": provider or "-"},
+                )
+            except Exception as exc:
+                result = map_error_text("temporarily_unavailable")
+                status = "error"
+                circuit_event = breaker.record_failure()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="llm",
+                        event=circuit_event,
+                        status="error",
+                        name=llm_trace_name,
+                    )
                 if request_context:
                     request_context.meta["llm_error"] = _llm_error_payload(request_context, exc)
                 LOGGER.warning("LLM request failed: %s", exc, exc_info=True)
@@ -838,7 +977,15 @@ class Orchestrator:
         execution = await self.ask_llm(user_id, trimmed, mode="ask")
         return self._build_llm_result(execution, intent="ask", facts_only=False, request_context=None)
 
-    async def run_fact_answer(self, user_id: int, query: str, *, facts_only: bool, intent: str) -> OrchestratorResult:
+    async def run_fact_answer(
+        self,
+        user_id: int,
+        query: str,
+        *,
+        facts_only: bool,
+        intent: str,
+        request_context: RequestContext | None = None,
+    ) -> OrchestratorResult:
         if not self._feature_web_search:
             return ensure_valid(
                 refused(
@@ -860,12 +1007,159 @@ class Orchestrator:
                 )
             )
         started_at = time.monotonic()
+        breaker = self._circuit_breakers.get("web_search")
+        allowed, circuit_event = breaker.allow_request()
+        if circuit_event:
+            log_event(
+                LOGGER,
+                request_context,
+                component="web",
+                event=circuit_event,
+                status="ok",
+                name="web_search",
+            )
+        if not allowed:
+            log_event(
+                LOGGER,
+                request_context,
+                component="web",
+                event="circuit.short_circuit",
+                status="error",
+                name="web_search",
+            )
+            add_trace(
+                request_context,
+                step="web.search",
+                component="web",
+                name="web_search",
+                status="error",
+                duration_ms=elapsed_ms(started_at),
+            )
+            return ensure_valid(
+                error(
+                    map_error_text("temporarily_unavailable"),
+                    intent=intent,
+                    mode="tool",
+                    debug={"reason": "circuit_open"},
+                )
+            )
+        log_event(
+            LOGGER,
+            request_context,
+            component="web",
+            event="web.search.start",
+            status="ok",
+            query=trimmed_query,
+        )
+        add_trace(
+            request_context,
+            step="web.search",
+            component="web",
+            name="web_search",
+            status="start",
+            duration_ms=0.0,
+        )
+        status = "success"
+        search_failed = False
         try:
-            sources = await self._search_client.search(trimmed_query, max_results=5)
+            sources = await retry_async(
+                lambda: self._search_client.search(trimmed_query, max_results=5),
+                policy=self._retry_policy,
+                timeout_seconds=self._timeouts.web_tool_call_seconds,
+                logger=LOGGER,
+                request_context=request_context,
+                component="web",
+                name="web_search",
+                is_retryable=self._is_retryable_exception,
+            )
+            circuit_event = breaker.record_success()
+            if circuit_event:
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="web",
+                    event=circuit_event,
+                    status="ok",
+                    name="web_search",
+                )
+        except asyncio.TimeoutError as exc:
+            status = "error"
+            circuit_event = breaker.record_failure()
+            if circuit_event:
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="web",
+                    event=circuit_event,
+                    status="error",
+                    name="web_search",
+                )
+            log_error(
+                LOGGER,
+                request_context,
+                component="web",
+                where="web.search.timeout",
+                exc=exc,
+            )
+            sources = []
+            return ensure_valid(
+                error(
+                    map_error_text("timeout"),
+                    intent=intent,
+                    mode="tool",
+                    debug={"reason": "timeout"},
+                )
+            )
         except Exception as exc:
+            status = "error"
+            search_failed = True
+            circuit_event = breaker.record_failure()
+            if circuit_event:
+                log_event(
+                    LOGGER,
+                    request_context,
+                    component="web",
+                    event=circuit_event,
+                    status="error",
+                    name="web_search",
+                )
+            log_error(
+                LOGGER,
+                request_context,
+                component="web",
+                where="web.search",
+                exc=exc,
+            )
             LOGGER.warning("Web search failed: %s", exc, exc_info=True)
             sources = []
+        finally:
+            duration_ms = elapsed_ms(started_at)
+            log_event(
+                LOGGER,
+                request_context,
+                component="web",
+                event="web.search.end",
+                status=status,
+                duration_ms=duration_ms,
+            )
+            add_trace(
+                request_context,
+                step="web.search",
+                component="web",
+                name="web_search",
+                status=status,
+                duration_ms=duration_ms,
+            )
 
+        if not sources and search_failed:
+            return ensure_valid(
+                error(
+                    map_error_text("temporarily_unavailable"),
+                    intent=intent,
+                    mode="tool",
+                    debug={"reason": "web_search_failed"},
+                )
+            )
         if not sources:
             reason = "facts_only_no_sources" if facts_only else "search_no_results"
             return ensure_valid(
@@ -967,12 +1261,19 @@ class Orchestrator:
 
     def _map_llm_error(self, exc: LLMAPIError) -> str:
         if exc.status_code in {401, 403}:
-            return "Ключ не настроен или недействителен."
+            return map_error_text("auth_required")
         if exc.status_code == 429:
-            return "Лимит запросов, попробуйте позже."
+            return map_error_text("rate_limited")
         if exc.status_code >= 500:
-            return "Временная ошибка сервиса. Попробуйте позже."
-        return "Не удалось получить ответ от сервиса."
+            return map_error_text("temporarily_unavailable")
+        return map_error_text("temporarily_unavailable")
+
+    def _is_retryable_exception(self, exc: Exception) -> bool:
+        if is_timeout_error(exc) or is_network_error(exc):
+            return True
+        if isinstance(exc, LLMAPIError):
+            return exc.status_code == 429 or exc.status_code >= 500
+        return False
 
     async def _handle_summary(self, user_id: int, text: str) -> OrchestratorResult:
         payload = _extract_summary_payload(text)

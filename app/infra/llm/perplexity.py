@@ -18,7 +18,7 @@ class PerplexityClient:
         api_key: str,
         base_url: str = "https://api.perplexity.ai",
         timeout_seconds: float = 30.0,
-        max_retries: int = 1,
+        max_retries: int = 0,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")

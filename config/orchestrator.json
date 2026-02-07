@@ -22,5 +22,22 @@
     "system_prompt": "Ты полезный ассистент. Отвечай кратко и по делу.",
     "history_turns": 5
   },
-  "facts_only_default": false
+  "facts_only_default": false,
+  "timeouts": {
+    "tool_call_seconds": 15,
+    "web_tool_call_seconds": 20,
+    "llm_seconds": 20,
+    "external_api_seconds": 10
+  },
+  "retry": {
+    "max_attempts": 3,
+    "base_delay_ms": 250,
+    "max_delay_ms": 2000,
+    "jitter_ms": 200
+  },
+  "circuit_breaker": {
+    "failure_threshold": 5,
+    "window_seconds": 60,
+    "cooldown_seconds": 60
+  }
 }

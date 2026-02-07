@@ -78,8 +78,9 @@ async def create_event(
     description: str | None = None,
     location: str | None = None,
     tz: str | None = None,
+    uid: str | None = None,
 ) -> CreatedEvent:
-    return await asyncio.to_thread(_create_event_sync, config, start_at, end_at, title, description, location, tz)
+    return await asyncio.to_thread(_create_event_sync, config, start_at, end_at, title, description, location, tz, uid)
 
 
 async def list_events(
@@ -113,12 +114,13 @@ def _create_event_sync(
     description: str | None,
     location: str | None,
     tz: str | None,
+    uid: str | None,
 ) -> CreatedEvent:
     calendar, calendar_name = _resolve_calendar(config)
     start_utc = _to_utc(_ensure_aware(start_at, tz))
     end_value = end_at if isinstance(end_at, datetime) else start_at + timedelta(hours=1)
     end_utc = _to_utc(_ensure_aware(end_value, tz))
-    uid = str(uuid.uuid4())
+    uid = uid or str(uuid.uuid4())
     ical = _build_ical_event(
         uid=uid,
         start_at=start_utc,
