@@ -316,6 +316,7 @@ class WizardManager:
             intent="utility_calendar.add",
             mode="local",
             actions=actions,
+            debug={"refs": {"event_id": event_id}} if isinstance(event_id, str) else {},
         )
 
 
@@ -414,6 +415,7 @@ class WizardManager:
                 Action(id="utility_reminders.list", label="📋 Список", payload={"op": "reminder.list"}),
                 Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}),
             ],
+            debug={"refs": {"reminder_id": reminder.id}},
         )
 
     async def _handle_reminder_reschedule_text(

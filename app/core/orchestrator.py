@@ -1208,6 +1208,7 @@ class Orchestrator:
                 "provider": "perplexity_search",
                 "sources_count": len(sources),
                 "latency_seconds": round(time.monotonic() - started_at, 3),
+                "query": trimmed_query,
             },
         )
         return ensure_valid(ensure_safe_text_strict(result, facts_enabled=facts_only, allow_sources_in_text=True))
