@@ -93,6 +93,24 @@ def test_create_wizard_creates_reminder(tmp_path, monkeypatch) -> None:
     assert reminders[0].recurrence is None
 
 
+def test_create_wizard_confirm_without_recurrence_step(tmp_path, monkeypatch) -> None:
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    store = WizardStore(tmp_path / "wizards")
+    manager = WizardManager(store, reminder_scheduler=None, settings=DummySettings())
+
+    started = asyncio_run(
+        manager.handle_action(user_id=7, chat_id=9, op="wizard_start", payload={"wizard_id": wizard.WIZARD_REMINDER_CREATE})
+    )
+    assert started.status == "ok"
+    step1 = asyncio_run(manager.handle_text(user_id=7, chat_id=9, text="Позвонить маме"))
+    assert step1.status == "ok"
+    step2 = asyncio_run(manager.handle_text(user_id=7, chat_id=9, text="2026-02-05 12:30"))
+    assert step2.status == "ok"
+    done = asyncio_run(manager.handle_action(user_id=7, chat_id=9, op="wizard_confirm", payload={}))
+    assert done.status == "ok"
+
+
 def test_calendar_add_schedules_reminder(tmp_path, monkeypatch) -> None:
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))

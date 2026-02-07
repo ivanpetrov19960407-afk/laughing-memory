@@ -399,6 +399,9 @@ class WizardManager:
             return _render_prompt(updated)
         if op != "wizard_confirm":
             return refused("Действие не поддерживается.", intent="wizard.reminder_create.action", mode="local")
+        if state.step == STEP_AWAIT_RECURRENCE:
+            state = _touch_state(state, step=STEP_CONFIRM, data={"recurrence": None})
+            self._store.save_state(user_id=user_id, chat_id=chat_id, state=state)
         if state.step != STEP_CONFIRM:
             return refused("Сначала заполни данные.", intent="wizard.reminder_create.confirm", mode="local")
         title = state.data.get("title")
