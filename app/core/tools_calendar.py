@@ -8,6 +8,15 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from app.core import calendar_store, recurrence_parse, tools_calendar_caldav
+from app.core.recurrence_series import (
+    build_series,
+    delete_instance_this,
+    delete_series_future,
+    edit_instance_this,
+    edit_series_all,
+    edit_series_future,
+    serialize_overrides,
+)
 from app.core.calendar_backend import CalendarCreateResult, LocalCalendarBackend
 from app.core.error_messages import map_error_text
 from app.core.recurrence_scope import RecurrenceScope, normalize_scope
@@ -653,15 +662,22 @@ async def delete_event(
     else:
         if event is None:
             return ensure_valid(refused("Событие не найдено.", intent=intent, mode="tool"))
-        updated_rrule, updated_exdates = _apply_recurrence_delete_scope(
-            event,
-            scope_value,
-            instance_dt=instance_dt,
-        )
+        series = build_series(event)
+        if scope_value == RecurrenceScope.THIS:
+            if instance_dt is None:
+                return ensure_valid(refused("Не удалось определить дату инстанса.", intent=intent, mode="tool"))
+            updated_series = delete_instance_this(series, instance_dt)
+        else:
+            if instance_dt is None:
+                return ensure_valid(refused("Не удалось определить дату инстанса.", intent=intent, mode="tool"))
+            updated_series = delete_series_future(series, instance_dt)
         updated_event, reminder_id = await calendar_store.update_event_fields(
             item_id,
-            new_rrule=updated_rrule,
-            new_exdates=updated_exdates,
+            new_rrule=updated_series.rrule,
+            new_exdates=updated_series.exdates,
+            new_overrides=serialize_overrides(updated_series.overrides),
+            new_timezone=updated_series.timezone.key,
+            new_series_id=updated_series.series_id,
         )
         removed = updated_event is not None
     deleted = deleted_remote or removed
@@ -929,55 +945,69 @@ async def _apply_local_update_scope(
     updated_start = _resolve_change_datetime(changes.get("start_at")) or event.dt
     updated_title = _resolve_change_text(changes.get("title")) or event.title
     if scope == RecurrenceScope.ALL or not event.rrule:
+        series = build_series(event)
+        updated_series = edit_series_all(
+            series,
+            {"start_at": updated_start, "title": updated_title, "rrule": changes.get("rrule")},
+        )
         updated_event, reminder_id = await calendar_store.update_event_fields(
             event.id,
-            new_dt=updated_start,
-            new_title=updated_title,
+            new_dt=updated_series.start_dt,
+            new_title=updated_series.title,
+            new_rrule=updated_series.rrule,
+            new_exdates=updated_series.exdates,
+            new_overrides=serialize_overrides(updated_series.overrides),
+            new_timezone=updated_series.timezone.key,
+            new_series_id=updated_series.series_id,
         )
         return updated_event, reminder_id
     if scope == RecurrenceScope.THIS:
-        updated_rrule, updated_exdates = _apply_recurrence_delete_scope(
-            event,
-            scope,
-            instance_dt=instance_dt,
+        if instance_dt is None:
+            return None, None
+        series = build_series(event)
+        updated_series = edit_instance_this(
+            series,
+            instance_dt,
+            {"start_at": updated_start, "title": updated_title},
         )
-        await calendar_store.update_event_fields(
+        updated_event, reminder_id = await calendar_store.update_event_fields(
             event.id,
-            new_rrule=updated_rrule,
-            new_exdates=updated_exdates,
+            new_rrule=updated_series.rrule,
+            new_exdates=updated_series.exdates,
+            new_overrides=serialize_overrides(updated_series.overrides),
+            new_timezone=updated_series.timezone.key,
+            new_series_id=updated_series.series_id,
         )
-        created = await calendar_store.add_item(
-            dt=updated_start,
-            title=updated_title,
-            chat_id=chat_id,
-            remind_at=None,
-            user_id=user_id,
-            reminders_enabled=False,
-        )
-        created_event = created.get("event") if isinstance(created, dict) else None
-        created_id = created_event.get("event_id") if isinstance(created_event, dict) else None
-        event_value = await calendar_store.get_event(created_id) if isinstance(created_id, str) else None
-        return event_value, None
+        return updated_event, reminder_id
     if scope == RecurrenceScope.FUTURE:
-        updated_rrule, updated_exdates = _apply_recurrence_delete_scope(
-            event,
-            scope,
-            instance_dt=instance_dt,
+        if instance_dt is None:
+            return None, None
+        series = build_series(event)
+        master_series, future_series = edit_series_future(
+            series,
+            instance_dt,
+            {"start_at": updated_start, "title": updated_title},
         )
         await calendar_store.update_event_fields(
             event.id,
-            new_rrule=updated_rrule,
-            new_exdates=updated_exdates,
+            new_rrule=master_series.rrule,
+            new_exdates=master_series.exdates,
+            new_overrides=serialize_overrides(master_series.overrides),
+            new_timezone=master_series.timezone.key,
+            new_series_id=master_series.series_id,
         )
-        new_rrule = _strip_rrule_parts(event.rrule, {"UNTIL", "COUNT"})
         created = await calendar_store.add_item(
-            dt=updated_start,
-            title=updated_title,
+            dt=future_series.start_dt,
+            title=future_series.title,
             chat_id=chat_id,
             remind_at=None,
             user_id=user_id,
             reminders_enabled=False,
-            rrule=new_rrule,
+            rrule=future_series.rrule,
+            exdates=future_series.exdates,
+            overrides=serialize_overrides(future_series.overrides),
+            series_id=None,
+            timezone=future_series.timezone.key,
         )
         created_event = created.get("event") if isinstance(created, dict) else None
         created_id = created_event.get("event_id") if isinstance(created_event, dict) else None

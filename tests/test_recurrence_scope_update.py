@@ -39,11 +39,8 @@ def test_update_event_this_scope_creates_exception(tmp_path, monkeypatch) -> Non
     assert master is not None
     assert master.exdates is not None
     assert any(item.isoformat() == start_at.isoformat() for item in master.exdates)
-    items = asyncio.run(calendar_store.list_items(None, None))
-    assert len(items) == 2
-    single = next(item for item in items if item.id != event_id)
-    assert single.dt == new_dt
-    assert single.rrule is None
+    assert master.overrides is not None
+    assert new_dt.isoformat() in master.overrides
 
 
 def test_update_event_all_scope_updates_master(tmp_path, monkeypatch) -> None:
