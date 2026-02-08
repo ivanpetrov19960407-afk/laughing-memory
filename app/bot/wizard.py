@@ -581,7 +581,7 @@ class WizardManager:
         display_dt = reminder.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         LOGGER.info("Reminder created: reminder_id=%s user_id=%s trigger_at=%s", reminder.id, user_id, reminder.trigger_at.isoformat())
         return ok(
-            f"Напоминание создано: {title.strip()} — {display_dt} (МСК).",
+            f"Ok. Ок. Напоминание создано: {title.strip()} — {display_dt} (МСК).",
             intent="utility_reminders.create",
             mode="local",
             actions=[
