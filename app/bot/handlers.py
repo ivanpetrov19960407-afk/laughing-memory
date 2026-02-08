@@ -271,7 +271,7 @@ async def _handle_caldav_settings(
             "CalDAV не подключён. Укажите CALDAV_URL/USERNAME/PASSWORD в окружении.",
             intent="settings.caldav.status",
             mode="local",
-            actions=[_menu_action()],
+            actions=[menu.menu_action()],
         )
     status = "CalDAV подключён."
     return ok(
@@ -284,7 +284,7 @@ async def _handle_caldav_settings(
                 label="Проверить подключение",
                 payload={"op": "caldav_check"},
             ),
-            _menu_action(),
+            menu.menu_action(),
         ],
     )
 
@@ -295,7 +295,7 @@ async def _handle_caldav_check(context: ContextTypes.DEFAULT_TYPE) -> Orchestrat
             "CalDAV не подключён. Укажите CALDAV_URL/USERNAME/PASSWORD.",
             intent="settings.caldav.check",
             mode="local",
-            actions=[_menu_action()],
+            actions=[menu.menu_action()],
         )
     ok_status, calendar_name = await tools_calendar.check_caldav_connection()
     if ok_status:
@@ -304,13 +304,13 @@ async def _handle_caldav_check(context: ContextTypes.DEFAULT_TYPE) -> Orchestrat
             f"✅ CalDAV подключён{name_suffix}.",
             intent="settings.caldav.check",
             mode="local",
-            actions=[_menu_action()],
+            actions=[menu.menu_action()],
         )
     return refused(
         "❌ Не удалось подключиться к CalDAV. Проверьте URL/логин/пароль.",
         intent="settings.caldav.check",
         mode="local",
-        actions=[_menu_action()],
+        actions=[menu.menu_action()],
     )
 
 
@@ -873,7 +873,7 @@ def _build_last_state_actions(action: str) -> list[Action]:
             label="Последний поиск",
             payload={"op": "last_state_action", "action": action, "ref": "search"},
         ),
-        _menu_action(),
+        menu.menu_action(),
     ]
 
 
@@ -904,21 +904,6 @@ def _log_memory_resolution(
         reason=reason,
         matched_ref=matched_ref or "-",
     )
-
-
-def _menu_action() -> Action:
-    return Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"})
-
-
-def _has_menu_action(actions: list[Action]) -> bool:
-    for action in actions:
-        payload = action.payload or {}
-        op = payload.get("op")
-        if op == "menu_open":
-            return True
-        if op == "menu_section" and payload.get("section") == "home":
-            return True
-    return False
 
 
 def _document_actions(doc_id: str) -> list[Action]:
@@ -1100,7 +1085,7 @@ def _calendar_list_controls_actions() -> list[Action]:
     return [
         Action(id="utility_calendar.add", label="➕ Добавить", payload={"op": "calendar.add"}),
         Action(id="utility_calendar.list", label="🔄 Обновить", payload={"op": "calendar.list"}),
-        _menu_action(),
+        menu.menu_action(),
     ]
 
 
@@ -1139,7 +1124,7 @@ def _reminder_list_controls_actions() -> list[Action]:
     return [
         Action(id="utility_reminders.create", label="➕ Создать", payload={"op": "reminder.create"}),
         Action(id="utility_reminders.list", label="🔄 Обновить", payload={"op": "reminder.list", "limit": 10}),
-        _menu_action(),
+        menu.menu_action(),
     ]
 
 
@@ -1591,8 +1576,8 @@ async def send_result(
                         Action(id="debug.trace", label="Trace", payload={"op": "trace_last"}),
                     ],
                 )
-    if public_result.status in {"refused", "error"} and not _has_menu_action(public_result.actions):
-        public_result = replace(public_result, actions=[*public_result.actions, _menu_action()])
+    if public_result.status in {"refused", "error"} and not menu.has_menu_action(public_result.actions):
+        public_result = replace(public_result, actions=[*public_result.actions, menu.menu_action()])
     if request_id:
         sent_key = f"send_result:{request_id}"
         if context.chat_data.get(sent_key):
@@ -1761,7 +1746,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "Неизвестная команда. Открой меню.",
         intent="command.unknown",
         mode="local",
-        actions=[_menu_action()],
+        actions=[menu.menu_action()],
     )
     await send_result(update, context, result)
 
@@ -2653,12 +2638,12 @@ async def _handle_menu_section(
                 "Раздел меню недоступен.",
                 intent="menu.unknown",
                 mode="local",
-                actions=[_menu_action()],
+                actions=[menu.menu_action()],
             )
         actions = (
             menu.build_menu_actions(facts_enabled=False, enable_menu=True)
             if section == "home"
-            else [_menu_action()]
+            else [menu.menu_action()]
         )
         return ok(text_map[section], intent=f"menu.section.{section}", mode="local", actions=actions)
     orchestrator = _get_orchestrator(context)
@@ -2675,7 +2660,7 @@ async def _handle_menu_section(
                 label="📌 Режим фактов",
                 payload={"op": "run_command", "command": facts_command, "args": ""},
             ),
-            _menu_action(),
+            menu.menu_action(),
         ]
         if dialog_memory is not None:
             actions.insert(
@@ -2715,7 +2700,7 @@ async def _handle_menu_section(
                     label="ℹ️ Примеры",
                     payload={"op": "menu_section", "section": "calc_examples"},
                 ),
-                _menu_action(),
+                menu.menu_action(),
             ],
         )
     if section == "calc_examples":
@@ -2723,7 +2708,7 @@ async def _handle_menu_section(
             "Примеры:\n• 12*(5+3)\n• 100/4\n• (7+9)*2",
             intent="menu.calc.examples",
             mode="local",
-            actions=[_menu_action()],
+            actions=[menu.menu_action()],
         )
     if section == "calendar":
         return ok(
@@ -2746,7 +2731,7 @@ async def _handle_menu_section(
                     label="📋 Список",
                     payload={"op": "calendar.list"},
                 ),
-                _menu_action(),
+                menu.menu_action(),
             ],
         )
     if section == "reminders":
@@ -2765,7 +2750,7 @@ async def _handle_menu_section(
                     label="📋 Список",
                     payload={"op": "reminder.list", "limit": 10},
                 ),
-                _menu_action(),
+                menu.menu_action(),
             ],
         )
     if section == "settings":
@@ -2809,7 +2794,7 @@ async def _handle_menu_section(
                     label="📜 История",
                     payload={"op": "run_command", "command": "/history", "args": ""},
                 ),
-                _menu_action(),
+                menu.menu_action(),
             ],
         )
     if section == "search":
@@ -2828,7 +2813,7 @@ async def _handle_menu_section(
                     label="📌 Режим фактов",
                     payload={"op": "run_command", "command": facts_command, "args": ""},
                 ),
-                _menu_action(),
+                menu.menu_action(),
             ],
         )
     if section == "images":
@@ -2847,7 +2832,7 @@ async def _handle_menu_section(
                     label="ℹ️ Примеры",
                     payload={"op": "menu_section", "section": "image_examples"},
                 ),
-                _menu_action(),
+                menu.menu_action(),
             ],
         )
     if section == "image_examples":
@@ -2855,13 +2840,13 @@ async def _handle_menu_section(
             "Примеры:\n• Слон в космосе\n• Замок на берегу моря\n• Робот в стиле пиксель-арт",
             intent="menu.images.examples",
             mode="local",
-            actions=[_menu_action()],
+            actions=[menu.menu_action()],
         )
     return refused(
         "Раздел меню недоступен.",
         intent="menu.unknown",
         mode="local",
-        actions=[_menu_action()],
+        actions=[menu.menu_action()],
     )
 
 
@@ -3143,7 +3128,7 @@ async def _dispatch_action_payload(
                 "Укажи новую дату и время для переноса. Например: завтра 10:00.",
                 intent="memory.resolve",
                 mode="local",
-                actions=[_menu_action()],
+                actions=[menu.menu_action()],
             )
         return _build_resolution_fallback(action_value, reason="unsupported_action")
     if op_value == "menu_section":
@@ -3279,7 +3264,7 @@ async def _dispatch_action_payload(
             "Напиши событие одной фразой.",
             intent="calendar.nlp.start",
             mode="local",
-            actions=[_menu_action()],
+            actions=[menu.menu_action()],
         )
     if op_value == "calendar.create_confirm":
         draft_id = payload.get("draft_id")

@@ -56,6 +56,21 @@ def build_menu_actions(*, facts_enabled: bool, enable_menu: bool) -> list[Action
     ]
 
 
+def menu_action() -> Action:
+    return Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"})
+
+
+def has_menu_action(actions: list[Action]) -> bool:
+    for action in actions:
+        payload = action.payload or {}
+        op = payload.get("op")
+        if op == "menu_open":
+            return True
+        if op == "menu_section" and payload.get("section") == "home":
+            return True
+    return False
+
+
 def build_legacy_menu_actions(*, facts_enabled: bool) -> list[Action]:
     facts_label = "🔎 Facts OFF" if facts_enabled else "🔎 Facts ON"
     facts_command = "/facts_off" if facts_enabled else "/facts_on"
