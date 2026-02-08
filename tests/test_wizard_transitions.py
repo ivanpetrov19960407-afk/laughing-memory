@@ -39,10 +39,12 @@ def test_wizard_add_event_flow(tmp_path, monkeypatch) -> None:
     invalid = asyncio.run(manager.handle_text(user_id=1, chat_id=10, text="wrong"))
     assert invalid is not None
     assert invalid.status == "refused"
+    assert "Введи дату" in invalid.text
+    assert any(action.label == "❌ Отмена" for action in invalid.actions)
 
     step_one = asyncio.run(manager.handle_text(user_id=1, chat_id=10, text="2026-02-05 18:30"))
     assert step_one is not None
-    assert "название" in step_one.text.lower()
+    assert "назвать" in step_one.text.lower()
 
     step_two = asyncio.run(manager.handle_text(user_id=1, chat_id=10, text="Врач"))
     assert step_two is not None
@@ -186,6 +188,7 @@ def test_wizard_cancel_and_timeout(tmp_path) -> None:
 
     cancelled = manager.cancel(user_id=5, chat_id=50)
     assert cancelled.status == "refused"
+    assert any(action.label == "🏠 Меню" for action in cancelled.actions)
 
     expired_state = WizardState(
         wizard_id=WIZARD_CALENDAR_ADD,
@@ -199,3 +202,4 @@ def test_wizard_cancel_and_timeout(tmp_path) -> None:
     result = asyncio.run(manager.handle_text(user_id=6, chat_id=60, text="2026-02-05 18:30"))
     assert result is not None
     assert "истёк" in result.text.lower()
+    assert any(action.label == "🏠 Меню" for action in result.actions)

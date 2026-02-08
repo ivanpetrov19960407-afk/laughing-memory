@@ -907,7 +907,18 @@ def _log_memory_resolution(
 
 
 def _menu_action() -> Action:
-    return Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_section", "section": "home"})
+    return Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"})
+
+
+def _has_menu_action(actions: list[Action]) -> bool:
+    for action in actions:
+        payload = action.payload or {}
+        op = payload.get("op")
+        if op == "menu_open":
+            return True
+        if op == "menu_section" and payload.get("section") == "home":
+            return True
+    return False
 
 
 def _document_actions(doc_id: str) -> list[Action]:
@@ -1580,6 +1591,8 @@ async def send_result(
                         Action(id="debug.trace", label="Trace", payload={"op": "trace_last"}),
                     ],
                 )
+    if public_result.status in {"refused", "error"} and not _has_menu_action(public_result.actions):
+        public_result = replace(public_result, actions=[*public_result.actions, _menu_action()])
     if request_id:
         sent_key = f"send_result:{request_id}"
         if context.chat_data.get(sent_key):
@@ -1745,7 +1758,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await _guard_access(update, context):
         return
     result = refused(
-        "Неизвестная команда. Открой /menu.",
+        "Неизвестная команда. Открой меню.",
         intent="command.unknown",
         mode="local",
         actions=[_menu_action()],
@@ -2912,7 +2925,7 @@ async def static_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if chat_id is None:
         LOGGER.warning("Callback missing chat_id: user_id=%s data=%r", user_id, data)
         result = refused(
-            "Не удалось обработать кнопку. Открой /menu.",
+            "Не удалось обработать кнопку. Открой меню.",
             intent="callback.missing_chat",
             mode="local",
         )
@@ -2955,7 +2968,7 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if chat_id is None:
         LOGGER.warning("Callback missing chat_id: user_id=%s data=%r", user_id, data)
         result = refused(
-            "Не удалось обработать кнопку. Открой /menu.",
+            "Не удалось обработать кнопку. Открой меню.",
             intent="callback.missing_chat",
             mode="local",
         )
@@ -2992,7 +3005,7 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
         LOGGER.info("Callback dispatch: action_id=%s intent=%s", action_id, "-")
         result = refused(
-            "Кнопка устарела, открой /menu заново.",
+            "Кнопка устарела. Открой меню заново.",
             intent="callback.expired",
             mode="local",
             debug={"reason": "action_missing"},
@@ -3056,7 +3069,7 @@ async def _dispatch_action_payload(
     if chat_id is None:
         LOGGER.warning("Dispatch action missing chat_id: user_id=%s intent=%s", user_id, intent)
         return refused(
-            "Не удалось обработать кнопку. Открой /menu.",
+            "Не удалось обработать кнопку. Открой меню.",
             intent="callback.missing_chat",
             mode="local",
         )
@@ -3223,8 +3236,7 @@ async def _dispatch_action_payload(
         manager = _get_wizard_manager(context)
         if manager is None:
             return error("Сценарии не настроены.", intent="wizard.missing", mode="local")
-        manager.cancel(user_id=user_id, chat_id=chat_id)
-        return refused("Отменено.", intent="wizard.cancel", mode="local")
+        return manager.cancel(user_id=user_id, chat_id=chat_id)
     if op_value in {
         "wizard_start",
         "wizard_continue",
@@ -3791,7 +3803,7 @@ async def _dispatch_command_payload(
         text = "Контекст включён." if enabled else "Контекст выключён."
         return ok(text, intent="menu.context", mode="local")
     return refused(
-        "Неизвестная команда. Открой /menu.",
+        "Неизвестная команда. Открой меню.",
         intent="ui.action",
         mode="local",
         debug={"command": command, "args": args},
