@@ -48,3 +48,4 @@ def test_unknown_command_returns_refused(monkeypatch) -> None:
     result = captured["result"]
     assert result.status == "refused"
     assert "Неизвестная команда" in result.text
+    assert any(action.label == "🏠 Меню" for action in result.actions)

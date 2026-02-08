@@ -67,7 +67,7 @@ class WizardManager:
         if state.wizard_id == WIZARD_PROFILE_SET:
             return await self._handle_profile_set_text(state, user_id=user_id, chat_id=chat_id, text=text)
         return refused(
-            "Неизвестный сценарий. Открой /menu.",
+            "Неизвестный сценарий. Вернись в меню.",
             intent="wizard.unknown",
             mode="local",
             actions=_menu_actions(),
@@ -87,11 +87,21 @@ class WizardManager:
         wizard_id = payload.get("wizard_id")
         if op == "wizard_start":
             if not isinstance(wizard_id, str):
-                return refused("Некорректный сценарий.", intent="wizard.start", mode="local")
+                return refused(
+                    "Некорректный сценарий.",
+                    intent="wizard.start",
+                    mode="local",
+                    actions=_menu_actions(),
+                )
             if wizard_id == WIZARD_REMINDER_RESCHEDULE:
                 reminder_id = payload.get("reminder_id")
                 if not isinstance(reminder_id, str) or not reminder_id:
-                    return refused("Некорректный reminder_id.", intent="wizard.start", mode="local")
+                    return refused(
+                        "Некорректный reminder_id.",
+                        intent="wizard.start",
+                        mode="local",
+                        actions=_menu_actions(),
+                    )
                 return await self.start_reminder_reschedule(user_id=user_id, chat_id=chat_id, reminder_id=reminder_id)
             if wizard_id == WIZARD_PROFILE_SET:
                 return self.start_profile_set(user_id=user_id, chat_id=chat_id)
@@ -103,7 +113,12 @@ class WizardManager:
             )
         if op in {"wizard_continue", "wizard_restart"}:
             if state is None:
-                return refused("Нет активного сценария.", intent="wizard.continue", mode="local")
+                return refused(
+                    "Нет активного сценария.",
+                    intent="wizard.continue",
+                    mode="local",
+                    actions=_menu_actions(),
+                )
             if op == "wizard_restart":
                 self._store.clear_state(user_id=user_id, chat_id=chat_id)
                 resume_target = payload.get("resume_target")
@@ -112,7 +127,12 @@ class WizardManager:
             return _render_prompt(state)
         if op == "wizard_cancel":
             if state is None:
-                return refused("Активный сценарий не найден.", intent="wizard.cancel", mode="local")
+                return refused(
+                    "Активный сценарий не найден.",
+                    intent="wizard.cancel",
+                    mode="local",
+                    actions=_menu_actions(),
+                )
             self._store.clear_state(user_id=user_id, chat_id=chat_id)
             return refused(
                 "Сценарий отменён.",
@@ -161,7 +181,12 @@ class WizardManager:
         if expired:
             return _expired_result()
         if state is None:
-            return refused("Активный сценарий не найден.", intent="wizard.cancel", mode="local")
+            return refused(
+                "Активный сценарий не найден.",
+                intent="wizard.cancel",
+                mode="local",
+                actions=_menu_actions(),
+            )
         self._store.clear_state(user_id=user_id, chat_id=chat_id)
         return refused("Сценарий отменён.", intent="wizard.cancel", mode="local", actions=_menu_actions())
 
@@ -181,7 +206,12 @@ class WizardManager:
                 actions=_resume_actions(active_state.wizard_id, resume_target=wizard_id),
             )
         if wizard_id not in {WIZARD_CALENDAR_ADD, WIZARD_REMINDER_CREATE}:
-            return refused("Сценарий недоступен.", intent="wizard.start", mode="local")
+            return refused(
+                "Сценарий недоступен.",
+                intent="wizard.start",
+                mode="local",
+                actions=_menu_actions(),
+            )
         now = datetime.now(timezone.utc)
         step = STEP_AWAIT_DATETIME
         if wizard_id == WIZARD_REMINDER_CREATE:
@@ -219,12 +249,14 @@ class WizardManager:
                 f"Напоминание не найдено: {reminder_id}",
                 intent="wizard.reminder.missing",
                 mode="local",
+                actions=_menu_actions(),
             )
         if reminder.status != "active":
             return refused(
                 "Напоминание отключено, перенос недоступен.",
                 intent="wizard.reminder.disabled",
                 mode="local",
+                actions=_menu_actions(),
             )
         now = datetime.now(timezone.utc)
         state = WizardState(
@@ -273,10 +305,11 @@ class WizardManager:
         if state.step == STEP_AWAIT_DATETIME:
             try:
                 parsed = calendar_store.parse_calendar_event_from_text(text)
-            except ValueError as exc:
+            except ValueError:
                 return refused(
-                    f"{exc}. Пример: 2026-02-05 18:30, сегодня 18:30, через 10 минут, "
-                    "завтра в 7 вечера созвон или в пятницу 10:15 встреча",
+                    "Не понял дату. Формат: YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
+                    "Пример: 10.02 14:30 или «завтра 9:00».\n"
+                    "Введи дату и время события ещё раз.",
                     intent="wizard.calendar.datetime",
                     mode="local",
                     actions=_step_actions(),
@@ -290,7 +323,7 @@ class WizardManager:
             updated = _touch_state(state, step=STEP_AWAIT_TITLE, data={"dt": dt.isoformat()})
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return ok(
-                "Отлично. Теперь напиши название события.",
+                "Как назвать событие?",
                 intent="wizard.calendar.title",
                 mode="local",
                 actions=_step_actions(),
@@ -299,7 +332,7 @@ class WizardManager:
             title = text.strip()
             if not title:
                 return refused(
-                    "Название не может быть пустым. Попробуй ещё раз.",
+                    "Название не может быть пустым. Как назвать событие?",
                     intent="wizard.calendar.title",
                     mode="local",
                     actions=_step_actions(),
@@ -314,7 +347,12 @@ class WizardManager:
                 mode="local",
                 actions=_confirm_actions(),
             )
-        return refused("Шаг сценария не распознан.", intent="wizard.calendar.step", mode="local")
+        return refused(
+            "Шаг сценария не распознан.",
+            intent="wizard.calendar.step",
+            mode="local",
+            actions=_menu_actions(),
+        )
 
     async def _handle_calendar_add_action(
         self,
@@ -330,17 +368,37 @@ class WizardManager:
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return _render_prompt(updated)
         if op != "wizard_confirm":
-            return refused("Действие не поддерживается.", intent="wizard.calendar.action", mode="local")
+            return refused(
+                "Действие не поддерживается.",
+                intent="wizard.calendar.action",
+                mode="local",
+                actions=_step_actions(),
+            )
         if state.step != STEP_CONFIRM:
-            return refused("Сначала заполни данные.", intent="wizard.calendar.confirm", mode="local")
+            return refused(
+                "Сначала заполни данные.",
+                intent="wizard.calendar.confirm",
+                mode="local",
+                actions=_step_actions(),
+            )
         dt_value = state.data.get("dt")
         title = state.data.get("title")
         if not isinstance(dt_value, str) or not isinstance(title, str) or not title.strip():
-            return refused("Не хватает данных для создания события.", intent="wizard.calendar.confirm", mode="local")
+            return refused(
+                "Не хватает данных для создания события.",
+                intent="wizard.calendar.confirm",
+                mode="local",
+                actions=_step_actions(),
+            )
         try:
             dt = datetime.fromisoformat(dt_value)
         except ValueError:
-            return refused("Дата повреждена, начни заново.", intent="wizard.calendar.confirm", mode="local")
+            return refused(
+                "Дата повреждена. Начни заново из меню.",
+                intent="wizard.calendar.confirm",
+                mode="local",
+                actions=_menu_actions(),
+            )
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=calendar_store.BOT_TZ)
         reminders_enabled = self._settings is None or bool(getattr(self._settings, "reminders_enabled", False))
@@ -385,7 +443,7 @@ class WizardManager:
             title = text.strip()
             if not title:
                 return refused(
-                    "Текст напоминания не должен быть пустым.",
+                    "Текст напоминания не должен быть пустым. Что напомнить?",
                     intent="wizard.reminder_create.title",
                     mode="local",
                     actions=_step_actions(),
@@ -402,9 +460,11 @@ class WizardManager:
         if state.step == STEP_AWAIT_DATETIME:
             try:
                 dt = calendar_store.parse_user_datetime(text)
-            except ValueError as exc:
+            except ValueError:
                 return refused(
-                    f"{exc}. Пример: сегодня 18:30, 07.02 12:00 или через 10 минут",
+                    "Не понял дату. Формат: YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
+                    "Пример: 10.02 14:30 или «завтра 9:00».\n"
+                    "Когда напомнить?",
                     intent="wizard.reminder_create.datetime",
                     mode="local",
                     actions=_step_actions(),
@@ -423,7 +483,8 @@ class WizardManager:
                 recurrence = _parse_recurrence_input(text)
             except ValueError as exc:
                 return refused(
-                    f"{exc}. Пример: daily, weekdays/2, weekly:1,3/2, monthly:15.",
+                    f"{exc}. Пример: daily, weekdays/2, weekly:1,3/2, monthly:15.\n"
+                    "Нужен повтор?",
                     intent="wizard.reminder_create.recurrence",
                     mode="local",
                     actions=_step_actions(),
@@ -432,8 +493,18 @@ class WizardManager:
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return _render_prompt(updated)
         if state.step == STEP_CONFIRM:
-            return refused("Подтверди действие кнопками ниже.", intent="wizard.reminder_create.confirm", mode="local", actions=_confirm_actions())
-        return refused("Шаг сценария не распознан.", intent="wizard.reminder_create.step", mode="local", actions=_step_actions())
+            return refused(
+                "Подтверди действие кнопками ниже.",
+                intent="wizard.reminder_create.confirm",
+                mode="local",
+                actions=_confirm_actions(),
+            )
+        return refused(
+            "Шаг сценария не распознан.",
+            intent="wizard.reminder_create.step",
+            mode="local",
+            actions=_step_actions(),
+        )
 
     async def _handle_reminder_create_action(
         self,
@@ -449,21 +520,41 @@ class WizardManager:
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return _render_prompt(updated)
         if op != "wizard_confirm":
-            return refused("Действие не поддерживается.", intent="wizard.reminder_create.action", mode="local")
+            return refused(
+                "Действие не поддерживается.",
+                intent="wizard.reminder_create.action",
+                mode="local",
+                actions=_step_actions(),
+            )
         if state.step == STEP_AWAIT_RECURRENCE:
             state = _touch_state(state, step=STEP_CONFIRM, data={"recurrence": None})
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=state)
         if state.step != STEP_CONFIRM:
-            return refused("Сначала заполни данные.", intent="wizard.reminder_create.confirm", mode="local")
+            return refused(
+                "Сначала заполни данные.",
+                intent="wizard.reminder_create.confirm",
+                mode="local",
+                actions=_step_actions(),
+            )
         title = state.data.get("title")
         trigger_value = state.data.get("trigger_at")
         recurrence_value = state.data.get("recurrence")
         if not isinstance(title, str) or not isinstance(trigger_value, str):
-            return refused("Не хватает данных для создания напоминания.", intent="wizard.reminder_create.confirm", mode="local")
+            return refused(
+                "Не хватает данных для создания напоминания.",
+                intent="wizard.reminder_create.confirm",
+                mode="local",
+                actions=_step_actions(),
+            )
         try:
             trigger_at = datetime.fromisoformat(trigger_value)
         except ValueError:
-            return refused("Дата повреждена, начни заново.", intent="wizard.reminder_create.confirm", mode="local")
+            return refused(
+                "Дата повреждена. Начни заново из меню.",
+                intent="wizard.reminder_create.confirm",
+                mode="local",
+                actions=_menu_actions(),
+            )
         if trigger_at.tzinfo is None:
             trigger_at = trigger_at.replace(tzinfo=calendar_store.BOT_TZ)
         recurrence = recurrence_value if isinstance(recurrence_value, dict) else None
@@ -478,14 +569,19 @@ class WizardManager:
             )
         except Exception:
             LOGGER.exception("Failed to create reminder")
-            return error("Не удалось создать напоминание.", intent="wizard.reminder_create.confirm", mode="local")
+            return error(
+                "Не удалось создать напоминание.",
+                intent="wizard.reminder_create.confirm",
+                mode="local",
+                actions=_menu_actions(),
+            )
         if self._reminder_scheduler and (self._settings is None or self._settings.reminders_enabled):
             await self._reminder_scheduler.schedule_reminder(reminder)
         self._store.clear_state(user_id=user_id, chat_id=chat_id)
         display_dt = reminder.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         LOGGER.info("Reminder created: reminder_id=%s user_id=%s trigger_at=%s", reminder.id, user_id, reminder.trigger_at.isoformat())
         return ok(
-            f"Ок, поставил на {display_dt} (МСК).",
+            f"Ok. Ок. Напоминание создано: {title.strip()} — {display_dt} (МСК).",
             intent="utility_reminders.create",
             mode="local",
             actions=[
@@ -512,9 +608,11 @@ class WizardManager:
             )
         try:
             dt = calendar_store.parse_user_datetime(text)
-        except ValueError as exc:
+        except ValueError:
             return refused(
-                f"{exc}. Пример: сегодня 18:30, 07.02 12:00 или через 10 минут",
+                "Не понял дату. Формат: YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
+                "Пример: 10.02 14:30 или «завтра 9:00».\n"
+                "Когда перенести напоминание?",
                 intent="wizard.reminder.datetime",
                 mode="local",
                 actions=_step_actions(),
@@ -537,17 +635,37 @@ class WizardManager:
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return _render_prompt(updated)
         if op != "wizard_confirm":
-            return refused("Действие не поддерживается.", intent="wizard.reminder.action", mode="local")
+            return refused(
+                "Действие не поддерживается.",
+                intent="wizard.reminder.action",
+                mode="local",
+                actions=_step_actions(),
+            )
         if state.step != STEP_CONFIRM:
-            return refused("Сначала заполни данные.", intent="wizard.reminder.confirm", mode="local")
+            return refused(
+                "Сначала заполни данные.",
+                intent="wizard.reminder.confirm",
+                mode="local",
+                actions=_step_actions(),
+            )
         reminder_id = state.data.get("reminder_id")
         new_trigger_value = state.data.get("new_trigger_at")
         if not isinstance(reminder_id, str) or not isinstance(new_trigger_value, str):
-            return refused("Не хватает данных для переноса.", intent="wizard.reminder.confirm", mode="local")
+            return refused(
+                "Не хватает данных для переноса.",
+                intent="wizard.reminder.confirm",
+                mode="local",
+                actions=_step_actions(),
+            )
         try:
             new_trigger = datetime.fromisoformat(new_trigger_value)
         except ValueError:
-            return refused("Дата повреждена, начни заново.", intent="wizard.reminder.confirm", mode="local")
+            return refused(
+                "Дата повреждена. Начни заново из меню.",
+                intent="wizard.reminder.confirm",
+                mode="local",
+                actions=_menu_actions(),
+            )
         if new_trigger.tzinfo is None:
             new_trigger = new_trigger.replace(tzinfo=calendar_store.BOT_TZ)
         reminder = await calendar_store.get_reminder(reminder_id)
@@ -556,6 +674,7 @@ class WizardManager:
                 f"Напоминание не найдено: {reminder_id}",
                 intent="wizard.reminder.missing",
                 mode="local",
+                actions=_menu_actions(),
             )
         updated = await calendar_store.update_reminder_trigger(reminder_id, new_trigger, enabled=True)
         if updated is None:
@@ -563,6 +682,7 @@ class WizardManager:
                 "Не удалось перенести напоминание.",
                 intent="wizard.reminder.confirm",
                 mode="local",
+                actions=_menu_actions(),
             )
         if self._reminder_scheduler and (self._settings is None or self._settings.reminders_enabled):
             try:
@@ -573,6 +693,7 @@ class WizardManager:
                     "Не удалось перенести напоминание.",
                     intent="wizard.reminder.confirm",
                     mode="local",
+                    actions=_menu_actions(),
                 )
         self._store.clear_state(user_id=user_id, chat_id=chat_id)
         LOGGER.info(
@@ -584,7 +705,7 @@ class WizardManager:
         )
         display_dt = updated.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         return ok(
-            f"Ок, перенёс на {display_dt}.",
+            f"Напоминание перенесено на {display_dt} (МСК).",
             intent="wizard.reminder.done",
             mode="local",
             actions=_menu_actions(),
@@ -599,7 +720,12 @@ class WizardManager:
         text: str,
     ) -> OrchestratorResult:
         if self._profile_store is None:
-            return error("Профиль не настроен.", intent="wizard.profile.missing", mode="local")
+            return error(
+                "Профиль не настроен.",
+                intent="wizard.profile.missing",
+                mode="local",
+                actions=_menu_actions(),
+            )
         if state.step == STEP_PROFILE_LANGUAGE:
             language = _parse_language(text)
             if language is None:
@@ -621,7 +747,7 @@ class WizardManager:
             timezone_value = _normalize_timezone(text)
             if timezone_value is None:
                 return refused(
-                    "Не понял таймзону. Пример: Europe/Vilnius.",
+                    "Не понял таймзону. Пример: Europe/Vilnius.\nУкажи таймзону ещё раз.",
                     intent="wizard.profile.timezone",
                     mode="local",
                     actions=_profile_timezone_actions(),
@@ -671,7 +797,7 @@ class WizardManager:
             updated = _touch_state(state, step=STEP_PROFILE_REMINDERS_OFFSET, data={"reminders_enabled": True})
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return ok(
-                "За сколько минут до события напоминать? (например 10 или 2h)",
+                "За сколько минут до события напоминать? Например: 10 или 2h.",
                 intent="wizard.profile.reminders_offset",
                 mode="local",
                 actions=_profile_offset_actions(),
@@ -680,7 +806,7 @@ class WizardManager:
             offset = _parse_offset_minutes(text)
             if offset is None:
                 return refused(
-                    "Нужно число минут или формат 2h.",
+                    "Нужно число минут или формат 2h. Например: 10 или 2h.",
                     intent="wizard.profile.reminders_offset",
                     mode="local",
                     actions=_profile_offset_actions(),
@@ -692,7 +818,12 @@ class WizardManager:
                 reminders_enabled=True,
                 offset_minutes=offset,
             )
-        return refused("Шаг сценария не распознан.", intent="wizard.profile.step", mode="local")
+        return refused(
+            "Шаг сценария не распознан.",
+            intent="wizard.profile.step",
+            mode="local",
+            actions=_menu_actions(),
+        )
 
     async def _handle_profile_set_action(
         self,
@@ -704,11 +835,21 @@ class WizardManager:
         payload: dict[str, object],
     ) -> OrchestratorResult:
         if self._profile_store is None:
-            return error("Профиль не настроен.", intent="wizard.profile.missing", mode="local")
+            return error(
+                "Профиль не настроен.",
+                intent="wizard.profile.missing",
+                mode="local",
+                actions=_menu_actions(),
+            )
         if op == "wizard_profile_pick":
             value = payload.get("value")
             if not isinstance(value, str):
-                return refused("Некорректный выбор.", intent="wizard.profile.pick", mode="local")
+                return refused(
+                    "Некорректный выбор.",
+                    intent="wizard.profile.pick",
+                    mode="local",
+                    actions=_profile_language_actions(),
+                )
             return await self._handle_profile_set_text(state, user_id=user_id, chat_id=chat_id, text=value)
         if op == "wizard_profile_manual":
             target = payload.get("target")
@@ -726,8 +867,18 @@ class WizardManager:
                     mode="local",
                     actions=_profile_offset_actions(),
                 )
-            return refused("Сначала заполни текущий шаг.", intent="wizard.profile.step", mode="local")
-        return refused("Действие не поддерживается.", intent="wizard.profile.action", mode="local")
+            return refused(
+                "Сначала заполни текущий шаг.",
+                intent="wizard.profile.step",
+                mode="local",
+                actions=_menu_actions(),
+            )
+        return refused(
+            "Действие не поддерживается.",
+            intent="wizard.profile.action",
+            mode="local",
+            actions=_menu_actions(),
+        )
 
     def _finalize_profile(
         self,
@@ -739,7 +890,12 @@ class WizardManager:
         offset_minutes: int | None,
     ) -> OrchestratorResult:
         if self._profile_store is None:
-            return error("Профиль не настроен.", intent="wizard.profile.missing", mode="local")
+            return error(
+                "Профиль не настроен.",
+                intent="wizard.profile.missing",
+                mode="local",
+                actions=_menu_actions(),
+            )
         patch: dict[str, object] = {}
         if isinstance(state.data.get("language"), str):
             patch["language"] = state.data["language"]
@@ -805,7 +961,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
         )
     if state.wizard_id == WIZARD_PROFILE_SET and state.step == STEP_PROFILE_REMINDERS_OFFSET:
         return ok(
-            "За сколько минут до события напоминать? (например 10 или 2h)",
+            "За сколько минут до события напоминать? Например: 10 или 2h.",
             intent="wizard.profile.reminders_offset",
             mode="local",
             actions=_profile_offset_actions(),
@@ -814,7 +970,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
         return ok("Что напомнить? Напиши текст напоминания.", intent="wizard.reminder_create.title", mode="local", actions=_step_actions())
     if state.wizard_id == WIZARD_REMINDER_CREATE and state.step == STEP_AWAIT_DATETIME:
         return ok(
-            "Пришли дату и время в формате YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
+            "Когда напомнить? Формат: YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
             "Можно: сегодня 18:30, 07.02 12:00 или через 10 минут.",
             intent="wizard.reminder_create.datetime",
             mode="local",
@@ -843,7 +999,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
         )
     if state.wizard_id == WIZARD_REMINDER_RESCHEDULE and state.step == STEP_AWAIT_DATETIME:
         return ok(
-            "Пришли новую дату и время в формате YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
+            "Когда перенести? Формат: YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
             "Можно: сегодня 18:30, 07.02 12:00 или через 10 минут.",
             intent="wizard.reminder.datetime",
             mode="local",
@@ -871,16 +1027,15 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
         )
     if state.step == STEP_AWAIT_DATETIME:
         return ok(
-            "Введи дату и время события в формате YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
-            "Можно одной строкой с названием: завтра 19:00 врач, через 2 часа тренировка, в пятницу 10:15 встреча.\n"
-            "Пример строгого формата: 2026-02-05 18:30 или 05.02.2026 18:30",
+            "Введи дату и время события. Формат: YYYY-MM-DD HH:MM или DD.MM.YYYY HH:MM.\n"
+            "Пример: 10.02 14:30 или 2026-02-05 18:30. Можно вместе с названием: завтра 19:00 врач.",
             intent="wizard.calendar.datetime",
             mode="local",
             actions=_step_actions(),
         )
     if state.step == STEP_AWAIT_TITLE:
         return ok(
-            "Как назвать событие? Например: Врач",
+            "Как назвать событие? Например: Врач.",
             intent="wizard.calendar.title",
             mode="local",
             actions=_step_actions(),
@@ -907,7 +1062,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
             mode="local",
             actions=_confirm_actions(),
         )
-    return refused("Неизвестный шаг.", intent="wizard.calendar.step", mode="local")
+    return refused("Неизвестный шаг.", intent="wizard.calendar.step", mode="local", actions=_menu_actions())
 
 
 
@@ -1087,7 +1242,7 @@ def _profile_summary(profile: UserProfile) -> str:
 
 def _expired_result() -> OrchestratorResult:
     return refused(
-        "Сценарий истёк. Открой /menu.",
+        "Сценарий истёк. Начни заново из меню.",
         intent="wizard.expired",
         mode="local",
         actions=_menu_actions(),
@@ -1182,7 +1337,7 @@ def _resume_actions(wizard_id: str, *, resume_target: str | None = None) -> list
     return [
         Action(id="wizard.resume", label="▶️ Продолжить", payload={"op": "wizard.resume"}),
         Action(id="wizard.restart", label="🔄 Начать заново", payload=restart_payload),
-        Action(id="wizard.cancel", label="❌ Отмена", payload={"op": "wizard.cancel"}),
+        Action(id="wizard.cancel", label="❌ Отмена", payload={"op": "wizard_cancel"}),
     ]
 
 
