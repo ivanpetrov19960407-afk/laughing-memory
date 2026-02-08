@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import os
 import sys
@@ -1120,10 +1121,43 @@ def _build_recurrence_scope_actions(
     ]
 
 
-def _reminder_list_controls_actions() -> list[Action]:
+def _reminder_list_controls_actions(*, include_refresh: bool = True) -> list[Action]:
+    actions = [Action(id="utility_reminders.create", label="➕ Создать", payload={"op": "reminder.create"})]
+    if include_refresh:
+        actions.append(Action(id="utility_reminders.list", label="🔄 Обновить", payload={"op": "reminder.list", "limit": 5}))
+    actions.append(menu.menu_action())
+    return actions
+
+
+def _reminder_snooze_menu_actions(reminder_id: str, base_trigger_at: str | None = None) -> list[Action]:
+    base_payload: dict[str, object] = {"op": "reminder_snooze", "reminder_id": reminder_id}
+    if base_trigger_at:
+        base_payload["base_trigger_at"] = base_trigger_at
     return [
-        Action(id="utility_reminders.create", label="➕ Создать", payload={"op": "reminder.create"}),
-        Action(id="utility_reminders.list", label="🔄 Обновить", payload={"op": "reminder.list", "limit": 10}),
+        Action(
+            id=f"reminder_snooze:{reminder_id}:10",
+            label="10 минут",
+            payload={**base_payload, "minutes": 10},
+        ),
+        Action(
+            id=f"reminder_snooze:{reminder_id}:30",
+            label="30 минут",
+            payload={**base_payload, "minutes": 30},
+        ),
+        Action(
+            id=f"reminder_snooze:{reminder_id}:60",
+            label="1 час",
+            payload={**base_payload, "minutes": 60},
+        ),
+        Action(
+            id=f"reminder_snooze:{reminder_id}:tomorrow",
+            label="Завтра утром",
+            payload={
+                "op": "reminder_snooze_tomorrow",
+                "reminder_id": reminder_id,
+                "base_trigger_at": base_trigger_at,
+            },
+        ),
         menu.menu_action(),
     ]
 
@@ -1138,9 +1172,29 @@ def _reminder_delete_confirm_actions(reminder_id: str) -> list[Action]:
         Action(
             id="utility_reminders.delete_cancel",
             label="↩ Отмена",
-            payload={"op": "reminder.list", "limit": 10},
+            payload={"op": "reminder.list", "limit": 5},
         ),
+        menu.menu_action(),
     ]
+
+
+def _reminder_post_action_actions() -> list[Action]:
+    return [
+        Action(id="utility_reminders.list", label="📋 Список", payload={"op": "reminder.list", "limit": 5}),
+        menu.menu_action(),
+    ]
+
+
+def _parse_base_trigger_at(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        base_dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if base_dt.tzinfo is None:
+        return base_dt.replace(tzinfo=calendar_store.BOT_TZ)
+    return base_dt.astimezone(calendar_store.BOT_TZ)
 
 
 def _map_wizard_target(target: str | None) -> str | None:
@@ -1170,16 +1224,21 @@ async def _build_reminders_list_result(
     limited = filtered[: max(1, limit)]
     actions = _reminder_list_controls_actions()
     if not limited:
-        return ok("Нет запланированных напоминаний.", intent=intent, mode="local", actions=actions)
+        return ok(
+            "Нет запланированных напоминаний.",
+            intent=intent,
+            mode="local",
+            actions=_reminder_list_controls_actions(include_refresh=False),
+        )
     lines: list[str] = []
     for item in limited:
         when_label = item.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-        lines.append(f"{item.id} | {when_label} | {item.text}")
+        lines.append(f"• {item.text}\n  Когда: {when_label} (МСК)")
         actions.append(
             Action(
-                id="utility_reminders.delete",
-                label=f"🗑 Удалить: {_short_label(item.text)}",
-                payload={"op": "reminder.delete_confirm", "reminder_id": item.id},
+                id=f"reminder_snooze_menu:{item.id}",
+                label=f"⏸ Отложить: {_short_label(item.text)}",
+                payload={"op": "reminder_snooze_menu", "reminder_id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
             )
         )
         actions.append(
@@ -1187,6 +1246,13 @@ async def _build_reminders_list_result(
                 id="utility_reminders.reschedule",
                 label=f"✏ Перенести: {_short_label(item.text)}",
                 payload={"op": "reminder_reschedule", "reminder_id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
+            )
+        )
+        actions.append(
+            Action(
+                id="utility_reminders.delete",
+                label=f"🗑 Удалить: {_short_label(item.text)}",
+                payload={"op": "reminder.delete_confirm", "reminder_id": item.id},
             )
         )
     return ok("\n".join(lines), intent=intent, mode="local", actions=actions)
@@ -2748,7 +2814,7 @@ async def _handle_menu_section(
                 Action(
                     id="utility_reminders.list",
                     label="📋 Список",
-                    payload={"op": "reminder.list", "limit": 10},
+                    payload={"op": "reminder.list", "limit": 5},
                 ),
                 menu.menu_action(),
             ],
@@ -3229,6 +3295,7 @@ async def _dispatch_action_payload(
         "wizard_cancel",
         "wizard_confirm",
         "wizard_edit",
+        "wizard_set_recurrence",
     }:
         if not _wizards_enabled(context):
             return refused(
@@ -3451,8 +3518,8 @@ async def _dispatch_action_payload(
         )
         return result if result is not None else refused("Сценарий не активен.", intent="wizard.inactive", mode="local")
     if op_value == "reminder.list":
-        limit = payload.get("limit", 10)
-        limit_value = limit if isinstance(limit, int) else 10
+        limit = payload.get("limit", 5)
+        limit_value = limit if isinstance(limit, int) else 5
         return await _handle_reminders_list(
             context,
             user_id=user_id,
@@ -3501,7 +3568,7 @@ async def _dispatch_action_payload(
             result,
             mode="local",
             intent="utility_reminders.delete",
-            actions=_reminder_list_controls_actions(),
+            actions=_reminder_post_action_actions(),
         )
     if op_value == "reminder.delete":
         reminder_id = payload.get("reminder_id") or payload.get("id")
@@ -3522,7 +3589,7 @@ async def _dispatch_action_payload(
             result,
             mode="local",
             intent="utility_reminders.delete",
-            actions=_reminder_list_controls_actions(),
+            actions=_reminder_post_action_actions(),
         )
     if op_value == "reminder.disable":
         reminder_id = payload.get("reminder_id") or payload.get("id")
@@ -3586,6 +3653,22 @@ async def _dispatch_action_payload(
             limit=max(1, limit_value),
             intent=intent,
         )
+    if op_value == "reminder_snooze_menu":
+        reminder_id = payload.get("reminder_id") or payload.get("id")
+        base_trigger_at = payload.get("base_trigger_at")
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="ui.action",
+                mode="local",
+                debug={"reason": "invalid_reminder_id"},
+            )
+        return await _handle_reminder_snooze_menu(
+            user_id=user_id,
+            chat_id=chat_id,
+            reminder_id=reminder_id,
+            base_trigger_at=base_trigger_at if isinstance(base_trigger_at, str) else None,
+        )
     if op_value == "reminder_snooze":
         reminder_id = payload.get("reminder_id") or payload.get("id")
         minutes = payload.get("minutes", 10)
@@ -3605,6 +3688,22 @@ async def _dispatch_action_payload(
             reminder_id=reminder_id,
             minutes=minutes_value,
             base_trigger_at=base_value,
+        )
+    if op_value == "reminder_snooze_tomorrow":
+        reminder_id = payload.get("reminder_id") or payload.get("id")
+        base_trigger_at = payload.get("base_trigger_at")
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="ui.action",
+                mode="local",
+                debug={"reason": "invalid_reminder_id"},
+            )
+        return await _handle_reminder_snooze_tomorrow(
+            context,
+            user_id=user_id,
+            reminder_id=reminder_id,
+            base_trigger_at=base_trigger_at if isinstance(base_trigger_at, str) else None,
         )
     if op_value == "reminder_reschedule":
         reminder_id = payload.get("reminder_id") or payload.get("id")
@@ -3800,7 +3899,7 @@ async def _handle_reminders_list(
     *,
     user_id: int,
     chat_id: int,
-    limit: int = 10,
+    limit: int = 5,
     intent: str = "utility_reminders.list",
 ) -> OrchestratorResult:
     now = datetime.now(tz=calendar_store.BOT_TZ)
@@ -3829,16 +3928,7 @@ async def _handle_reminder_snooze(
             mode="local",
         )
     offset = max(1, minutes)
-    base_dt = None
-    if base_trigger_at:
-        try:
-            base_dt = datetime.fromisoformat(base_trigger_at)
-        except ValueError:
-            base_dt = None
-        if base_dt and base_dt.tzinfo is None:
-            base_dt = base_dt.replace(tzinfo=calendar_store.BOT_TZ)
-        if base_dt and base_dt.tzinfo is not None:
-            base_dt = base_dt.astimezone(calendar_store.BOT_TZ)
+    base_dt = _parse_base_trigger_at(base_trigger_at)
     updated = await calendar_store.apply_snooze(reminder_id, minutes=offset, now=datetime.now(tz=calendar_store.BOT_TZ), base_trigger_at=base_dt)
     if updated is None:
         return error(
@@ -3867,9 +3957,90 @@ async def _handle_reminder_snooze(
     )
     when_label = updated.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
     return ok(
-        f"Ок, отложил до {when_label}.",
+        f"Ok. Напоминание отложено на {when_label}.",
         intent="utility_reminders.snooze",
         mode="local",
+        actions=_reminder_post_action_actions(),
+        debug={"refs": {"reminder_id": reminder_id}},
+    )
+
+
+async def _handle_reminder_snooze_menu(
+    *,
+    user_id: int,
+    chat_id: int,
+    reminder_id: str,
+    base_trigger_at: str | None = None,
+) -> OrchestratorResult:
+    reminder = await calendar_store.get_reminder(reminder_id)
+    if reminder is None or reminder.user_id != user_id or reminder.chat_id != chat_id:
+        return refused("Напоминание не найдено.", intent="utility_reminders.snooze", mode="local")
+    return ok(
+        "На сколько отложить напоминание?",
+        intent="utility_reminders.snooze",
+        mode="local",
+        actions=_reminder_snooze_menu_actions(reminder_id, base_trigger_at),
+    )
+
+
+async def _handle_reminder_snooze_tomorrow(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    reminder_id: str,
+    base_trigger_at: str | None = None,
+) -> OrchestratorResult:
+    reminder = await calendar_store.get_reminder(reminder_id)
+    if reminder is None:
+        return refused(
+            f"Напоминание не найдено: {reminder_id}",
+            intent="utility_reminders.snooze",
+            mode="local",
+        )
+    now = datetime.now(tz=calendar_store.BOT_TZ)
+    base_dt = _parse_base_trigger_at(base_trigger_at) or reminder.trigger_at.astimezone(calendar_store.BOT_TZ)
+    base = max(now, base_dt)
+    target_date = now.date() + timedelta(days=1)
+    target = datetime.combine(target_date, datetime.min.time()).replace(tzinfo=calendar_store.BOT_TZ) + timedelta(hours=9)
+    if target <= base:
+        target = datetime.combine(base.date() + timedelta(days=1), datetime.min.time()).replace(tzinfo=calendar_store.BOT_TZ) + timedelta(hours=9)
+    offset_minutes = max(1, math.ceil((target - base).total_seconds() / 60))
+    updated = await calendar_store.apply_snooze(
+        reminder_id,
+        minutes=offset_minutes,
+        now=now,
+        base_trigger_at=base,
+    )
+    if updated is None:
+        return error(
+            "Не удалось отложить напоминание (возможно, уже отключено).",
+            intent="utility_reminders.snooze",
+            mode="local",
+        )
+    scheduler = _get_reminder_scheduler(context)
+    settings = _get_settings(context)
+    if scheduler and settings is not None and settings.reminders_enabled:
+        try:
+            await scheduler.schedule_reminder(updated)
+        except Exception:
+            LOGGER.exception("Failed to reschedule reminder: reminder_id=%s", reminder_id)
+            return error(
+                "Не удалось отложить напоминание.",
+                intent="utility_reminders.snooze",
+                mode="local",
+            )
+    when_label = updated.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+    LOGGER.info(
+        "Reminder snoozed to tomorrow morning: reminder_id=%s user_id=%s new_trigger_at=%s",
+        reminder_id,
+        user_id,
+        updated.trigger_at.isoformat(),
+    )
+    return ok(
+        f"Ok. Напоминание отложено на {when_label}.",
+        intent="utility_reminders.snooze",
+        mode="local",
+        actions=_reminder_post_action_actions(),
         debug={"refs": {"reminder_id": reminder_id}},
     )
 
@@ -3908,9 +4079,10 @@ async def _handle_reminder_delete(
         )
     LOGGER.info("Reminder deleted: reminder_id=%s user_id=%s", reminder_id, reminder.user_id)
     return ok(
-        f"Удалено: {reminder_id}",
+        "Напоминание удалено.",
         intent="utility_reminders.delete",
         mode="local",
+        actions=_reminder_post_action_actions(),
         debug={"refs": {"reminder_id": reminder_id}},
     )
 

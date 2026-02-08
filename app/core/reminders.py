@@ -220,45 +220,24 @@ class ReminderScheduler:
 
 def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Action]:
     base_trigger = reminder.trigger_at.isoformat()
-    snooze_options = [
-        (10, "⏸ Отложить"),
-    ]
-    actions: list[Action] = []
-    for minutes, label in snooze_options:
-        actions.append(
-            Action(
-                id=f"reminder_snooze:{reminder.id}:{minutes}",
-                label=label,
-                payload={
-                    "op": "reminder_snooze",
-                    "reminder_id": reminder.id,
-                    "minutes": minutes,
-                    "base_trigger_at": base_trigger,
-                },
-            )
-        )
-    actions.append(
+    return [
+        Action(
+            id=f"reminder_snooze_menu:{reminder.id}",
+            label="⏸ Отложить",
+            payload={"op": "reminder_snooze_menu", "reminder_id": reminder.id, "base_trigger_at": base_trigger},
+        ),
         Action(
             id=f"reminder_reschedule:{reminder.id}",
             label="✏ Перенести",
             payload={"op": "reminder_reschedule", "reminder_id": reminder.id, "base_trigger_at": base_trigger},
-        )
-    )
-    actions.append(
+        ),
         Action(
             id="utility_reminders.delete",
             label="🗑 Удалить",
             payload={"op": "reminder.delete_confirm", "reminder_id": reminder.id},
-        )
-    )
-    actions.append(
-        Action(
-            id="utility_reminders.list",
-            label="📋 Список",
-            payload={"op": "reminder.list", "limit": 10},
-        )
-    )
-    return actions
+        ),
+        Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}),
+    ]
 
 
 def get_default_offset_minutes() -> int:

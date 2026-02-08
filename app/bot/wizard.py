@@ -473,11 +473,11 @@ class WizardManager:
             updated = _touch_state(state, step=STEP_AWAIT_RECURRENCE, data={"trigger_at": dt.isoformat()})
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return ok(
-                "Нужен повтор? Напиши: none/daily/weekdays/weekly:1,3,5/monthly:15.\n"
+                "Нужен повтор? Можно выбрать кнопкой или написать: none/daily/weekdays.\n"
                 "Можно указать интервал: daily/2, weekdays/2, weekly:1,3/2, monthly:15/2.",
                 intent="wizard.reminder_create.recurrence",
                 mode="local",
-                actions=_step_actions(),
+                actions=_reminder_recurrence_actions(),
             )
         if state.step == STEP_AWAIT_RECURRENCE:
             try:
@@ -488,7 +488,7 @@ class WizardManager:
                     "Нужен повтор?",
                     intent="wizard.reminder_create.recurrence",
                     mode="local",
-                    actions=_step_actions(),
+                    actions=_reminder_recurrence_actions(),
                 )
             updated = _touch_state(state, step=STEP_CONFIRM, data={"recurrence": recurrence})
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
@@ -518,6 +518,26 @@ class WizardManager:
     ) -> OrchestratorResult:
         if op == "wizard_edit":
             updated = _touch_state(state, step=STEP_AWAIT_TITLE, data={})
+            self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+            return _render_prompt(updated)
+        if op == "wizard_set_recurrence":
+            if state.step != STEP_AWAIT_RECURRENCE:
+                return refused(
+                    "Сначала укажи дату.",
+                    intent="wizard.reminder_create.recurrence",
+                    mode="local",
+                    actions=_reminder_recurrence_actions(),
+                )
+            value = payload.get("value")
+            if not isinstance(value, str):
+                return refused(
+                    "Не понял повтор.",
+                    intent="wizard.reminder_create.recurrence",
+                    mode="local",
+                    actions=_reminder_recurrence_actions(),
+                )
+            recurrence = _parse_recurrence_input(value)
+            updated = _touch_state(state, step=STEP_CONFIRM, data={"recurrence": recurrence})
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
             return _render_prompt(updated)
         if op != "wizard_confirm":
@@ -979,11 +999,11 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
         )
     if state.wizard_id == WIZARD_REMINDER_CREATE and state.step == STEP_AWAIT_RECURRENCE:
         return ok(
-            "Нужен повтор? Напиши: none/daily/weekdays/weekly:1,3,5/monthly:15.\n"
-            "Интервал: daily/2, weekdays/2, weekly:1,3/2, monthly:15/2.",
+            "Нужен повтор? Можно выбрать кнопкой или написать: none/daily/weekdays.\n"
+            "Поддерживается интервал: daily/2, weekdays/2, weekly:1,3/2, monthly:15/2.",
             intent="wizard.reminder_create.recurrence",
             mode="local",
-            actions=_step_actions(),
+            actions=_reminder_recurrence_actions(),
         )
     if state.wizard_id == WIZARD_REMINDER_CREATE and state.step == STEP_CONFIRM:
         title = state.data.get("title") if isinstance(state.data.get("title"), str) else "без текста"
@@ -1258,6 +1278,15 @@ def _step_actions() -> list[Action]:
     return [
         Action(id="wizard.cancel", label="❌ Отмена", payload={"op": "wizard_cancel"}),
         menu.menu_action(),
+    ]
+
+
+def _reminder_recurrence_actions() -> list[Action]:
+    return [
+        Action(id="wizard.recurrence.none", label="Без повтора", payload={"op": "wizard_set_recurrence", "value": "none"}),
+        Action(id="wizard.recurrence.daily", label="Ежедневно", payload={"op": "wizard_set_recurrence", "value": "daily"}),
+        Action(id="wizard.recurrence.weekdays", label="По будням", payload={"op": "wizard_set_recurrence", "value": "weekdays"}),
+        *_step_actions(),
     ]
 
 
