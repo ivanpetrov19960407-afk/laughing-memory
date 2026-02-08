@@ -16,7 +16,7 @@ from app.core import calendar_store
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
 from app.core.reminders import ReminderScheduler
 from app.core.dialog_memory import DialogMemory
-from app.core.memory_store import MemoryStore
+from app.core.memory_manager import MemoryManager, UserActionsLog, UserProfileMemory
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.actions_log_store import ActionsLogStore
@@ -59,6 +59,8 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("context_off", handlers.context_off))
     application.add_handler(CommandHandler("context_clear", handlers.context_clear))
     application.add_handler(CommandHandler("context_status", handlers.context_status))
+    application.add_handler(CommandHandler("memory_status", handlers.memory_status))
+    application.add_handler(CommandHandler("memory_clear", handlers.memory_clear))
     application.add_handler(CommandHandler("memory", handlers.memory_command))
     application.add_handler(CommandHandler("profile", handlers.profile_command))
     application.add_handler(CommandHandler("profile_set", handlers.profile_set_command))
@@ -204,9 +206,13 @@ def main() -> None:
     settings.document_texts_path.mkdir(parents=True, exist_ok=True)
     document_store = DocumentSessionStore(settings.document_sessions_path)
     document_store.load()
-    memory_store = MemoryStore()
     profile_store = UserProfileStore(settings.db_path)
     actions_log_store = ActionsLogStore(settings.db_path)
+    memory_manager = MemoryManager(
+        dialog=dialog_memory,
+        profile=UserProfileMemory(profile_store),
+        actions=UserActionsLog(actions_log_store),
+    )
 
     warnings.filterwarnings("ignore", message="No JobQueue set up", category=PTBUserWarning)
     application = Application.builder().token(settings.bot_token).build()
@@ -238,9 +244,9 @@ def main() -> None:
     application.bot_data["llm_client"] = llm_client
     application.bot_data["start_time"] = time.monotonic()
     application.bot_data["dialog_memory"] = dialog_memory
-    application.bot_data["memory_store"] = memory_store
     application.bot_data["profile_store"] = profile_store
     application.bot_data["actions_log_store"] = actions_log_store
+    application.bot_data["memory_manager"] = memory_manager
     application.bot_data["document_store"] = document_store
     application.bot_data["last_state_store"] = LastStateStore(ttl_seconds=7 * 24 * 3600)
     application.bot_data["action_store"] = actions.ActionStore(

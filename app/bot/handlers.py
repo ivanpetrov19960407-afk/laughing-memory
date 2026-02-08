@@ -30,11 +30,11 @@ from app.core.calendar_nlp_ru import (
     update_draft_from_text,
 )
 from app.core.calc import CalcError, parse_and_eval
-from app.core.dialog_memory import DialogMemory, DialogMessage
+from app.core.dialog_memory import DialogMessage
 from app.core.document_qa import select_relevant_chunks
 from app.core.last_state_resolver import ResolutionResult, resolve_short_message
-from app.core.memory_layers import ActionsLogLayer, UserProfileLayer, build_memory_layers_context
-from app.core.memory_store import MemoryStore
+from app.core.memory_layers import build_memory_layers_context
+from app.core.memory_manager import MemoryManager
 from app.core.orchestrator import Orchestrator
 from app.core.file_text_extractor import FileTextExtractor, OCRNotAvailableError
 from app.core.user_profile import UserProfile
@@ -53,7 +53,6 @@ from app.core.tools_calendar import create_event, delete_event, list_calendar_it
 from app.core.recurrence_scope import RecurrenceScope, normalize_scope, parse_recurrence_scope
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
-from app.infra.actions_log_store import ActionsLogStore
 from app.infra.last_state_store import LastStateStore
 from app.infra.draft_store import DraftStore
 from app.infra.document_session_store import DocumentSessionStore
@@ -77,7 +76,6 @@ from app.infra.request_context import (
 from app.infra.version import resolve_app_version
 from app.infra.trace_store import TraceEntry, TraceStore
 from app.infra.storage import TaskStorage
-from app.infra.user_profile_store import UserProfileStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -108,28 +106,10 @@ def _get_history(context: ContextTypes.DEFAULT_TYPE) -> dict[int, list[tuple[dat
     return context.application.bot_data["history"]
 
 
-def _get_dialog_memory(context: ContextTypes.DEFAULT_TYPE) -> DialogMemory | None:
-    return context.application.bot_data.get("dialog_memory")
-
-
-def _get_memory_store(context: ContextTypes.DEFAULT_TYPE) -> MemoryStore | None:
-    store = context.application.bot_data.get("memory_store")
-    if isinstance(store, MemoryStore):
-        return store
-    return None
-
-
-def _get_profile_store(context: ContextTypes.DEFAULT_TYPE) -> UserProfileStore | None:
-    store = context.application.bot_data.get("profile_store")
-    if isinstance(store, UserProfileStore):
-        return store
-    return None
-
-
-def _get_actions_log_store(context: ContextTypes.DEFAULT_TYPE) -> ActionsLogStore | None:
-    store = context.application.bot_data.get("actions_log_store")
-    if isinstance(store, ActionsLogStore):
-        return store
+def _get_memory_manager(context: ContextTypes.DEFAULT_TYPE) -> MemoryManager | None:
+    manager = context.application.bot_data.get("memory_manager")
+    if isinstance(manager, MemoryManager):
+        return manager
     return None
 
 
@@ -224,20 +204,14 @@ def _get_draft_store(context: ContextTypes.DEFAULT_TYPE) -> DraftStore | None:
     return None
 
 
-def _build_memory_context(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+async def _build_memory_context(context: ContextTypes.DEFAULT_TYPE) -> str | None:
     request_context = get_request_context(context)
     if request_context is None:
         return None
-    memory_store = _get_memory_store(context)
-    profile_store = _get_profile_store(context)
-    actions_store = _get_actions_log_store(context)
-    profile_layer = UserProfileLayer(profile_store) if profile_store is not None else None
-    actions_layer = ActionsLogLayer(actions_store) if actions_store is not None else None
-    return build_memory_layers_context(
+    memory_manager = _get_memory_manager(context)
+    return await build_memory_layers_context(
         request_context,
-        memory_store=memory_store,
-        profile_layer=profile_layer,
-        actions_layer=actions_layer,
+        memory_manager=memory_manager,
         max_chars=2000,
     )
 
@@ -322,11 +296,11 @@ async def _get_active_modes(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if isinstance(orchestrator, Orchestrator) and user_id:
         facts_status = "on" if orchestrator.is_facts_only(user_id) else "off"
 
-    dialog_memory = _get_dialog_memory(context)
-    if dialog_memory is None or not user_id:
-        context_status = "off" if dialog_memory is None else "unknown"
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or not user_id:
+        context_status = "off" if memory_manager is None else "unknown"
     else:
-        context_status = "on" if await dialog_memory.is_enabled(user_id) else "off"
+        context_status = "on" if await memory_manager.dialog_enabled(user_id) else "off"
 
     settings = context.application.bot_data.get("settings")
     reminders_status = "unknown"
@@ -393,33 +367,6 @@ def _record_trace_summary(context: ContextTypes.DEFAULT_TYPE, request_context: R
     )
 
 
-def _record_user_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    request_context = get_request_context(context)
-    if request_context is None:
-        return
-    memory_store = _get_memory_store(context)
-    if memory_store is None:
-        return
-    chat = update.effective_chat
-    if chat is None or getattr(chat, "type", "private") != "private":
-        return
-    message = update.effective_message
-    text = ""
-    if message is not None:
-        text = message.text or message.caption or ""
-    if not text:
-        return
-    memory_store.add(
-        chat_id=int(request_context.chat_id or 0),
-        user_id=int(request_context.user_id or 0),
-        role="user",
-        kind="message",
-        content=text,
-        correlation_id=request_context.correlation_id,
-        env=request_context.env,
-    )
-
-
 def _with_error_handling(
     handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]],
 ) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]:
@@ -437,7 +384,6 @@ def _with_error_handling(
             message_id=request_context.message_id,
             text=request_context.input_text,
         )
-        _record_user_memory(update, context)
         try:
             await _log_route(update, context, handler.__name__)
             await handler(update, context)
@@ -721,14 +667,14 @@ async def _reply_with_history(
     await send_result(update, context, result)
 
 
-def _build_user_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> dict[str, object]:
+async def _build_user_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> dict[str, object]:
     user_id = update.effective_user.id if update.effective_user else 0
     request_context = get_request_context(context)
     payload: dict[str, object] = {"user_id": user_id}
     if request_context:
         payload["request_id"] = request_context.correlation_id
         payload["request_context"] = request_context
-    memory_context = _build_memory_context(context)
+    memory_context = await _build_memory_context(context)
     if memory_context:
         payload["memory_context"] = memory_context
     return payload
@@ -738,6 +684,67 @@ def _build_menu_actions(context: ContextTypes.DEFAULT_TYPE, *, user_id: int) -> 
     orchestrator = _get_orchestrator(context)
     facts_enabled = bool(user_id) and orchestrator.is_facts_only(user_id)
     return menu.build_menu_actions(facts_enabled=facts_enabled, enable_menu=_menu_enabled(context))
+
+
+def _settings_back_actions() -> list[Action]:
+    return [
+        Action(
+            id="settings.back",
+            label="↩️ Назад",
+            payload={"op": "menu_section", "section": "settings"},
+        ),
+        menu.menu_action(),
+    ]
+
+
+def _settings_confirm_actions(*, op: str, enabled: bool | None = None, value: str | None = None) -> list[Action]:
+    payload: dict[str, object] = {"op": op}
+    if enabled is not None:
+        payload["enabled"] = enabled
+    if value is not None:
+        payload["value"] = value
+    return [
+        Action(
+            id=f"{op}.confirm",
+            label="✅ Подтвердить",
+            payload=payload,
+        ),
+        *_settings_back_actions(),
+    ]
+
+
+def _settings_language_actions() -> list[Action]:
+    return [
+        Action(id="settings.language.ru", label="Русский", payload={"op": "settings.language_pick", "value": "ru"}),
+        Action(id="settings.language.en", label="English", payload={"op": "settings.language_pick", "value": "en"}),
+        *_settings_back_actions(),
+    ]
+
+
+def _settings_timezone_actions() -> list[Action]:
+    return [
+        Action(
+            id="settings.tz.vilnius",
+            label="Europe/Vilnius",
+            payload={"op": "settings.timezone_pick", "value": "Europe/Vilnius"},
+        ),
+        Action(
+            id="settings.tz.moscow",
+            label="Europe/Moscow",
+            payload={"op": "settings.timezone_pick", "value": "Europe/Moscow"},
+        ),
+        Action(
+            id="settings.tz.kyiv",
+            label="Europe/Kyiv",
+            payload={"op": "settings.timezone_pick", "value": "Europe/Kyiv"},
+        ),
+        Action(
+            id="settings.tz.berlin",
+            label="Europe/Berlin",
+            payload={"op": "settings.timezone_pick", "value": "Europe/Berlin"},
+        ),
+        *_settings_back_actions(),
+    ]
 
 
 def _build_simple_result(
@@ -812,8 +819,8 @@ def _log_action_from_result(
 ) -> None:
     if result.status != "ok" or not user_id:
         return
-    actions_store = _get_actions_log_store(context)
-    if actions_store is None:
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.actions is None:
         return
     intent = result.intent or ""
     mapping = {
@@ -834,6 +841,7 @@ def _log_action_from_result(
         "command.context_on": "mode.context_on",
         "command.context_off": "mode.context_off",
         "command.context_clear": "mode.context_clear",
+        "command.memory_clear": "mode.context_clear",
         "wizard.profile.done": "profile.update",
     }
     action_type = mapping.get(intent)
@@ -848,7 +856,7 @@ def _log_action_from_result(
         "refs": _extract_result_refs(result),
     }
     correlation_id = request_context.correlation_id if request_context else result.request_id
-    actions_store.append(
+    memory_manager.actions.set(
         user_id=user_id,
         action_type=action_type,
         payload=payload,
@@ -1398,21 +1406,21 @@ def _drop_latest_user_message(
 
 
 async def _prepare_dialog_context(
-    memory: DialogMemory | None,
+    memory_manager: MemoryManager | None,
     *,
     user_id: int,
     chat_id: int,
     prompt: str,
 ) -> tuple[str | None, int]:
-    if memory is None:
+    if memory_manager is None or memory_manager.dialog is None:
         return None, 0
-    if not await memory.is_enabled(user_id):
+    if not await memory_manager.dialog_enabled(user_id):
         return None, 0
-    messages = await memory.get_context(user_id, chat_id)
+    messages = await memory_manager.get_dialog(user_id, chat_id)
     messages = _drop_latest_user_message(messages, prompt)
     if not messages:
         return None, 0
-    return memory.format_context(messages), len(messages)
+    return memory_manager.dialog.format_context(messages), len(messages)
 
 
 def _build_tool_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> dict[str, object]:
@@ -1650,21 +1658,6 @@ async def send_result(
             LOGGER.warning("send_result skipped duplicate: request_id=%s intent=%s", request_id, public_result.intent)
             return
         context.chat_data[sent_key] = True
-    memory_store = _get_memory_store(context)
-    if memory_store and user_id and chat_id:
-        chat = update.effective_chat
-        if chat is not None and getattr(chat, "type", "private") == "private":
-            memory_store.add(
-                chat_id=chat_id,
-                user_id=user_id,
-                role="assistant",
-                kind="result",
-                content=public_result.text,
-                intent=public_result.intent,
-                status=public_result.status,
-                correlation_id=request_id,
-                env=request_context.env if request_context else "prod",
-            )
     _log_orchestrator_result(user_id, public_result, request_context=request_context)
     _update_last_state(
         context,
@@ -1853,8 +1846,11 @@ async def _build_health_message(
     llm_status = "ok" if settings.openai_api_key or settings.perplexity_api_key else "error"
     store = calendar_store.load_store()
     reminders_count = len(store.get("reminders") or [])
-    memory_store = _get_memory_store(context)
-    memory_count = memory_store.count_entries() if memory_store else 0
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.dialog is None:
+        memory_count = 0
+    else:
+        memory_count = await memory_manager.dialog.count_entries()
     trace_store = _get_trace_store(context)
     trace_count = trace_store.count_entries() if trace_store else 0
     breaker_registry = _get_circuit_breakers(context)
@@ -2071,18 +2067,18 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
-    dialog_memory = _get_dialog_memory(context)
-    if dialog_memory and await dialog_memory.is_enabled(user_id):
-        await dialog_memory.add_user(user_id, chat_id, prompt)
+    memory_manager = _get_memory_manager(context)
+    if memory_manager and await memory_manager.dialog_enabled(user_id):
+        await memory_manager.add_dialog_message(user_id, chat_id, "user", prompt)
     dialog_context, dialog_count = await _prepare_dialog_context(
-        dialog_memory,
+        memory_manager,
         user_id=user_id,
         chat_id=chat_id,
         prompt=prompt,
     )
     request_context = get_request_context(context)
     request_id = request_context.correlation_id if request_context else None
-    memory_context = _build_memory_context(context)
+    memory_context = await _build_memory_context(context)
     try:
         result = await orchestrator.handle(
             f"/ask {prompt}",
@@ -2100,8 +2096,8 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _handle_exception(update, context, exc)
         return
     await send_result(update, context, result)
-    if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
-        await dialog_memory.add_assistant(user_id, chat_id, result.text)
+    if memory_manager and await memory_manager.dialog_enabled(user_id) and _should_store_assistant_response(result):
+        await memory_manager.add_dialog_message(user_id, chat_id, "assistant", result.text)
 
 
 @_with_error_handling
@@ -2113,7 +2109,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
     try:
         payload = f"/summary {prompt}" if prompt else "/summary"
-        result = await orchestrator.handle(payload, _build_user_context(update, context))
+        result = await orchestrator.handle(payload, await _build_user_context(update, context))
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
@@ -2129,7 +2125,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     prompt = " ".join(context.args).strip()
     payload = f"/search {prompt}" if prompt else "/search"
     try:
-        result = await orchestrator.handle(payload, _build_user_context(update, context))
+        result = await orchestrator.handle(payload, await _build_user_context(update, context))
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
@@ -2144,6 +2140,9 @@ async def facts_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_id = update.effective_user.id if update.effective_user else 0
     orchestrator.set_facts_only(user_id, True)
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is not None:
+        memory_manager.update_profile(user_id, {"facts_mode_default": True})
     result = _build_simple_result(
         "Режим фактов включён. Буду отвечать только с источниками.",
         intent="command.facts_on",
@@ -2160,6 +2159,9 @@ async def facts_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_id = update.effective_user.id if update.effective_user else 0
     orchestrator.set_facts_only(user_id, False)
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is not None:
+        memory_manager.update_profile(user_id, {"facts_mode_default": False})
     result = _build_simple_result(
         "Режим фактов выключён. Можно отвечать без источников.",
         intent="command.facts_off",
@@ -2173,8 +2175,8 @@ async def facts_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def context_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
-    dialog_memory = _get_dialog_memory(context)
-    if dialog_memory is None:
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.dialog is None:
         result = _build_simple_result(
             "Контекст диалога не настроен.",
             intent="command.context_on",
@@ -2184,7 +2186,7 @@ async def context_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    await dialog_memory.set_enabled(user_id, True)
+    await memory_manager.set_dialog_enabled(user_id, True)
     result = _build_simple_result(
         "Контекст диалога включён.",
         intent="command.context_on",
@@ -2198,8 +2200,8 @@ async def context_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def context_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
-    dialog_memory = _get_dialog_memory(context)
-    if dialog_memory is None:
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.dialog is None:
         result = _build_simple_result(
             "Контекст диалога не настроен.",
             intent="command.context_off",
@@ -2209,7 +2211,7 @@ async def context_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    await dialog_memory.set_enabled(user_id, False)
+    await memory_manager.set_dialog_enabled(user_id, False)
     result = _build_simple_result(
         "Контекст диалога выключён.",
         intent="command.context_off",
@@ -2223,8 +2225,8 @@ async def context_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def context_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
-    dialog_memory = _get_dialog_memory(context)
-    if dialog_memory is None:
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.dialog is None:
         result = _build_simple_result(
             "Контекст диалога не настроен.",
             intent="command.context_clear",
@@ -2235,7 +2237,7 @@ async def context_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
-    await dialog_memory.clear(user_id, chat_id)
+    await memory_manager.clear_dialog(user_id, chat_id)
     result = _build_simple_result(
         "История контекста очищена.",
         intent="command.context_clear",
@@ -2249,8 +2251,8 @@ async def context_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def context_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
-    dialog_memory = _get_dialog_memory(context)
-    if dialog_memory is None:
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.dialog is None:
         result = _build_simple_result(
             "Контекст диалога не настроен.",
             intent="command.context_status",
@@ -2261,13 +2263,79 @@ async def context_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
-    enabled, count = await dialog_memory.get_status(user_id, chat_id)
+    enabled, count = await memory_manager.dialog_status(user_id, chat_id)
     status = "включён" if enabled else "выключён"
     result = _build_simple_result(
         f"Контекст {status}. user_id={user_id} chat_id={chat_id}. Сообщений в истории: {count}.",
         intent="command.context_status",
         status="ok",
         mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def memory_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.dialog is None:
+        result = _build_simple_result(
+            "Память не настроена.",
+            intent="command.memory_status",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    enabled, count = await memory_manager.dialog_status(user_id, chat_id)
+    status = "включён" if enabled else "выключён"
+    lines = [f"Контекст {status}. Сообщений в истории: {count}."]
+    if memory_manager.profile is not None and memory_manager.profile_is_persisted(user_id):
+        profile = memory_manager.get_profile(user_id)
+        if profile is not None:
+            facts_label = "вкл" if profile.facts_mode_default else "выкл"
+            lines.append("Профиль:")
+            lines.append(f"• язык: {profile.language}")
+            lines.append(f"• часовой пояс: {profile.timezone}")
+            lines.append(f"• режим фактов: {facts_label}")
+    else:
+        lines.append("Профиль: нет сохранённых данных.")
+    result = _build_simple_result(
+        "\n".join(lines),
+        intent="command.memory_status",
+        status="ok",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def memory_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.dialog is None:
+        result = _build_simple_result(
+            "Память не настроена.",
+            intent="command.memory_clear",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    await memory_manager.clear_dialog(user_id, chat_id)
+    result = ensure_valid(
+        ok(
+            "Контекст очищен. Профиль пользователя сохранён.",
+            intent="command.memory_clear",
+            mode="local",
+            actions=[menu.menu_action()],
+        )
     )
     await send_result(update, context, result)
 
@@ -2286,8 +2354,8 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         await send_result(update, context, result)
         return
-    memory_store = _get_memory_store(context)
-    if memory_store is None:
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.dialog is None:
         result = _build_simple_result(
             "Память не настроена.",
             intent="command.memory",
@@ -2309,7 +2377,7 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
     if context.args and context.args[0].strip().lower() == "clear":
-        memory_store.clear(chat_id=chat_id, user_id=user_id)
+        await memory_manager.clear_dialog(user_id, chat_id)
         result = _build_simple_result(
             "Память очищена.",
             intent="command.memory",
@@ -2318,7 +2386,7 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         await send_result(update, context, result)
         return
-    items = memory_store.get_recent(chat_id=chat_id, user_id=user_id, limit=10)
+    items = await memory_manager.get_dialog(user_id, chat_id, limit=10)
     if not items:
         result = _build_simple_result(
             "Память пуста.",
@@ -2330,12 +2398,11 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     lines = ["Последние записи памяти:"]
     for item in items:
-        ts_label = item.ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        preview = item.content.replace("\n", " ").strip()
+        ts_label = item.ts
+        preview = item.text.replace("\n", " ").strip()
         if len(preview) > 80:
             preview = preview[:80].rstrip() + "…"
-        intent = item.intent or "-"
-        lines.append(f"- {ts_label} | {item.role}/{item.kind} | {intent} | {preview}")
+        lines.append(f"- {ts_label} | {item.role} | {preview}")
     result = _build_simple_result(
         "\n".join(lines),
         intent="command.memory",
@@ -2349,8 +2416,8 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
-    profile_store = _get_profile_store(context)
-    if profile_store is None:
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.profile is None:
         result = _build_simple_result(
             "Профиль не настроен.",
             intent="command.profile",
@@ -2360,7 +2427,16 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    profile = profile_store.get(user_id)
+    profile = memory_manager.get_profile(user_id)
+    if profile is None:
+        result = _build_simple_result(
+            "Профиль не настроен.",
+            intent="command.profile",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
     result = _build_simple_result(
         _format_profile(profile),
         intent="command.profile",
@@ -2393,8 +2469,8 @@ async def profile_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
-    profile_store = _get_profile_store(context)
-    if profile_store is None:
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.profile is None:
         result = _build_simple_result(
             "Профиль не настроен.",
             intent="command.remember",
@@ -2414,7 +2490,16 @@ async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    profile = profile_store.add_note(user_id, note_text)
+    profile = memory_manager.remember_profile(user_id, note_text)
+    if profile is None:
+        result = _build_simple_result(
+            "Профиль не настроен.",
+            intent="command.remember",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
     note_id = profile.notes[0].id if profile.notes else ""
     result = _build_simple_result(
         f"Запомнил. id: {note_id}",
@@ -2429,8 +2514,8 @@ async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
-    profile_store = _get_profile_store(context)
-    if profile_store is None:
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.profile is None:
         result = _build_simple_result(
             "Профиль не настроен.",
             intent="command.forget",
@@ -2450,7 +2535,17 @@ async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    _, removed = profile_store.remove_note(user_id, key)
+    removed_payload = memory_manager.forget_profile(user_id, key)
+    if removed_payload is None:
+        result = _build_simple_result(
+            "Профиль не настроен.",
+            intent="command.forget",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    _, removed = removed_payload
     if not removed:
         result = _build_simple_result(
             "Не нашёл заметку для удаления.",
@@ -2473,8 +2568,8 @@ async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
-    actions_store = _get_actions_log_store(context)
-    if actions_store is None:
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.actions is None:
         result = _build_simple_result(
             "История действий не настроена.",
             intent="command.history",
@@ -2484,7 +2579,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    entries = actions_store.list_recent(user_id=user_id, limit=10)
+    entries = memory_manager.actions.list(user_id=user_id, limit=10)
     result = _build_simple_result(
         _format_actions_history(entries),
         intent="command.history",
@@ -2498,8 +2593,8 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def history_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
-    actions_store = _get_actions_log_store(context)
-    if actions_store is None:
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.actions is None:
         result = _build_simple_result(
             "История действий не настроена.",
             intent="command.history_search",
@@ -2519,7 +2614,7 @@ async def history_search_command(update: Update, context: ContextTypes.DEFAULT_T
         await send_result(update, context, result)
         return
     user_id = update.effective_user.id if update.effective_user else 0
-    entries = actions_store.search(user_id=user_id, query=query, limit=10)
+    entries = memory_manager.actions.get(user_id=user_id, query=query, limit=10)
     result = _build_simple_result(
         _format_actions_history(entries),
         intent="command.history_search",
@@ -2677,6 +2772,9 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
     result = manager.cancel(user_id=user_id, chat_id=chat_id)
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is not None:
+        await memory_manager.clear_dialog(user_id, chat_id)
     await send_result(update, context, result)
 
 
@@ -2715,10 +2813,15 @@ async def _handle_menu_section(
     orchestrator = _get_orchestrator(context)
     facts_enabled = bool(user_id) and orchestrator.is_facts_only(user_id)
     facts_command = "/facts_off" if facts_enabled else "/facts_on"
-    dialog_memory = _get_dialog_memory(context)
+    memory_manager = _get_memory_manager(context)
     context_enabled = False
-    if dialog_memory is not None and user_id:
-        context_enabled = await dialog_memory.is_enabled(user_id)
+    if memory_manager is not None and user_id:
+        context_enabled = await memory_manager.dialog_enabled(user_id)
+    profile = memory_manager.get_profile(user_id) if memory_manager else None
+    language_label = profile.language if profile else "ru"
+    timezone_label = profile.timezone if profile else "Europe/Vilnius"
+    facts_current = profile.facts_mode_default if profile else facts_enabled
+    facts_label = "on" if facts_current else "off"
     if section == "chat":
         actions = [
             Action(
@@ -2728,7 +2831,7 @@ async def _handle_menu_section(
             ),
             menu.menu_action(),
         ]
-        if dialog_memory is not None:
+        if memory_manager is not None and memory_manager.dialog is not None:
             actions.insert(
                 0,
                 Action(
@@ -2832,33 +2935,29 @@ async def _handle_menu_section(
                     payload={"op": "caldav_settings"},
                 ),
                 Action(
-                    id="settings.facts",
-                    label=f"📌 Факты {'off' if facts_enabled else 'on'}",
-                    payload={"op": "run_command", "command": facts_command, "args": ""},
-                ),
-                Action(
                     id="settings.context",
                     label=f"🧠 Контекст {'off' if context_enabled else 'on'}",
-                    payload={
-                        "op": "run_command",
-                        "command": "/context_off" if context_enabled else "/context_on",
-                        "args": "",
-                    },
+                    payload={"op": "settings.context_toggle", "enabled": not context_enabled},
+                ),
+                Action(
+                    id="settings.language",
+                    label=f"🌍 Язык ({language_label})",
+                    payload={"op": "settings.language"},
+                ),
+                Action(
+                    id="settings.timezone",
+                    label=f"⏱ Часовой пояс ({timezone_label})",
+                    payload={"op": "settings.timezone"},
+                ),
+                Action(
+                    id="settings.facts",
+                    label=f"📚 Режим фактов {facts_label}",
+                    payload={"op": "settings.facts_toggle", "enabled": not facts_current},
                 ),
                 Action(
                     id="settings.profile",
                     label="👤 Профиль",
                     payload={"op": "run_command", "command": "/profile", "args": ""},
-                ),
-                Action(
-                    id="settings.profile_set",
-                    label="🛠 Профиль: настроить",
-                    payload={"op": "run_command", "command": "/profile_set", "args": ""},
-                ),
-                Action(
-                    id="settings.history",
-                    label="📜 История",
-                    payload={"op": "run_command", "command": "/history", "args": ""},
                 ),
                 menu.menu_action(),
             ],
@@ -3185,7 +3284,7 @@ async def _dispatch_action_payload(
                 orchestrator = _get_orchestrator(context)
                 return await orchestrator.handle(
                     f"/search {last_state.last_query}",
-                    _build_user_context(update, context),
+                    await _build_user_context(update, context),
                     request_context=request_context,
                 )
             return _build_resolution_fallback(action_value, reason="missing_last_query")
@@ -3207,6 +3306,102 @@ async def _dispatch_action_payload(
                 debug={"reason": "invalid_section"},
             )
         return await _handle_menu_section(context, section=section, user_id=user_id, chat_id=chat_id)
+    if op_value == "settings.context_toggle":
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            return error("Некорректные данные действия.", intent="settings.context", mode="local")
+        status = "включить" if enabled else "выключить"
+        return ok(
+            f"Подтвердите: {status} контекст диалога?",
+            intent="settings.context.confirm",
+            mode="local",
+            actions=_settings_confirm_actions(op="settings.context_confirm", enabled=enabled),
+        )
+    if op_value == "settings.context_confirm":
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            return error("Некорректные данные действия.", intent="settings.context", mode="local")
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is None or memory_manager.dialog is None:
+            return refused("Контекст диалога не настроен.", intent="settings.context", mode="local")
+        await memory_manager.set_dialog_enabled(user_id, enabled)
+        text = "Контекст диалога включён." if enabled else "Контекст диалога выключён."
+        return ok(text, intent="settings.context", mode="local", actions=[menu.menu_action()])
+    if op_value == "settings.facts_toggle":
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            return error("Некорректные данные действия.", intent="settings.facts", mode="local")
+        status = "включить" if enabled else "выключить"
+        return ok(
+            f"Подтвердите: {status} режим фактов?",
+            intent="settings.facts.confirm",
+            mode="local",
+            actions=_settings_confirm_actions(op="settings.facts_confirm", enabled=enabled),
+        )
+    if op_value == "settings.facts_confirm":
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            return error("Некорректные данные действия.", intent="settings.facts", mode="local")
+        orchestrator = _get_orchestrator(context)
+        orchestrator.set_facts_only(user_id, enabled)
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is not None:
+            memory_manager.update_profile(user_id, {"facts_mode_default": enabled})
+        text = "Режим фактов включён." if enabled else "Режим фактов выключён."
+        return ok(text, intent="settings.facts", mode="local", actions=[menu.menu_action()])
+    if op_value == "settings.language":
+        return ok(
+            "Выберите язык:",
+            intent="settings.language",
+            mode="local",
+            actions=_settings_language_actions(),
+        )
+    if op_value == "settings.language_pick":
+        value = payload.get("value")
+        if not isinstance(value, str) or not value:
+            return error("Некорректные данные действия.", intent="settings.language", mode="local")
+        label = "Русский" if value == "ru" else "English" if value == "en" else value
+        return ok(
+            f"Подтвердите язык: {label}?",
+            intent="settings.language.confirm",
+            mode="local",
+            actions=_settings_confirm_actions(op="settings.language_confirm", value=value),
+        )
+    if op_value == "settings.language_confirm":
+        value = payload.get("value")
+        if not isinstance(value, str) or not value:
+            return error("Некорректные данные действия.", intent="settings.language", mode="local")
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is None or memory_manager.profile is None:
+            return refused("Профиль не настроен.", intent="settings.language", mode="local")
+        memory_manager.update_profile(user_id, {"language": value})
+        return ok("Язык обновлён.", intent="settings.language", mode="local", actions=[menu.menu_action()])
+    if op_value == "settings.timezone":
+        return ok(
+            "Выберите часовой пояс:",
+            intent="settings.timezone",
+            mode="local",
+            actions=_settings_timezone_actions(),
+        )
+    if op_value == "settings.timezone_pick":
+        value = payload.get("value")
+        if not isinstance(value, str) or not value:
+            return error("Некорректные данные действия.", intent="settings.timezone", mode="local")
+        return ok(
+            f"Подтвердите часовой пояс: {value}?",
+            intent="settings.timezone.confirm",
+            mode="local",
+            actions=_settings_confirm_actions(op="settings.timezone_confirm", value=value),
+        )
+    if op_value == "settings.timezone_confirm":
+        value = payload.get("value")
+        if not isinstance(value, str) or not value:
+            return error("Некорректные данные действия.", intent="settings.timezone", mode="local")
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is None or memory_manager.profile is None:
+            return refused("Профиль не настроен.", intent="settings.timezone", mode="local")
+        memory_manager.update_profile(user_id, {"timezone": value})
+        return ok("Часовой пояс обновлён.", intent="settings.timezone", mode="local", actions=[menu.menu_action()])
     if op_value == "document.summary":
         doc_id = payload.get("doc_id")
         if not isinstance(doc_id, str) or not doc_id:
@@ -3777,7 +3972,7 @@ async def _dispatch_action_payload(
         )
     text = payload.get("text")
     if isinstance(text, str) and text.strip():
-        return await orchestrator.handle(text, _build_user_context(update, context))
+        return await orchestrator.handle(text, await _build_user_context(update, context))
     return refused(
         "Действие не поддерживается.",
         intent="ui.action",
@@ -3839,7 +4034,7 @@ async def _dispatch_command_payload(
         query = args.strip()
         if not query:
             return refused("Укажи запрос: /search <текст>", intent="menu.search", mode="local")
-        return await orchestrator.handle(f"/search {query}", _build_user_context(update, context))
+        return await orchestrator.handle(f"/search {query}", await _build_user_context(update, context))
     if normalized == "/reminders":
         user_id = update.effective_user.id if update.effective_user else 0
         chat_id = update.effective_chat.id if update.effective_chat else 0
@@ -3867,6 +4062,9 @@ async def _dispatch_command_payload(
         user_id = update.effective_user.id if update.effective_user else 0
         enabled = normalized == "/facts_on"
         orchestrator.set_facts_only(user_id, enabled)
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is not None:
+            memory_manager.update_profile(user_id, {"facts_mode_default": enabled})
         text = (
             "Режим фактов включён. Буду отвечать только с источниками."
             if enabled
@@ -3874,16 +4072,16 @@ async def _dispatch_command_payload(
         )
         return ok(text, intent="menu.facts", mode="local")
     if normalized in {"/context_on", "/context_off", "/context_clear"}:
-        dialog_memory = _get_dialog_memory(context)
-        if dialog_memory is None:
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is None or memory_manager.dialog is None:
             return refused("Контекст диалога не настроен.", intent="menu.context", mode="local")
         user_id = update.effective_user.id if update.effective_user else 0
         if normalized == "/context_clear":
             chat_id = update.effective_chat.id if update.effective_chat else 0
-            await dialog_memory.clear(user_id, chat_id)
+            await memory_manager.clear_dialog(user_id, chat_id)
             return ok("Контекст очищен.", intent="menu.context", mode="local")
         enabled = normalized == "/context_on"
-        await dialog_memory.set_enabled(user_id, enabled)
+        await memory_manager.set_dialog_enabled(user_id, enabled)
         text = "Контекст включён." if enabled else "Контекст выключён."
         return ok(text, intent="menu.context", mode="local")
     return refused(
@@ -5189,22 +5387,22 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await send_result(update, context, result)
             return
     LOGGER.info("chat_ids user_id=%s chat_id=%s has_message=%s", user_id, chat_id, bool(update.message))
-    dialog_memory = _get_dialog_memory(context)
+    memory_manager = _get_memory_manager(context)
     if user_id == 0 or chat_id == 0:
         LOGGER.warning("memory_skip_missing_ids user_id=%s chat_id=%s", user_id, chat_id)
-        dialog_memory = None
-    elif dialog_memory and await dialog_memory.is_enabled(user_id):
-        await dialog_memory.add_user(user_id, chat_id, prompt)
+        memory_manager = None
+    elif memory_manager and await memory_manager.dialog_enabled(user_id):
+        await memory_manager.add_dialog_message(user_id, chat_id, "user", prompt)
         LOGGER.info("memory_wrote user_id=%s chat_id=%s", user_id, chat_id)
     dialog_context, dialog_count = await _prepare_dialog_context(
-        dialog_memory,
+        memory_manager,
         user_id=user_id,
         chat_id=chat_id,
         prompt=prompt,
     )
     request_context = get_request_context(context)
     request_id = request_context.correlation_id if request_context else None
-    memory_context = _build_memory_context(context)
+    memory_context = await _build_memory_context(context)
     user_context = _build_user_context_with_dialog(
         update,
         dialog_context=dialog_context,
@@ -5237,8 +5435,8 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             result = _build_resolution_fallback(resolution.action or "resolve", reason=resolution.reason)
         await send_result(update, context, result)
-        if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
-            await dialog_memory.add_assistant(user_id, chat_id, result.text)
+        if memory_manager and await memory_manager.dialog_enabled(user_id) and _should_store_assistant_response(result):
+            await memory_manager.add_dialog_message(user_id, chat_id, "assistant", result.text)
         return
     if draft_store is not None:
         force_nlp = draft_store.consume_force_nlp(chat_id=chat_id, user_id=user_id)
@@ -5254,8 +5452,8 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 actions=_draft_actions(draft_id),
             )
             await send_result(update, context, result)
-            if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
-                await dialog_memory.add_assistant(user_id, chat_id, result.text)
+            if memory_manager and await memory_manager.dialog_enabled(user_id) and _should_store_assistant_response(result):
+                await memory_manager.add_dialog_message(user_id, chat_id, "assistant", result.text)
             return
     try:
         result = await orchestrator.handle(
@@ -5267,8 +5465,8 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _handle_exception(update, context, exc)
         return
     await send_result(update, context, result)
-    if dialog_memory and await dialog_memory.is_enabled(user_id) and _should_store_assistant_response(result):
-        await dialog_memory.add_assistant(user_id, chat_id, result.text)
+    if memory_manager and await memory_manager.dialog_enabled(user_id) and _should_store_assistant_response(result):
+        await memory_manager.add_dialog_message(user_id, chat_id, "assistant", result.text)
 
 
 @_with_error_handling

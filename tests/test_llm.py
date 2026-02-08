@@ -4,7 +4,8 @@ from pathlib import Path
 
 from app.core.orchestrator import Orchestrator
 from app.core.models import TaskExecutionResult
-from app.core.memory_layers import UserProfileLayer, build_memory_layers_context
+from app.core.memory_layers import build_memory_layers_context
+from app.core.memory_manager import MemoryManager, UserProfileMemory
 from app.infra.access import AccessController
 from app.infra.rate_limit import RateLimiter
 from app.infra.request_context import RequestContext
@@ -195,12 +196,13 @@ def test_orchestrator_uses_memory_context(tmp_path: Path) -> None:
         ts=datetime.now(timezone.utc),
         env="dev",
     )
-    memory_context = build_memory_layers_context(
-        request_context,
-        memory_store=None,
-        profile_layer=UserProfileLayer(profile_store),
-        actions_layer=None,
-        max_chars=500,
+    memory_manager = MemoryManager(dialog=None, profile=UserProfileMemory(profile_store), actions=None)
+    memory_context = asyncio.run(
+        build_memory_layers_context(
+            request_context,
+            memory_manager=memory_manager,
+            max_chars=500,
+        )
     )
 
     assert memory_context is not None
@@ -208,5 +210,5 @@ def test_orchestrator_uses_memory_context(tmp_path: Path) -> None:
 
     last_message = client.last_messages[-1]["content"]
     assert "Профиль пользователя" in last_message
-    assert "Europe/London" in last_message
+    assert "язык: en" in last_message
     assert last_message.endswith("Привет")
