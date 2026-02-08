@@ -5106,6 +5106,12 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
+    message = _build_selfcheck_message(context)
+    result = _build_simple_result(message, intent="command.selfcheck", status="ok", mode="local")
+    await send_result(update, context, result)
+
+
+def _build_selfcheck_message(context: ContextTypes.DEFAULT_TYPE) -> str:
     settings = context.application.bot_data["settings"]
     allowlist_snapshot = _get_allowlist_store(context).snapshot()
     allowed_user_ids = allowlist_snapshot.allowed_user_ids
@@ -5113,17 +5119,29 @@ async def selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         allowed_summary = f"ok ({len(allowed_user_ids)}): {', '.join(map(str, allowed_user_ids))}"
     else:
         allowed_summary = "empty (доступ закрыт)"
-    message = (
+    integrations = _active_integrations(context)
+    integrations_label = ", ".join(sorted(integrations.keys())) if integrations else "none"
+    return (
         "Self-check:\n"
         f"ALLOWLIST_PATH: {settings.allowlist_path}\n"
         f"ALLOWLIST_USERS: {allowed_summary}\n"
         f"RATE_LIMIT_PER_MINUTE: {settings.rate_limit_per_minute}\n"
         f"RATE_LIMIT_PER_DAY: {settings.rate_limit_per_day}\n"
         f"HISTORY_SIZE: {settings.history_size}\n"
-        f"TELEGRAM_MESSAGE_LIMIT: {settings.telegram_message_limit}"
+        f"TELEGRAM_MESSAGE_LIMIT: {settings.telegram_message_limit}\n"
+        f"INTEGRATIONS: {integrations_label}"
     )
-    result = _build_simple_result(message, intent="command.selfcheck", status="ok", mode="local")
-    await send_result(update, context, result)
+
+
+def _active_integrations(context: ContextTypes.DEFAULT_TYPE) -> dict[str, bool]:
+    settings = context.application.bot_data["settings"]
+    llm_client = context.application.bot_data.get("llm_client")
+    integrations: dict[str, bool] = {}
+    if settings.calendar_backend == "caldav" and tools_calendar.is_caldav_configured(settings):
+        integrations["caldav"] = True
+    if llm_client is not None:
+        integrations["llm"] = True
+    return integrations
 
 
 @_with_error_handling

@@ -92,10 +92,11 @@ def _register_handlers(application: Application) -> None:
 
 
 def _build_startup_integrations(features: StartupFeatures) -> dict[str, bool]:
-    return {
+    base = {
         "caldav": features.caldav_enabled,
         "llm": features.llm_enabled,
     }
+    return {key: value for key, value in base.items() if value}
 
 
 def main() -> None:

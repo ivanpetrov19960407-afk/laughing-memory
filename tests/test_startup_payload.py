@@ -14,3 +14,12 @@ def test_startup_integrations_excludes_google() -> None:
     assert "google" not in integrations
     payload = json.dumps({"integrations": integrations}, ensure_ascii=False)
     assert '"google"' not in payload
+
+
+def test_startup_integrations_omit_disabled() -> None:
+    integrations = _build_startup_integrations(
+        StartupFeatures(caldav_enabled=False, llm_enabled=True)
+    )
+
+    assert "caldav" not in integrations
+    assert integrations == {"llm": True}
