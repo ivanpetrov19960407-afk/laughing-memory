@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from app.bot import menu
 from app.core import calendar_store
 from app.core.result import Action, OrchestratorResult, error, ok, refused
 from app.core.tools_calendar import create_event
@@ -586,7 +587,7 @@ class WizardManager:
             mode="local",
             actions=[
                 Action(id="utility_reminders.list", label="📋 Список", payload={"op": "reminder.list"}),
-                Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}),
+                menu.menu_action(),
             ],
             debug={"refs": {"reminder_id": reminder.id}},
         )
@@ -1250,13 +1251,13 @@ def _expired_result() -> OrchestratorResult:
 
 
 def _menu_actions() -> list[Action]:
-    return [Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"})]
+    return [menu.menu_action()]
 
 
 def _step_actions() -> list[Action]:
     return [
         Action(id="wizard.cancel", label="❌ Отмена", payload={"op": "wizard_cancel"}),
-        Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}),
+        menu.menu_action(),
     ]
 
 
@@ -1326,6 +1327,7 @@ def _confirm_actions() -> list[Action]:
         Action(id="wizard.confirm", label="✅ Да", payload={"op": "wizard_confirm"}),
         Action(id="wizard.edit", label="✏️ Изменить", payload={"op": "wizard_edit"}),
         Action(id="wizard.cancel", label="❌ Отмена", payload={"op": "wizard_cancel"}),
+        menu.menu_action(),
     ]
 
 
@@ -1338,6 +1340,7 @@ def _resume_actions(wizard_id: str, *, resume_target: str | None = None) -> list
         Action(id="wizard.resume", label="▶️ Продолжить", payload={"op": "wizard.resume"}),
         Action(id="wizard.restart", label="🔄 Начать заново", payload=restart_payload),
         Action(id="wizard.cancel", label="❌ Отмена", payload={"op": "wizard_cancel"}),
+        menu.menu_action(),
     ]
 
 
@@ -1365,6 +1368,6 @@ def _post_create_actions(event_id: str) -> list[Action]:
             label="📋 Показать ближайшие",
             payload={"op": "reminder.list"},
         ),
-        Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}),
+        menu.menu_action(),
     ]
     return actions
