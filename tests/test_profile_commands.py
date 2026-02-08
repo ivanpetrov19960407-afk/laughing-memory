@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 from app.bot import actions, handlers
-from app.core.memory_store import MemoryStore
+from app.core.memory_manager import MemoryManager, UserActionsLog, UserProfileMemory
 from app.core.result import ok
 from app.infra.actions_log_store import ActionsLogStore
 from app.infra.rate_limiter import RateLimiter
@@ -19,6 +19,11 @@ class DummyOrchestrator:
 
 class DummyContext:
     def __init__(self, profile_store: UserProfileStore, actions_store: ActionsLogStore) -> None:
+        memory_manager = MemoryManager(
+            dialog=None,
+            profile=UserProfileMemory(profile_store),
+            actions=UserActionsLog(actions_store),
+        )
         self.application = SimpleNamespace(
             bot_data={
                 "orchestrator": DummyOrchestrator(),
@@ -28,7 +33,7 @@ class DummyContext:
                 "settings": SimpleNamespace(enable_menu=True, enable_wizards=True, strict_no_pseudo_sources=False),
                 "profile_store": profile_store,
                 "actions_log_store": actions_store,
-                "memory_store": MemoryStore(),
+                "memory_manager": memory_manager,
             }
         )
         self.chat_data: dict[str, object] = {}

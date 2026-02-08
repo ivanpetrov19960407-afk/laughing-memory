@@ -110,6 +110,9 @@ class UserProfileStore:
         except sqlite3.Error:
             LOGGER.exception("Failed to close profile database connection")
 
+    def exists(self, user_id: int) -> bool:
+        return self._fetch_row(user_id) is not None
+
     def _fetch_row(self, user_id: int) -> sqlite3.Row | None:
         cursor = self._connection.execute(
             """

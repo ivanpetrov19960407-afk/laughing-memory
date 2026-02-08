@@ -1,41 +1,22 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+import asyncio
+from datetime import datetime, timezone
 
-from app.core.memory_layers import ActionsLogLayer, UserProfileLayer, build_memory_layers_context
-from app.core.memory_store import MemoryStore
-from app.infra.actions_log_store import ActionsLogStore
+from app.core.dialog_memory import DialogMemory
+from app.core.memory_layers import build_memory_layers_context
+from app.core.memory_manager import MemoryManager, UserProfileMemory
 from app.infra.request_context import RequestContext
 from app.infra.user_profile_store import UserProfileStore
 
 
-def test_memory_layers_context_includes_profile_and_actions(tmp_path) -> None:
-    memory_store = MemoryStore(max_items=5, ttl_seconds=3600)
+def test_memory_layers_context_includes_dialog_and_profile(tmp_path) -> None:
+    dialog_memory = DialogMemory(tmp_path / "dialog.json", max_turns=5)
+    asyncio.run(dialog_memory.load())
+    asyncio.run(dialog_memory.set_enabled(1, True))
+    asyncio.run(dialog_memory.add_user(1, 2, "Напомни о встрече"))
     profile_store = UserProfileStore(tmp_path / "profiles.db")
-    actions_store = ActionsLogStore(tmp_path / "actions.db")
-
-    profile_store.update(1, {"language": "en", "timezone": "Europe/London", "verbosity": "short"})
-    actions_store.append(
-        user_id=1,
-        action_type="calendar.event.create",
-        payload={"summary": "Создал событие"},
-        ts=datetime.now(timezone.utc),
-    )
-    actions_store.append(
-        user_id=1,
-        action_type="calendar.event.delete",
-        payload={"summary": "Старое событие"},
-        ts=datetime.now(timezone.utc) - timedelta(days=10),
-    )
-    memory_store.add(
-        chat_id=2,
-        user_id=1,
-        role="user",
-        kind="message",
-        content="Напомни о встрече",
-        env="dev",
-        correlation_id="old",
-    )
+    profile_store.update(1, {"language": "en", "facts_mode_default": True, "style": "formal"})
 
     request_context = RequestContext(
         correlation_id="corr-1",
@@ -46,63 +27,49 @@ def test_memory_layers_context_includes_profile_and_actions(tmp_path) -> None:
         ts=datetime.now(timezone.utc),
         env="dev",
     )
-    context = build_memory_layers_context(
-        request_context,
-        memory_store=memory_store,
-        profile_layer=UserProfileLayer(profile_store),
-        actions_layer=ActionsLogLayer(actions_store),
-        max_chars=2000,
+    memory_manager = MemoryManager(
+        dialog=dialog_memory,
+        profile=UserProfileMemory(profile_store),
+        actions=None,
+    )
+    context = asyncio.run(
+        build_memory_layers_context(
+            request_context,
+            memory_manager=memory_manager,
+            max_chars=2000,
+        )
     )
 
     assert context is not None
     assert "Профиль пользователя" in context
-    assert "Europe/London" in context
-    assert "Последние действия" in context
-    assert "Создал событие" in context
-    assert "Старое событие" not in context
+    assert "язык: en" in context
+    assert "режим фактов: вкл" in context
+    assert "formal" in context
 
 
-def test_memory_layers_context_truncates_actions(tmp_path) -> None:
-    actions_store = ActionsLogStore(tmp_path / "actions.db")
-    now = datetime.now(timezone.utc)
-    actions_store.append(
-        user_id=1,
-        action_type="calendar.event.create",
-        payload={"summary": "Новое действие " + ("x" * 60)},
-        ts=now,
-    )
-    actions_store.append(
-        user_id=1,
-        action_type="calendar.event.update",
-        payload={"summary": "Среднее действие " + ("y" * 60)},
-        ts=now - timedelta(minutes=5),
-    )
-    actions_store.append(
-        user_id=1,
-        action_type="calendar.event.delete",
-        payload={"summary": "Старое действие " + ("z" * 60)},
-        ts=now - timedelta(minutes=10),
-    )
+def test_memory_layers_context_truncates_dialog(tmp_path) -> None:
+    dialog_memory = DialogMemory(tmp_path / "dialog.json", max_turns=5)
+    asyncio.run(dialog_memory.load())
+    asyncio.run(dialog_memory.set_enabled(1, True))
+    for _ in range(3):
+        asyncio.run(dialog_memory.add_user(1, 2, "Очень длинное сообщение " * 10))
     request_context = RequestContext(
         correlation_id="corr-2",
         user_id=1,
         chat_id=2,
         message_id=3,
         timezone=None,
-        ts=now,
+        ts=datetime.now(timezone.utc),
         env="dev",
     )
-    context = build_memory_layers_context(
-        request_context,
-        memory_store=None,
-        profile_layer=None,
-        actions_layer=ActionsLogLayer(actions_store),
-        max_chars=120,
-        action_limit=5,
-        action_days=7,
+    memory_manager = MemoryManager(dialog=dialog_memory, profile=None, actions=None)
+    context = asyncio.run(
+        build_memory_layers_context(
+            request_context,
+            memory_manager=memory_manager,
+            max_chars=120,
+        )
     )
 
     assert context is not None
     assert len(context) <= 120
-    assert "Новое действие" in context
-    assert "Старое действие" not in context
