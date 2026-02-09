@@ -135,19 +135,23 @@ def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Actio
     base_trigger = reminder.trigger_at.isoformat()
     return [
         Action(
-            id=f"reminder_snooze_menu:{reminder.id}",
-            label="⏸ Отложить",
-            payload={"op": "reminder_snooze_menu", "id": reminder.id, "base_trigger_at": base_trigger},
+            id=f"reminder_snooze:{reminder.id}:10",
+            label="⏸ Отложить 10 минут",
+            payload={"op": "reminder_snooze", "reminder_id": reminder.id, "minutes": 10, "base_trigger_at": base_trigger},
+        ),
+        Action(
+            id=f"reminder_snooze:{reminder.id}:60",
+            label="⏸ Отложить 1 час",
+            payload={"op": "reminder_snooze", "reminder_id": reminder.id, "minutes": 60, "base_trigger_at": base_trigger},
         ),
         Action(
             id=f"reminder_reschedule:{reminder.id}",
             label="✏ Перенести",
-            payload={"op": "reminder_reschedule", "id": reminder.id, "base_trigger_at": base_trigger},
+            payload={"op": "reminder_reschedule", "reminder_id": reminder.id, "base_trigger_at": base_trigger},
         ),
         Action(
             id="utility_reminders.delete",
             label="🗑 Удалить",
             payload={"op": "reminder.delete_confirm", "reminder_id": reminder.id},
         ),
-        Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}),
     ]
