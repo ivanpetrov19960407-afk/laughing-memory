@@ -71,6 +71,7 @@ class UserActionsLog:
     def clear(self, user_id: int) -> None:
         self.store.clear(user_id=user_id)
 
+<<<<<<< Current (Your changes)
     def list(
         self,
         user_id: int,
@@ -78,6 +79,10 @@ class UserActionsLog:
         since: datetime | None = None,
     ) -> list[ActionLogEntry]:
         return self.store.list_recent(user_id=user_id, limit=limit, since=since)
+=======
+    def list(self, user_id: int, limit: int = 10, since: datetime | None = None) -> list[ActionLogEntry]:
+        return self.store.list(user_id=user_id, limit=limit, since=since)
+>>>>>>> Incoming (Background Agent changes)
 
 
 @dataclass(frozen=True)
