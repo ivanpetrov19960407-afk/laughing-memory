@@ -80,6 +80,7 @@ class ActionsLogStore:
         *,
         user_id: int,
         query: str | None = None,
+        since: datetime | None = None,
         limit: int = 10,
     ) -> list[ActionLogEntry]:
         if limit <= 0:
@@ -91,6 +92,10 @@ class ActionsLogStore:
             FROM user_actions
             WHERE user_id = ?
         """
+        if since is not None:
+            since_ts = since.astimezone(timezone.utc).isoformat()
+            sql += " AND ts >= ?"
+            params.append(since_ts)
         if normalized_query:
             if normalized_query.startswith("type:"):
                 action_type = normalized_query.replace("type:", "", 1).strip()
@@ -106,8 +111,14 @@ class ActionsLogStore:
         rows = cursor.fetchall()
         return [_row_to_entry(row) for row in rows]
 
-    def list_recent(self, *, user_id: int, limit: int = 10) -> list[ActionLogEntry]:
-        return self.search(user_id=user_id, query=None, limit=limit)
+    def list_recent(
+        self,
+        *,
+        user_id: int,
+        since: datetime | None = None,
+        limit: int = 10,
+    ) -> list[ActionLogEntry]:
+        return self.search(user_id=user_id, query=None, since=since, limit=limit)
 
     def clear(self, *, user_id: int) -> None:
         self._connection.execute("DELETE FROM user_actions WHERE user_id = ?", (user_id,))

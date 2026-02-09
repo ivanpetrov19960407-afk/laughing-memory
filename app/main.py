@@ -20,7 +20,13 @@ from app.core.memory_manager import MemoryManager, UserActionsLog, UserProfileMe
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.actions_log_store import ActionsLogStore
-from app.infra.config import StartupFeatures, load_settings, resolve_env_label, validate_startup_env
+from app.infra.config import (
+    StartupFeatures,
+    get_log_level,
+    load_settings,
+    resolve_env_label,
+    validate_startup_env,
+)
 from app.infra.user_profile_store import UserProfileStore
 from app.infra.request_context import RequestContext, log_event
 from app.infra.version import resolve_app_version
@@ -102,10 +108,10 @@ def _build_startup_integrations(features: StartupFeatures) -> dict[str, bool]:
 
 
 def main() -> None:
+    log_level = get_log_level()
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
-
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("telegram").setLevel(logging.WARNING)

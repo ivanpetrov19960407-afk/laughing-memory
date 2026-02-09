@@ -99,10 +99,13 @@ python bot.py
 2. Запустите бота и создайте событие через `/calendar add ...`.
 3. Откройте Nextcloud Calendar и убедитесь, что событие появилось.
 
-## Тесты
+## Тесты и линт
 ```bash
-pytest
+make install   # зависимости (+ pre-commit, если есть)
+make test      # pytest -q
+make lint      # pre-commit run -a (если установлен pre-commit)
 ```
+Или напрямую: `pytest`, `pre-commit run --all-files`.
 
 ## Поиск и строгий facts-mode
 - `/search` без аргументов возвращает отказ с подсказкой: `Использование: /search <запрос>`.

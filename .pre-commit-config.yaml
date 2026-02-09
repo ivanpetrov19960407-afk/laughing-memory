@@ -1,0 +1,8 @@
+# Infra-lite: basic hooks only (no ruff/black to avoid large format diff)
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml

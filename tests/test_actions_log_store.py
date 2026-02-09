@@ -28,3 +28,9 @@ def test_actions_log_store_append_and_search(tmp_path) -> None:
 
     recent = store.list_recent(user_id=1, limit=5)
     assert len(recent) == 1
+
+    # since filter: only entries with ts >= since
+    since_before = datetime(2023, 12, 1, tzinfo=timezone.utc)
+    since_after = datetime(2024, 6, 1, tzinfo=timezone.utc)
+    assert len(store.search(user_id=1, since=since_before, limit=10)) == 1
+    assert len(store.search(user_id=1, since=since_after, limit=10)) == 0

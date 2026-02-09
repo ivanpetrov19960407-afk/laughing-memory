@@ -61,6 +61,7 @@ class Settings:
     caldav_username: str | None
     caldav_password: str | None
     caldav_calendar_name: str | None
+    actions_log_ttl_days: int
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,20 @@ class StartupFeatures:
 
 
 _DEV_ENVS = {"dev", "development", "local"}
+
+_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+
+def get_log_level(raw_env: dict[str, str] | None = None) -> int:
+    """Read LOG_LEVEL from env; validate; return default logging.INFO for invalid/missing."""
+    import logging
+    source = raw_env if raw_env is not None else os.environ
+    value = (source.get("LOG_LEVEL") or "").strip().upper()
+    if value in _VALID_LOG_LEVELS:
+        return getattr(logging, value)
+    if value:
+        LOGGER.warning("Invalid LOG_LEVEL=%r; using INFO", value)
+    return logging.INFO
 
 
 def resolve_env_label(raw_env: dict[str, str] | None = None) -> str:
@@ -193,6 +208,7 @@ def load_settings() -> Settings:
     caldav_username = os.getenv("CALDAV_USERNAME") or None
     caldav_password = os.getenv("CALDAV_PASSWORD") or None
     caldav_calendar_name = os.getenv("CALDAV_CALENDAR_NAME") or None
+    actions_log_ttl_days = _parse_int_with_default(os.getenv("ACTIONS_LOG_TTL_DAYS"), 30)
     return Settings(
         bot_token=token,
         orchestrator_config_path=config_path,
@@ -237,6 +253,7 @@ def load_settings() -> Settings:
         caldav_username=caldav_username,
         caldav_password=caldav_password,
         caldav_calendar_name=caldav_calendar_name,
+        actions_log_ttl_days=actions_log_ttl_days,
     )
 
 
