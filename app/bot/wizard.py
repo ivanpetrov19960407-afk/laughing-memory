@@ -7,11 +7,14 @@ from zoneinfo import ZoneInfo
 
 from app.bot import menu
 from app.core import calendar_store
+from app.core.memory_manager import MemoryManager
 from app.core.result import Action, OrchestratorResult, error, ok, refused
 from app.core.tools_calendar import create_event
 from app.core.user_profile import UserProfile
 from app.storage.wizard_store import WizardState, WizardStore
 from app.infra.user_profile_store import UserProfileStore
+
+REMINDER_LLM_CONTEXT_MAX_CHARS = 2000
 
 LOGGER = logging.getLogger(__name__)
 
@@ -38,11 +41,13 @@ class WizardManager:
         reminder_scheduler=None,
         settings=None,
         profile_store: UserProfileStore | None = None,
+        memory_manager: MemoryManager | None = None,
     ) -> None:
         self._store = store
         self._reminder_scheduler = reminder_scheduler
         self._settings = settings
         self._profile_store = profile_store
+        self._memory_manager = memory_manager
 
     def get_state(self, *, user_id: int, chat_id: int) -> tuple[WizardState | None, bool]:
         return self._store.load_state(user_id=user_id, chat_id=chat_id)
@@ -587,6 +592,16 @@ class WizardManager:
         if trigger_at.tzinfo is None:
             trigger_at = trigger_at.replace(tzinfo=calendar_store.BOT_TZ)
         recurrence = recurrence_value if isinstance(recurrence_value, dict) else None
+        llm_context: str | None = None
+        if self._memory_manager and self._memory_manager.dialog:
+            try:
+                if await self._memory_manager.dialog_enabled(user_id):
+                    messages = await self._memory_manager.get_dialog(user_id, chat_id, limit=10)
+                    if messages:
+                        raw = self._memory_manager.dialog.format_context(messages)
+                        llm_context = raw[:REMINDER_LLM_CONTEXT_MAX_CHARS] if len(raw) > REMINDER_LLM_CONTEXT_MAX_CHARS else raw
+            except Exception:
+                LOGGER.debug("Failed to get dialog context for reminder", exc_info=True)
         try:
             reminder = await calendar_store.add_reminder(
                 trigger_at=trigger_at,
@@ -595,6 +610,7 @@ class WizardManager:
                 user_id=user_id,
                 recurrence=recurrence,
                 enabled=True,
+                llm_context=llm_context,
             )
         except Exception:
             LOGGER.exception("Failed to create reminder")

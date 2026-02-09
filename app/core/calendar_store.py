@@ -45,6 +45,7 @@ class ReminderItem:
     status: str
     recurrence: dict[str, object] | None
     last_triggered_at: datetime | None
+    llm_context: str | None = None
 
 
 @dataclass(frozen=True)
@@ -178,6 +179,12 @@ def _parse_recurrence(value: object) -> dict[str, object] | None:
     return recurrence
 
 
+def _parse_llm_context(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 def _parse_triggered_at(value: object) -> datetime | None:
     if not isinstance(value, str):
         return None
@@ -278,6 +285,7 @@ def _build_reminder_item(
     status: str,
     recurrence: dict[str, object] | None,
     last_triggered_at: datetime | None,
+    llm_context: str | None = None,
 ) -> ReminderItem:
     return ReminderItem(
         id=reminder_id,
@@ -291,6 +299,7 @@ def _build_reminder_item(
         status=status,
         recurrence=recurrence,
         last_triggered_at=last_triggered_at,
+        llm_context=llm_context,
     )
 
 
@@ -307,6 +316,7 @@ async def add_item(
     overrides: dict[str, dict[str, object]] | None = None,
     series_id: str | None = None,
     timezone: str | None = None,
+    llm_context: str | None = None,
 ) -> dict[str, object]:
     async with _STORE_LOCK:
         store = load_store()
@@ -364,6 +374,7 @@ async def add_item(
                 "status": "active" if reminders_enabled else "disabled",
                 "recurrence": None,
                 "last_triggered_at": None,
+                "llm_context": llm_context,
             }
         events.append(event)
         if reminder is not None:
@@ -387,6 +398,7 @@ async def add_reminder(
     user_id: int,
     recurrence: dict[str, object] | None = None,
     enabled: bool = True,
+    llm_context: str | None = None,
 ) -> ReminderItem:
     created = await add_item(
         dt=trigger_at,
@@ -395,6 +407,7 @@ async def add_reminder(
         remind_at=trigger_at,
         user_id=user_id,
         reminders_enabled=enabled,
+        llm_context=llm_context,
     )
     reminder_payload = created.get("reminder") if isinstance(created, dict) else None
     reminder_id = reminder_payload.get("reminder_id") if isinstance(reminder_payload, dict) else None
@@ -528,6 +541,7 @@ async def list_due_reminders(now: datetime, limit: int | None = None) -> list[Re
                 status=status,
                 recurrence=recurrence,
                 last_triggered_at=last_triggered_at,
+                llm_context=_parse_llm_context(item.get("llm_context")),
             )
         )
     result.sort(key=lambda item: item.trigger_at)
@@ -595,6 +609,7 @@ async def mark_reminder_sent(reminder_id: str, sent_at: datetime, missed: bool =
             status="active",
             recurrence=_parse_recurrence(updated_item.get("recurrence")),
             last_triggered_at=_parse_triggered_at(updated_item.get("last_triggered_at")),
+            llm_context=_parse_llm_context(updated_item.get("llm_context")),
         )
     return None
 
@@ -644,6 +659,7 @@ async def list_reminders(
                 status=status,
                 recurrence=recurrence,
                 last_triggered_at=last_triggered_at,
+                llm_context=_parse_llm_context(item.get("llm_context")),
             )
         )
     result.sort(key=lambda item: item.trigger_at)
@@ -680,6 +696,7 @@ async def get_reminder(reminder_id: str) -> ReminderItem | None:
             status=status,
             recurrence=recurrence,
             last_triggered_at=last_triggered_at,
+            llm_context=_parse_llm_context(item.get("llm_context")),
         )
     return None
 
@@ -908,6 +925,7 @@ async def apply_snooze(
         status=_normalize_status(updated_item),
         recurrence=_parse_recurrence(updated_item.get("recurrence")),
         last_triggered_at=_parse_triggered_at(updated_item.get("last_triggered_at")),
+        llm_context=_parse_llm_context(updated_item.get("llm_context")),
     )
 
 
@@ -948,6 +966,7 @@ async def update_reminder_trigger(
         status=_normalize_status(updated_item),
         recurrence=_parse_recurrence(updated_item.get("recurrence")),
         last_triggered_at=_parse_triggered_at(updated_item.get("last_triggered_at")),
+        llm_context=_parse_llm_context(updated_item.get("llm_context")),
     )
 
 
@@ -992,6 +1011,7 @@ async def ensure_reminder_for_event(
                     status=_normalize_status(item),
                     recurrence=_parse_recurrence(item.get("recurrence")),
                     last_triggered_at=_parse_triggered_at(item.get("last_triggered_at")),
+                    llm_context=_parse_llm_context(item.get("llm_context")),
                 )
         reminder_id = _generate_id(
             {
@@ -1029,6 +1049,7 @@ async def ensure_reminder_for_event(
             status="active" if enabled else "disabled",
             recurrence=None,
             last_triggered_at=None,
+            llm_context=None,
         )
 
 

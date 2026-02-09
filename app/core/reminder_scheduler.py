@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from telegram.ext import Application, ContextTypes
 
-from app.core import calendar_store
+from app.core import calendar_store, reminders as reminders_module
 from app.bot.actions import ActionStore, build_inline_keyboard
 from app.core.result import Action
 from app.infra.messaging import safe_send_bot_text
@@ -59,7 +59,8 @@ async def _process_due_reminders(application: Application) -> None:
         event = await calendar_store.get_event(item.event_id)
         event_dt = event.dt if event else item.trigger_at
         message_time = event_dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-        text = f"⏰ Напоминание: {item.text}\nКогда: {message_time} (МСК)"
+        message_body = await reminders_module._build_reminder_message(item, application)
+        text = f"⏰ Напоминание: {message_body}\nКогда: {message_time} (МСК)"
         actions = _build_reminder_actions(item)
         action_store = application.bot_data.get("action_store")
         reply_markup = None
