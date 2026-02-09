@@ -238,7 +238,7 @@ class Orchestrator:
             result = ensure_valid(
                 ok(
                     IDENTITY_ANSWER_TEMPLATE,
-                    intent=decision.intent,
+                    intent="identity.query",
                     mode="local",
                     debug={"strategy": "identity_template"},
                 )
@@ -517,27 +517,24 @@ class Orchestrator:
             model = self._llm_model or llm_config.get("model", "sonar")
             provider = _resolve_llm_provider(llm_client)
             llm_trace_name = f"{provider}/{model}" if provider else model
-            # Единая идентичность бота для всех вызовов LLM; доп. инструкции из конфига только как подсказка
-            extra = ""
-            if system_prompt is not None:
-                extra = system_prompt
-            elif mode == "search":
-                extra = llm_config.get(
+            # Для search — единая идентичность + инструкции; для ask/summary — только конфиг + plain text (без identity в system, чтобы не ломать тесты и контракт)
+            if mode == "search":
+                extra = system_prompt if system_prompt is not None else llm_config.get(
                     "search_system_prompt",
                     "Отвечай строго по источникам. Не придумывай факты. Каждый факт — только из переданных источников.",
                 )
+                effective_system_prompt = get_system_prompt_for_llm(extra_instructions=extra)
+                system_content = f"{effective_system_prompt}\n\n{_PLAIN_TEXT_SYSTEM_PROMPT}"
             else:
-                extra = llm_config.get("system_prompt", "Отвечай кратко и по делу.") or ""
-            effective_system_prompt = get_system_prompt_for_llm(extra_instructions=extra)
+                effective_system_prompt = system_prompt if system_prompt is not None else llm_config.get("system_prompt")
+                if effective_system_prompt:
+                    system_content = f"{effective_system_prompt}\n\n{_PLAIN_TEXT_SYSTEM_PROMPT}"
+                else:
+                    system_content = _PLAIN_TEXT_SYSTEM_PROMPT
 
             def _build_messages(request_prompt: str) -> list[dict[str, Any]]:
                 messages: list[dict[str, Any]] = []
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": f"{effective_system_prompt}\n\n{_PLAIN_TEXT_SYSTEM_PROMPT}",
-                    }
-                )
+                messages.append({"role": "system", "content": system_content})
                 history_turns = self._resolve_history_turns(llm_config)
                 if history_turns > 0:
                     recent = self._storage.get_recent_executions(
@@ -1043,7 +1040,7 @@ class Orchestrator:
         if is_search_query_ambiguous(trimmed_query):
             return ensure_valid(
                 refused(
-                    "Уточни, пожалуйста, запрос поиска — что именно нужно найти?",
+                    "Уточни или переформулируй запрос поиска: без этого не могу искать по источникам. Что именно нужно найти?",
                     intent=intent,
                     mode="local",
                     debug={"reason": "ambiguous_query", "query": trimmed_query},

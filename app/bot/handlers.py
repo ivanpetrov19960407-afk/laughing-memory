@@ -4117,6 +4117,55 @@ async def _handle_reminders_list(
     )
 
 
+async def _handle_reminders_list_24h(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    intent: str = "utility_reminders.list_24h",
+) -> OrchestratorResult:
+    """Список напоминаний на ближайшие 24 часа. Пустой список — сообщение «На сегодня напоминаний нет»."""
+    now = datetime.now(tz=calendar_store.BOT_TZ)
+    end_24h = now + timedelta(hours=24)
+    items = await calendar_store.list_reminders(now, limit=None, include_disabled=False)
+    filtered = [
+        item
+        for item in items
+        if item.user_id == user_id and item.chat_id == chat_id and item.trigger_at <= end_24h
+    ]
+    filtered.sort(key=lambda item: item.trigger_at)
+    actions: list[Action] = list(_reminder_list_controls_actions())
+    if not filtered:
+        return ok(
+            "На сегодня напоминаний нет",
+            intent=intent,
+            mode="local",
+            actions=_reminder_list_controls_actions(include_refresh=False),
+        )
+    lines: list[str] = []
+    for item in filtered:
+        when_label = item.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+        lines.append(f"• {item.text}\n  Когда: {when_label} (МСК)")
+        for action in _reminder_snooze_menu_actions(item.id, item.trigger_at.isoformat()):
+            if action.id.startswith("reminder_snooze:"):
+                actions.append(action)
+        actions.append(
+            Action(
+                id="utility_reminders.reschedule",
+                label=f"✏ Перенести: {_short_label(item.text)}",
+                payload={"op": "reminder_reschedule", "reminder_id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
+            )
+        )
+        actions.append(
+            Action(
+                id="utility_reminders.delete",
+                label=f"🗑 Удалить: {_short_label(item.text)}",
+                payload={"op": "reminder.delete_confirm", "reminder_id": item.id},
+            )
+        )
+    return ok("\n".join(lines), intent=intent, mode="local", actions=actions)
+
+
 async def _handle_reminder_snooze(
     context: ContextTypes.DEFAULT_TYPE,
     *,

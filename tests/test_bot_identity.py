@@ -46,7 +46,7 @@ def test_identity_answer_identical(tmp_path: Path) -> None:
     result = asyncio.run(orchestrator.handle("Кто ты?", {"user_id": 1}))
     assert result.status == "ok"
     assert result.text == IDENTITY_ANSWER_TEMPLATE
-    assert result.intent == "identity.local"
+    assert result.intent == "identity.query"
     assert result.mode == "local"
 
 
