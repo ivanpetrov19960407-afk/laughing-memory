@@ -288,7 +288,6 @@ def load_settings() -> Settings:
         otel_exporter=otel_exporter,
         otel_otlp_endpoint=otel_otlp_endpoint,
         systemd_watchdog_enabled=systemd_watchdog_enabled,
-        actions_log_ttl_days=actions_log_ttl_days,
     )
 
 
