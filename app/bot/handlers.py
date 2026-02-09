@@ -1242,18 +1242,88 @@ async def _build_reminders_list_result(
     for item in limited:
         when_label = item.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         lines.append(f"• {item.text}\n  Когда: {when_label} (МСК)")
+        base_trigger = item.trigger_at.isoformat()
         actions.append(
             Action(
-                id=f"reminder_snooze_menu:{item.id}",
-                label=f"⏸ Отложить: {_short_label(item.text)}",
-                payload={"op": "reminder_snooze_menu", "reminder_id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
+                id=f"reminder_snooze:{item.id}:10",
+                label=f"⏸ 10 мин: {_short_label(item.text)}",
+                payload={"op": "reminder_snooze", "reminder_id": item.id, "minutes": 10, "base_trigger_at": base_trigger},
+            )
+        )
+        actions.append(
+            Action(
+                id=f"reminder_snooze:{item.id}:60",
+                label=f"⏸ 1 час: {_short_label(item.text)}",
+                payload={"op": "reminder_snooze", "reminder_id": item.id, "minutes": 60, "base_trigger_at": base_trigger},
             )
         )
         actions.append(
             Action(
                 id="utility_reminders.reschedule",
                 label=f"✏ Перенести: {_short_label(item.text)}",
-                payload={"op": "reminder_reschedule", "reminder_id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
+                payload={"op": "reminder_reschedule", "reminder_id": item.id, "base_trigger_at": base_trigger},
+            )
+        )
+        actions.append(
+            Action(
+                id="utility_reminders.delete",
+                label=f"🗑 Удалить: {_short_label(item.text)}",
+                payload={"op": "reminder.delete_confirm", "reminder_id": item.id},
+            )
+        )
+    return ok("\n".join(lines), intent=intent, mode="local", actions=actions)
+
+
+async def _build_reminders_next_24h_result(
+    now: datetime,
+    *,
+    user_id: int,
+    chat_id: int,
+    intent: str,
+) -> OrchestratorResult:
+    end_time = now + timedelta(hours=24)
+    items = await calendar_store.list_reminders(now, limit=None, include_disabled=False)
+    filtered = [
+        item
+        for item in items
+        if item.user_id == user_id
+        and item.chat_id == chat_id
+        and item.trigger_at <= end_time
+        and item.trigger_at >= now
+    ]
+    filtered.sort(key=lambda item: item.trigger_at)
+    actions = _reminder_list_controls_actions()
+    if not filtered:
+        return ok(
+            "На сегодня напоминаний нет.",
+            intent=intent,
+            mode="local",
+            actions=_reminder_list_controls_actions(include_refresh=False),
+        )
+    lines: list[str] = []
+    for item in filtered:
+        when_label = item.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+        lines.append(f"• {item.text}\n  Когда: {when_label} (МСК)")
+        base_trigger = item.trigger_at.isoformat()
+        actions.append(
+            Action(
+                id=f"reminder_snooze:{item.id}:10",
+                label=f"⏸ 10 мин: {_short_label(item.text)}",
+                payload={"op": "reminder_snooze", "reminder_id": item.id, "minutes": 10, "base_trigger_at": base_trigger},
+            )
+        )
+        actions.append(
+            Action(
+                id=f"reminder_snooze:{item.id}:60",
+                label=f"⏸ 1 час: {_short_label(item.text)}",
+                payload={"op": "reminder_snooze", "reminder_id": item.id, "minutes": 60, "base_trigger_at": base_trigger},
+            )
+        )
+        actions.append(
+            Action(
+                id="utility_reminders.reschedule",
+                label=f"✏ Перенести: {_short_label(item.text)}",
+                payload={"op": "reminder_reschedule", "reminder_id": item.id, "base_trigger_at": base_trigger},
             )
         )
         actions.append(
@@ -2919,6 +2989,11 @@ async def _handle_menu_section(
                     label="📋 Список",
                     payload={"op": "reminder.list", "limit": 5},
                 ),
+                Action(
+                    id="utility_reminders.list_24h",
+                    label="📅 Ближайшие 24 часа",
+                    payload={"op": "reminder.list_24h"},
+                ),
                 menu.menu_action(),
             ],
         )
@@ -3722,6 +3797,13 @@ async def _dispatch_action_payload(
             limit=max(1, limit_value),
             intent="utility_reminders.list",
         )
+    if op_value == "reminder.list_24h":
+        return await _handle_reminders_list_24h(
+            context,
+            user_id=user_id,
+            chat_id=chat_id,
+            intent="utility_reminders.list_24h",
+        )
     if op_value == "reminder.delete_confirm":
         reminder_id = payload.get("reminder_id") or payload.get("id")
         if not isinstance(reminder_id, str) or not reminder_id:
@@ -4110,6 +4192,22 @@ async def _handle_reminders_list(
     )
 
 
+async def _handle_reminders_list_24h(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    intent: str = "utility_reminders.list_24h",
+) -> OrchestratorResult:
+    now = datetime.now(tz=calendar_store.BOT_TZ)
+    return await _build_reminders_next_24h_result(
+        now,
+        user_id=user_id,
+        chat_id=chat_id,
+        intent=intent,
+    )
+
+
 async def _handle_reminder_snooze(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -4146,12 +4244,18 @@ async def _handle_reminder_snooze(
                 intent="utility_reminders.snooze",
                 mode="local",
             )
-    LOGGER.info(
-        "Reminder snoozed: reminder_id=%s user_id=%s old_trigger_at=%s new_trigger_at=%s",
-        reminder_id,
-        user_id,
-        reminder.trigger_at.isoformat(),
-        updated.trigger_at.isoformat(),
+    request_context = get_request_context(context)
+    log_event(
+        LOGGER,
+        request_context,
+        component="reminder",
+        event="snoozed",
+        status="ok",
+        reminder_id=reminder_id,
+        user_id=user_id,
+        minutes=offset,
+        old_trigger_at=reminder.trigger_at.isoformat(),
+        new_trigger_at=updated.trigger_at.isoformat(),
     )
     when_label = updated.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
     return ok(
