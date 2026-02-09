@@ -81,62 +81,13 @@ cp .env.example .env
 python bot.py
 ```
 
-### Локально (aiogram 3.x)
-Тот же контракт OrchestratorResult и те же обработчики; вход — aiogram:
-```bash
-pip install -r requirements.txt
-cp .env.example .env
-python bot_aiogram.py
-```
+Или через Makefile: `make venv`, `make install`, `make run`.
 
-### Dev: Makefile, тесты, pre-commit
-```bash
-make venv      # создать .venv (если нет)
-make install   # зависимости + pre-commit hook
-make test      # pytest -q
-make test-fast # pytest -q -k "not integration" (быстрые тесты)
-make lint      # ruff check + format check
-make format    # ruff check --fix + format
-make run       # python bot.py
-make precommit # pre-commit run -a
-make clean     # кэши, __pycache__
-```
+### Логирование (LOG_LEVEL)
+Уровень логирования задаётся переменной окружения `LOG_LEVEL` (значения: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`). По умолчанию — `INFO`. Пример: `LOG_LEVEL=DEBUG python bot.py`.
 
-#### Pre-commit установка
-Pre-commit проверяет код перед коммитом (форматирование, линтинг, секреты):
-```bash
-# Установка хуков (выполняется автоматически через make install)
-pip install pre-commit
-pre-commit install
-
-# Ручной запуск всех хуков
-pre-commit run -a
-```
-
-Pre-commit проверяет:
-- Форматирование (ruff format)
-- Линтинг (ruff check)
-- YAML/JSON/TOML синтаксис
-- Трейлинг пробелы и EOF
-- Большие файлы (>500KB)
-- Секреты в коде (detect-secrets)
-
-### Логирование
-- Уровень: `LOG_LEVEL` (по умолчанию `INFO`). Поддерживаются: `DEBUG`, `INFO`, `WARNING`, `ERROR`.
-- Файл (опционально):
-  - `LOG_FILE` — путь к файлу с ротацией (5 MB, 3 бэкапа) — legacy способ
-  - `LOG_TO_FILE=1` + `LOG_FILE_PATH=...` — новый способ (если `LOG_FILE_PATH` не задан, используется `data/bot.log`)
-- Секреты в логах не выводятся (обработка в request_context через `safe_log_payload`).
-
-### Docker
-- **Сборка:** `docker build -t secretary-bot:latest .`
-- **Запуск:** скопируйте `.env.example` в `.env`, заполните `BOT_TOKEN` и `ALLOWED_USER_IDS`, затем:
-  ```bash
-  docker compose up -d
-  ```
-- **Данные:** том `botdata` монтируется в `/app/data` (БД, allowlist, диалоги, визарды). Список томов: `docker volume ls`.
-- **Логи:** `docker compose logs -f bot`
-- **Обновление:** `docker compose build --no-cache && docker compose up -d`
+### Pre-commit и линтинг
+Установка хуков: `pip install -r requirements-dev.txt`, затем `pre-commit install`. Запуск по всем файлам: `pre-commit run -a` или `make lint`. Тесты: `pytest` или `make test`.
 
 ## Переменные окружения
 См. `.env.example` — в файле оставлены только актуальные переменные.
@@ -163,6 +114,7 @@ Pre-commit проверяет:
 ```bash
 pytest
 ```
+Или `make test`.
 
 ## Поиск и строгий facts-mode
 - `/search` без аргументов возвращает отказ с подсказкой: `Использование: /search <запрос>`.
