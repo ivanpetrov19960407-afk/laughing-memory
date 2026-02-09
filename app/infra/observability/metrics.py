@@ -7,14 +7,13 @@ import time
 from typing import Any
 
 try:
-    from prometheus_client import Counter, Gauge, Histogram, generate_latest, REGISTRY
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 except ImportError:
-    # Graceful degradation if prometheus_client is not installed
+    CollectorRegistry = None
     Counter = None
     Gauge = None
     Histogram = None
     generate_latest = None
-    REGISTRY = None
 
 LOGGER = logging.getLogger(__name__)
 
@@ -22,13 +21,17 @@ LOGGER = logging.getLogger(__name__)
 class MetricsCollector:
     """Centralized metrics collector using prometheus_client."""
 
-    def __init__(self) -> None:
-        """Initialize metrics if prometheus_client is available."""
-        if Counter is None:
+    def __init__(self, registry: Any = None) -> None:
+        """Initialize metrics if prometheus_client is available.
+        Uses a dedicated registry by default so multiple instances (e.g. in tests) do not conflict.
+        """
+        if Counter is None or CollectorRegistry is None:
             LOGGER.warning("prometheus_client not installed; metrics disabled")
             self._enabled = False
+            self._registry = None
             return
 
+        self._registry = registry if registry is not None else CollectorRegistry()
         self._enabled = True
         self._start_time = time.monotonic()
 
@@ -37,6 +40,7 @@ class MetricsCollector:
             "bot_updates_total",
             "Total number of bot updates",
             ["type"],
+            registry=self._registry,
         )
 
         # Counter: bot_errors_total{component}
@@ -44,6 +48,7 @@ class MetricsCollector:
             "bot_errors_total",
             "Total number of errors",
             ["component"],
+            registry=self._registry,
         )
 
         # Histogram: bot_request_duration_seconds{intent}
@@ -52,18 +57,21 @@ class MetricsCollector:
             "Request duration in seconds",
             ["intent"],
             buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0),
+            registry=self._registry,
         )
 
         # Gauge: bot_uptime_seconds
         self._uptime_gauge = Gauge(
             "bot_uptime_seconds",
             "Bot uptime in seconds",
+            registry=self._registry,
         )
 
         # Gauge: bot_active_wizards
         self._active_wizards_gauge = Gauge(
             "bot_active_wizards",
             "Number of active wizards",
+            registry=self._registry,
         )
 
         LOGGER.info("Metrics collector initialized")
@@ -106,23 +114,22 @@ class MetricsCollector:
 
     def get_metrics_text(self) -> str:
         """Get metrics in Prometheus exposition format."""
-        if not self._enabled or generate_latest is None:
+        if not self._enabled or generate_latest is None or self._registry is None:
             return "# Metrics disabled\n"
         try:
-            return generate_latest(REGISTRY).decode("utf-8")
+            return generate_latest(self._registry).decode("utf-8")
         except Exception as exc:
             LOGGER.exception("Failed to generate metrics: %s", exc)
             return f"# Error generating metrics: {exc}\n"
 
     def get_metrics_count(self) -> int:
         """Get approximate number of metrics."""
-        if not self._enabled or REGISTRY is None:
+        if not self._enabled or self._registry is None:
             return 0
         try:
-            # Count all collectors
             count = 0
-            for collector in REGISTRY._collector_to_names:
-                count += len(REGISTRY._collector_to_names[collector])
+            for collector in self._registry._collector_to_names:
+                count += len(self._registry._collector_to_names[collector])
             return count
         except Exception:
             return 0

@@ -31,6 +31,7 @@ def _build_context(settings) -> SimpleNamespace:
         application=SimpleNamespace(
             bot_data={
                 "settings": settings,
+                "admin_user_ids": {1},
                 "rate_limiter": RateLimiter(),
                 "ui_rate_limiter": RateLimiter(),
                 "orchestrator": SimpleNamespace(

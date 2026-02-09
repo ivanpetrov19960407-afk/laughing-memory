@@ -93,7 +93,15 @@ def _get_allowlist_store(context: ContextTypes.DEFAULT_TYPE) -> AllowlistStore:
 
 
 def _get_admin_user_ids(context: ContextTypes.DEFAULT_TYPE) -> set[int]:
-    return context.application.bot_data["admin_user_ids"]
+    admin = context.application.bot_data.get("admin_user_ids")
+    if admin is not None:
+        return set(admin) if not isinstance(admin, set) else admin
+    settings = context.application.bot_data.get("settings")
+    if settings is not None and hasattr(settings, "admin_user_ids"):
+        a = getattr(settings, "admin_user_ids", None)
+        if a is not None:
+            return set(a) if not isinstance(a, set) else a
+    return set()
 
 
 def _get_rate_limiter(context: ContextTypes.DEFAULT_TYPE, *, bucket: str = "default") -> RateLimiter:
