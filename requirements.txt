@@ -10,3 +10,5 @@ Pillow>=10.3,<11
 pypdf>=4.2,<5
 python-docx>=1.1,<2
 caldav==2.2.6
+prometheus-client>=0.20,<1
+aiohttp>=3.9,<4

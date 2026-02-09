@@ -373,6 +373,25 @@ def _with_error_handling(
     @wraps(handler)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         request_context = start_request(update, context)
+        
+        # Collect metrics
+        metrics_collector = context.application.bot_data.get("metrics_collector")
+        health_checker = context.application.bot_data.get("health_checker")
+        
+        # Determine update type for metrics
+        update_type = "unknown"
+        if update.message:
+            update_type = "message"
+        elif update.callback_query:
+            update_type = "callback_query"
+        elif update.edited_message:
+            update_type = "edited_message"
+        elif update.channel_post:
+            update_type = "channel_post"
+        
+        if metrics_collector:
+            metrics_collector.record_update(update_type)
+        
         log_event(
             LOGGER,
             request_context,
@@ -384,21 +403,48 @@ def _with_error_handling(
             message_id=request_context.message_id,
             text=request_context.input_text,
         )
+        
+        start_time = time.monotonic()
+        intent = "unknown"
+        
         try:
             await _log_route(update, context, handler.__name__)
             await handler(update, context)
+            
+            # Extract intent from request context or result
+            if request_context:
+                intent = request_context.meta.get("intent", "unknown")
         except Exception as exc:
             set_status(context, "error")
+            
+            # Record error in metrics and health checker
+            component = "handler"
+            if hasattr(handler, "__name__"):
+                component = handler.__name__
+            
+            if metrics_collector:
+                metrics_collector.record_error(component)
+            if health_checker:
+                health_checker.record_error(component)
+            
             log_error(
                 LOGGER,
                 request_context,
-                component="handler",
+                component=component,
                 where="handler.wrapper",
                 exc=exc,
                 extra={"handler": handler.__name__},
             )
             await _handle_exception(update, context, exc)
         finally:
+            # Record request duration
+            duration = time.monotonic() - start_time
+            if metrics_collector and request_context:
+                # Try to get intent from trace or meta
+                if not intent or intent == "unknown":
+                    intent = request_context.meta.get("intent", "unknown")
+                metrics_collector.record_request_duration(intent, duration)
+            
             log_request(LOGGER, request_context)
             _record_trace_summary(context, request_context)
 
@@ -6012,10 +6058,54 @@ def _active_integrations(context: ContextTypes.DEFAULT_TYPE) -> dict[str, bool]:
 
 @_with_error_handling
 async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Admin only
+    user_id = update.effective_user.id if update.effective_user else 0
+    admin_user_ids = _get_admin_user_ids(context)
+    if user_id not in admin_user_ids:
+        result = _build_simple_result(
+            "Команда доступна только администраторам.",
+            intent="command.health",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    
     if not await _guard_access(update, context, bucket="ui"):
         return
-    user_id = update.effective_user.id if update.effective_user else 0
+    
     request_context = get_request_context(context)
+    health_checker = context.application.bot_data.get("health_checker")
+    settings = context.application.bot_data["settings"]
+    
+    # Build health message using health checker if available
+    if health_checker:
+        scheduler_ok = bool(context.application.job_queue) and settings.reminders_enabled
+        llm_client = context.application.bot_data.get("llm_client")
+        search_client = context.application.bot_data.get("search_client")
+        from app.tools import NullSearchClient
+        search_client_configured = bool(search_client) and not isinstance(search_client, NullSearchClient)
+        
+        health_status = health_checker.get_health_status(
+            scheduler_ok=scheduler_ok,
+            calendar_backend=settings.calendar_backend,
+            llm_client_configured=bool(llm_client),
+            search_client_configured=search_client_configured,
+        )
+        
+        uptime_str = _format_uptime(context.application.bot_data.get("start_time", time.monotonic()))
+        message = (
+            f"Health:\n"
+            f"App: v{health_status.app_version}, uptime {uptime_str}\n"
+            f"Scheduler: {health_status.status['scheduler']}\n"
+            f"Calendar backend: {health_status.status['calendar_backend']}\n"
+            f"LLM configured: {health_status.status['llm_client_configured']}\n"
+            f"Search configured: {health_status.status['search_client_configured']}\n"
+            f"Errors (last 5min): {health_status.last_error_count}"
+        )
+    else:
+        message = await _build_health_message(context, user_id=user_id)
+    
     actions: list[Action] = []
     if request_context is not None and request_context.env == "dev":
         actions.append(Action(id="debug.trace_last", label="Trace last", payload={"op": "trace_last"}))
@@ -6026,11 +6116,56 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 payload={"op": "run_command", "command": "/config", "args": ""},
             )
         )
+    
     result = ok(
-        await _build_health_message(context, user_id=user_id),
+        message,
         intent="command.health",
         mode="local",
         actions=actions,
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def metrics_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show metrics status (admin only)."""
+    # Admin only
+    user_id = update.effective_user.id if update.effective_user else 0
+    admin_user_ids = _get_admin_user_ids(context)
+    if user_id not in admin_user_ids:
+        result = _build_simple_result(
+            "Команда доступна только администраторам.",
+            intent="command.metrics_status",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    
+    if not await _guard_access(update, context, bucket="ui"):
+        return
+    
+    metrics_collector = context.application.bot_data.get("metrics_collector")
+    settings = context.application.bot_data["settings"]
+    
+    if not metrics_collector or not metrics_collector.enabled:
+        message = "Метрики отключены."
+    else:
+        metrics_count = metrics_collector.get_metrics_count()
+        http_enabled = settings.obs_http_enabled
+        http_info = ""
+        if http_enabled:
+            http_info = f"\nHTTP: {settings.obs_http_host}:{settings.obs_http_port}"
+        message = (
+            f"Metrics status:\n"
+            f"Enabled: yes\n"
+            f"Metrics count: {metrics_count}{http_info}"
+        )
+    
+    result = ok(
+        message,
+        intent="command.metrics_status",
+        mode="local",
     )
     await send_result(update, context, result)
 
@@ -6061,6 +6196,17 @@ async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     set_status(context, "error")
     error = context.error
+    
+    # Record error in metrics and health checker
+    metrics_collector = context.application.bot_data.get("metrics_collector")
+    health_checker = context.application.bot_data.get("health_checker")
+    component = "error_handler"
+    
+    if metrics_collector:
+        metrics_collector.record_error(component)
+    if health_checker:
+        health_checker.record_error(component)
+    
     if isinstance(error, telegram.error.NetworkError):
         message = str(error)
         if update is None or "get_updates" in message or "getUpdates" in message:

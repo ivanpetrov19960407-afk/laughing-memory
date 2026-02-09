@@ -69,6 +69,13 @@ class Settings:
     caldav_username: str | None
     caldav_password: str | None
     caldav_calendar_name: str | None
+    obs_http_enabled: bool
+    obs_http_host: str
+    obs_http_port: int
+    otel_enabled: bool
+    otel_exporter: str
+    otel_otlp_endpoint: str | None
+    systemd_watchdog_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -220,6 +227,13 @@ def load_settings() -> Settings:
     caldav_username = os.getenv("CALDAV_USERNAME") or None
     caldav_password = os.getenv("CALDAV_PASSWORD") or None
     caldav_calendar_name = os.getenv("CALDAV_CALENDAR_NAME") or None
+    obs_http_enabled = _parse_optional_bool(os.getenv("OBS_HTTP_ENABLED")) or False
+    obs_http_host = os.getenv("OBS_HTTP_HOST", "127.0.0.1").strip()
+    obs_http_port = _parse_int_with_default(os.getenv("OBS_HTTP_PORT"), 8080)
+    otel_enabled = _parse_optional_bool(os.getenv("OTEL_ENABLED")) or False
+    otel_exporter = os.getenv("OTEL_EXPORTER", "console").strip().lower()
+    otel_otlp_endpoint = os.getenv("OTEL_OTLP_ENDPOINT") or None
+    systemd_watchdog_enabled = _parse_optional_bool(os.getenv("SYSTEMD_WATCHDOG")) or False
     return Settings(
         bot_token=token,
         orchestrator_config_path=config_path,
@@ -265,6 +279,13 @@ def load_settings() -> Settings:
         caldav_username=caldav_username,
         caldav_password=caldav_password,
         caldav_calendar_name=caldav_calendar_name,
+        obs_http_enabled=obs_http_enabled,
+        obs_http_host=obs_http_host,
+        obs_http_port=obs_http_port,
+        otel_enabled=otel_enabled,
+        otel_exporter=otel_exporter,
+        otel_otlp_endpoint=otel_otlp_endpoint,
+        systemd_watchdog_enabled=systemd_watchdog_enabled,
     )
 
 

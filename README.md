@@ -121,3 +121,80 @@ pytest
 - `/search <запрос>` выполняет веб-поиск, затем формирует ответ со сносками `[N]` и блоком `Источники:`.
 - В режиме фактов (`/facts_on`) ответ допустим только при реальных `sources[]` и ссылках `[N]` внутри текста; если источники не найдены — `refused` без выдумок.
 - Анти-псевдоцитаты: ссылки вида `[1]` и блок `Источники:` запрещены, если `sources[]` пустой.
+
+## Наблюдаемость (Observability) — Stage 7
+
+### Health и Metrics HTTP endpoints
+
+Локальный HTTP сервер для health checks и метрик (по умолчанию выключен).
+
+**Включение:**
+```bash
+OBS_HTTP_ENABLED=1
+OBS_HTTP_HOST=127.0.0.1
+OBS_HTTP_PORT=8080
+```
+
+**Endpoints:**
+- `GET /healthz` — статус здоровья (HTTP 200, JSON с app_version, uptime_seconds, status подсистем, last_error_count)
+- `GET /readyz` — готовность (HTTP 200 если готов, 503 если нет)
+- `GET /metrics` — Prometheus метрики (text/plain, Prometheus exposition format)
+
+**Пример:**
+```bash
+curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:8080/readyz
+curl http://127.0.0.1:8080/metrics
+```
+
+### Prometheus метрики
+
+Метрики собираются автоматически при обработке апдейтов:
+- `bot_updates_total{type}` — счётчик апдейтов по типам
+- `bot_errors_total{component}` — счётчик ошибок по компонентам
+- `bot_request_duration_seconds{intent}` — гистограмма длительности запросов
+- `bot_uptime_seconds` — время работы бота
+- `bot_active_wizards` — количество активных визардов
+
+**Зависимости:** `prometheus-client` (опционально, graceful degradation если не установлен)
+
+### OpenTelemetry (опционально)
+
+**Включение:**
+```bash
+OTEL_ENABLED=1
+OTEL_EXPORTER=console  # или otlp
+OTEL_OTLP_ENDPOINT=http://localhost:4317  # только для otlp
+```
+
+**Зависимости:** `opentelemetry-api`, `opentelemetry-sdk` (опционально)
+
+### Systemd Watchdog (опционально)
+
+**Включение:**
+```bash
+SYSTEMD_WATCHDOG=1
+```
+
+В systemd unit-файле добавьте:
+```ini
+[Service]
+WatchdogSec=30
+```
+
+Бот будет периодически отправлять `WATCHDOG=1` в systemd.
+
+**Зависимости:** `systemd-python` (опционально)
+
+### Admin команды
+
+- `/health` — краткий статус здоровья (только для администраторов)
+- `/metrics_status` — статус метрик (включены ли, порт, количество) (только для администраторов)
+
+### Correlation ID
+
+Каждый апдейт получает уникальный `correlation_id`, который:
+- Генерируется автоматически в `start_request()`
+- Прокидывается в structured logs
+- Доступен в `RequestContext` для трассировки
+- НЕ выводится в user-facing ответы
