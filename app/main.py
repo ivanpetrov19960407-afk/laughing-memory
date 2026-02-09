@@ -195,7 +195,7 @@ def build_ptb_application():  # noqa: C901
     asyncio.run(dialog_memory.load())
     settings.uploads_path.mkdir(parents=True, exist_ok=True)
     settings.document_texts_path.mkdir(parents=True, exist_ok=True)
-    document_store = DocumentSessionStore(settings.document_sessions_path)
+    document_store = DocumentSessionStore(settings.document_sessions_path, ttl_hours=24)
     document_store.load()
     profile_store = UserProfileStore(settings.db_path)
     actions_log_store = ActionsLogStore(settings.db_path)
