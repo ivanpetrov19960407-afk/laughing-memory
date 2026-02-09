@@ -70,13 +70,50 @@ OCR для изображений использует `tesseract`. Если о�
 - Перед отправкой в UI применяется `ensure_valid`.
 
 ## Запуск
+
+### Локально (python-telegram-bot)
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env
+# Заполните BOT_TOKEN и ALLOWED_USER_IDS в .env
 python bot.py
 ```
+
+### Локально (aiogram 3.x)
+Тот же контракт OrchestratorResult и те же обработчики; вход — aiogram:
+```bash
+pip install -r requirements.txt
+cp .env.example .env
+python bot_aiogram.py
+```
+
+### Dev: Makefile, тесты, pre-commit
+```bash
+make install   # зависимости + pre-commit hook
+make test      # pytest
+make lint      # ruff check
+make format    # ruff format + автофикс
+make run       # python bot.py
+make precommit # pre-commit run -a
+make clean     # кэши, __pycache__
+```
+
+### Логирование
+- Уровень: `LOG_LEVEL` (по умолчанию `INFO`).
+- Файл (опционально): `LOG_FILE` — путь к файлу с ротацией (5 MB, 3 бэкапа).
+- Секреты в логах не выводятся (обработка в request_context).
+
+### Docker
+- **Сборка:** `docker build -t secretary-bot:latest .`
+- **Запуск:** скопируйте `.env.example` в `.env`, заполните `BOT_TOKEN` и `ALLOWED_USER_IDS`, затем:
+  ```bash
+  docker compose up -d
+  ```
+- **Данные:** том `botdata` монтируется в `/app/data` (БД, allowlist, диалоги, визарды). Список томов: `docker volume ls`.
+- **Логи:** `docker compose logs -f bot`
+- **Обновление:** `docker compose build --no-cache && docker compose up -d`
 
 ## Переменные окружения
 См. `.env.example` — в файле оставлены только актуальные переменные.

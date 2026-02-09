@@ -1,3 +1,9 @@
+"""Telegram bot entry: build Application, register handlers, run polling.
+
+Handlers are thin: they call Orchestrator and render OrchestratorResult
+(text, actions, attachments). Logging is configured via app.infra.logging_config.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +27,7 @@ from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.actions_log_store import ActionsLogStore
 from app.infra.config import StartupFeatures, load_settings, resolve_env_label, validate_startup_env
+from app.infra.logging_config import configure_logging, log_exception
 from app.infra.user_profile_store import UserProfileStore
 from app.infra.request_context import RequestContext, log_event
 from app.infra.version import resolve_app_version
@@ -43,6 +50,7 @@ from app.storage.wizard_store import WizardStore
 
 
 def _register_handlers(application: Application) -> None:
+    """Register all command, callback, and message handlers on the PTB Application."""
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("help", handlers.help_command))
     application.add_handler(CommandHandler("ping", handlers.ping))
@@ -101,30 +109,13 @@ def _build_startup_integrations(features: StartupFeatures) -> dict[str, bool]:
     return {key: value for key, value in base.items() if value}
 
 
-def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("telegram").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("telegram.ext").setLevel(logging.WARNING)
-    logging.getLogger("httpx").disabled = True
-    logging.getLogger("httpcore").disabled = True
-    logging.getLogger("httpx").propagate = False
-    logging.getLogger("httpcore").propagate = False
-
-
-
-
-
+def build_ptb_application():  # noqa: C901
+    """Build PTB Application with all integrations and bot_data; do not run polling."""
     env_label = resolve_env_label()
     try:
         settings = load_settings()
     except RuntimeError as exc:
-        logging.getLogger(__name__).exception("Startup failed: %s", exc)
+        log_exception(logging.getLogger(__name__), "Startup failed: %s", exc)
         raise SystemExit(str(exc)) from exc
     startup_features = validate_startup_env(
         settings,
@@ -295,10 +286,15 @@ def main() -> None:
         await reminder_scheduler.restore_all()
 
     application.post_init = _restore_reminders
+    return application, settings
 
+
+def main() -> None:
+    """Load config, build Orchestrator and Application, register handlers, run polling."""
+    configure_logging()
+    application, _ = build_ptb_application()
     _register_handlers(application)
     application.add_error_handler(handlers.error_handler)
-
     logging.getLogger(__name__).info("Bot started")
     try:
         asyncio.get_event_loop()

@@ -1,3 +1,9 @@
+"""ActionStore and inline keyboard building for Telegram.
+
+Stores Action payloads under short tokens (callback_data limit 64 bytes);
+build_inline_keyboard() turns OrchestratorResult.actions into InlineKeyboardMarkup.
+"""
+
 from __future__ import annotations
 
 import json
@@ -20,6 +26,8 @@ DEFAULT_TTL_SECONDS = 900
 
 @dataclass
 class StoredAction:
+    """One stored action: user/chat, intent, payload, TTL."""
+
     user_id: int
     chat_id: int
     intent: str
@@ -30,6 +38,8 @@ class StoredAction:
 
 @dataclass
 class ActionLookup:
+    """Result of looking up a callback token: action (if found), status, age/ttl."""
+
     action: StoredAction | None
     status: str
     age_seconds: float | None
@@ -37,6 +47,8 @@ class ActionLookup:
 
 
 class ActionStore:
+    """In-memory store for action payloads keyed by short tokens for callback_data."""
+
     def __init__(
         self,
         *,
@@ -50,6 +62,7 @@ class ActionStore:
         self._items: dict[str, StoredAction] = {}
 
     def store_action(self, *, action: Action, user_id: int, chat_id: int) -> str:
+        """Store action for user/chat; returns short token for callback_data."""
         self._cleanup()
         payload = action.payload or {}
         self._validate_payload(payload)
@@ -115,6 +128,7 @@ class ActionStore:
 
 
 def parse_callback_token(data: str | None) -> str | None:
+    """Extract stored-action token from callback_data if it starts with CALLBACK_PREFIX."""
     if not data:
         return None
     if not data.startswith(CALLBACK_PREFIX):
@@ -166,6 +180,7 @@ def build_inline_keyboard(
     chat_id: int,
     columns: int = 2,
 ) -> InlineKeyboardMarkup | None:
+    """Build Telegram InlineKeyboardMarkup from actions; dynamic ones go through store."""
     if not actions:
         return None
     buttons: list[list[InlineKeyboardButton]] = []
