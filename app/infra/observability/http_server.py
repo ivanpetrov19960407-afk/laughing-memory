@@ -107,4 +107,8 @@ class ObservabilityHTTPServer:
     async def _handle_metrics(self, request: web.Request) -> web.Response:
         """Handle GET /metrics."""
         metrics_text = self._metrics_collector.get_metrics_text()
-        return web.Response(text=metrics_text, content_type="text/plain; version=0.0.4")
+        metrics_bytes = metrics_text.encode("utf-8")
+        return web.Response(
+            body=metrics_bytes,
+            headers={"Content-Type": "text/plain; version=0.0.4"},
+        )
