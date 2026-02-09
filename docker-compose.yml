@@ -1,18 +1,13 @@
-# Локальный запуск бота в контейнере. Секреты — в .env (не коммитить).
+# Local run without external DB. Config via .env (copy from .env.example).
+# Usage: cp .env.example .env && fill BOT_TOKEN, ALLOWED_USER_IDS; then: docker compose up
 services:
   bot:
     build: .
     image: secretary-bot:latest
     env_file: .env
-    environment:
-      - BOT_DB_PATH=/app/data/bot.db
-      - ALLOWLIST_PATH=/app/data/allowlist.json
-      - DIALOG_MEMORY_PATH=/app/data/dialog_memory.json
-      - WIZARD_STORE_PATH=/app/data/wizards
-      - ORCHESTRATOR_CONFIG_PATH=/app/config/orchestrator.json
     volumes:
-      - botdata:/app/data
+      - bot-data:/app/data
     restart: unless-stopped
 
 volumes:
-  botdata:
+  bot-data:
