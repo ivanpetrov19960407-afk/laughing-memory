@@ -475,7 +475,14 @@ def ensure_safe_text_strict(
             debug=result.debug,
         )
     if facts_enabled and result.sources:
-        numbers = _extract_citation_numbers(result.text or "")
+        # Цитаты [N] обязательны в теле ответа, а не только в блоке «Источники:»
+        body_only = re.sub(
+            r"\n*\s*Источники\s*:\s*[\s\S]*$",
+            "",
+            result.text or "",
+            flags=re.IGNORECASE,
+        ).strip()
+        numbers = _extract_citation_numbers(body_only)
         if not numbers:
             return OrchestratorResult(
                 text=STRICT_NO_SOURCES_TEXT,

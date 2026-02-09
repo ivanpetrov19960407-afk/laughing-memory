@@ -1,54 +1,49 @@
 from __future__ import annotations
 
-from app.core.identity import BOT_IDENTITY_SYSTEM_PROMPT
+from app.core.bot_identity import get_system_prompt_for_llm
 from app.core.orchestrator import Orchestrator
 from app.core.result import OrchestratorResult, ensure_valid, error, ok, refused
 from app.infra.request_context import RequestContext
 
-BASE_SYSTEM_PROMPT = (
-    f"{BOT_IDENTITY_SYSTEM_PROMPT}\n\n"
-    "Ты аккуратный помощник. Не выдумывай, не добавляй источники без наличия, "
-    "отмечай предположения. Если информации недостаточно, задавай вопросы. "
-    "Если источники не были переданы инструментом sources, не используй ссылки, "
-    "цитаты, номера источников ([1]) или фразы типа «согласно»/«по данным»."
-)
-
 
 async def llm_check(text: str, ctx: dict[str, object]) -> OrchestratorResult:
-    system_prompt = (
-        f"{BASE_SYSTEM_PROMPT}\n"
-        "Задача: провести проверку текста. "
+    system_prompt = get_system_prompt_for_llm(
+        extra_instructions=(
+            "Задача: провести проверку текста. "
         "Ответ строго структурирован:\n"
         "1) Проблема/дыра\n"
         "2) Почему это проблема\n"
         "3) Как улучшить (конкретно)\n"
         "Не добавляй факты, которых нет в тексте."
+        )
     )
     return await _run_llm_tool(text, ctx, intent="utility.check", system_prompt=system_prompt)
 
 
 async def llm_rewrite(mode: str, text: str, ctx: dict[str, object]) -> OrchestratorResult:
     mode = mode.strip().lower()
-    system_prompt = (
-        f"{BASE_SYSTEM_PROMPT}\n"
-        "Задача: переписать текст согласно режиму.\n"
+    system_prompt = get_system_prompt_for_llm(
+        extra_instructions=(
+            "Задача: переписать текст согласно режиму.\n"
         "Режим simple: проще и яснее.\n"
         "Режим hard: прямой тон без оскорблений/ненависти.\n"
         "Режим short: сжать до ~800-1200 символов или 8-10 строк.\n"
         "Не добавляй новые факты."
+        )
     )
     prompt = f"Режим: {mode}\nТекст:\n{text}"
     return await _run_llm_tool(prompt, ctx, intent="utility.rewrite", system_prompt=system_prompt)
 
 
 async def llm_explain(text: str, ctx: dict[str, object]) -> OrchestratorResult:
-    system_prompt = (
-        f"{BASE_SYSTEM_PROMPT}\n"
-        "Задача: объяснить текст. Ответ:\n"
+    system_prompt = get_system_prompt_for_llm(
+        extra_instructions=(
+            "Задача: объяснить текст. Ответ:\n"
         "- простое объяснение (до 10 предложений)\n"
         "- 1 пример\n"
         "- 3 пункта «итог»\n"
         "Не добавляй новые факты."
+        )
     )
     return await _run_llm_tool(text, ctx, intent="utility.explain", system_prompt=system_prompt)
 
