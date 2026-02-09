@@ -53,7 +53,6 @@ class Settings:
     reminder_max_future_days: int
     action_ttl_seconds: int
     action_max_size: int
-    actions_log_ttl_days: int
     enable_wizards: bool
     enable_menu: bool
     strict_no_pseudo_sources: bool
