@@ -677,6 +677,13 @@ async def _build_user_context(update: Update, context: ContextTypes.DEFAULT_TYPE
     memory_context = await _build_memory_context(context)
     if memory_context:
         payload["memory_context"] = memory_context
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is not None and memory_manager.profile is not None:
+        profile = memory_manager.get_profile(user_id)
+        if profile is not None:
+            payload["facts_mode_default"] = profile.facts_mode_default
+            payload["verbosity"] = profile.verbosity
+            payload["language"] = profile.language
     return payload
 
 
@@ -743,6 +750,23 @@ def _settings_timezone_actions() -> list[Action]:
             label="Europe/Berlin",
             payload={"op": "settings.timezone_pick", "value": "Europe/Berlin"},
         ),
+        *_settings_back_actions(),
+    ]
+
+
+def _settings_verbosity_actions() -> list[Action]:
+    return [
+        Action(id="settings.verbosity.short", label="Кратко", payload={"op": "settings.verbosity_pick", "value": "short"}),
+        Action(id="settings.verbosity.normal", label="Обычно", payload={"op": "settings.verbosity_pick", "value": "normal"}),
+        Action(id="settings.verbosity.detailed", label="Подробно", payload={"op": "settings.verbosity_pick", "value": "detailed"}),
+        *_settings_back_actions(),
+    ]
+
+
+def _settings_date_format_actions() -> list[Action]:
+    return [
+        Action(id="settings.date.ddmm", label="dd.mm.yyyy", payload={"op": "settings.date_format_pick", "value": "dd.mm.yyyy"}),
+        Action(id="settings.date.yyyymm", label="yyyy-mm-dd", payload={"op": "settings.date_format_pick", "value": "yyyy-mm-dd"}),
         *_settings_back_actions(),
     ]
 
@@ -820,28 +844,29 @@ def _log_action_from_result(
     if result.status != "ok" or not user_id:
         return
     memory_manager = _get_memory_manager(context)
-    if memory_manager is None or memory_manager.actions is None:
+    if memory_manager is None:
         return
     intent = result.intent or ""
     mapping = {
-        "utility_calendar.add": "calendar.event.create",
-        "utility_calendar.delete": "calendar.event.delete",
-        "utility_calendar.update": "calendar.event.update",
-        "utility_calendar.move": "calendar.event.update",
-        "utility_reminders.create": "reminder.create",
-        "utility_reminders.add": "reminder.create",
-        "utility_reminders.delete": "reminder.delete",
-        "utility_reminders.disable": "reminder.disable",
-        "utility_reminders.off": "reminder.disable",
-        "utility_reminders.on": "reminder.enable",
-        "utility_reminders.reschedule": "reminder.reschedule",
-        "utility_reminders.snooze": "reminder.snooze",
+        "utility_calendar.add": "calendar.event_added",
+        "utility_calendar.delete": "calendar.event_deleted",
+        "utility_calendar.update": "calendar.event_added",
+        "utility_calendar.move": "calendar.event_added",
+        "utility_reminders.create": "reminder.created",
+        "utility_reminders.add": "reminder.created",
+        "utility_reminders.delete": "reminder.deleted",
+        "utility_reminders.disable": "reminder.deleted",
+        "utility_reminders.off": "reminder.deleted",
+        "utility_reminders.on": "reminder.created",
+        "utility_reminders.reschedule": "reminder.rescheduled",
+        "utility_reminders.snooze": "reminder.snoozed",
         "command.facts_on": "mode.facts_on",
         "command.facts_off": "mode.facts_off",
         "command.context_on": "mode.context_on",
         "command.context_off": "mode.context_off",
         "command.context_clear": "mode.context_clear",
         "command.memory_clear": "mode.context_clear",
+        "command.search": "search.performed",
         "wizard.profile.done": "profile.update",
     }
     action_type = mapping.get(intent)
@@ -856,11 +881,10 @@ def _log_action_from_result(
         "refs": _extract_result_refs(result),
     }
     correlation_id = request_context.correlation_id if request_context else result.request_id
-    memory_manager.actions.set(
+    memory_manager.log_user_action(
         user_id=user_id,
         action_type=action_type,
         payload=payload,
-        ts=request_context.ts if request_context else None,
         correlation_id=correlation_id,
     )
 
@@ -2198,6 +2222,11 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
     memory_manager = _get_memory_manager(context)
+    if memory_manager is not None and memory_manager.profile is not None:
+        profile = memory_manager.get_profile(user_id)
+        if profile is not None and profile.context_default:
+            if not await memory_manager.dialog_enabled(user_id):
+                await memory_manager.set_dialog_enabled(user_id, True)
     if memory_manager and await memory_manager.dialog_enabled(user_id):
         await memory_manager.add_dialog_message(user_id, chat_id, "user", prompt)
     dialog_context, dialog_count = await _prepare_dialog_context(
@@ -2209,18 +2238,22 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     request_context = get_request_context(context)
     request_id = request_context.correlation_id if request_context else None
     memory_context = await _build_memory_context(context)
+    user_context = _build_user_context_with_dialog(
+        update,
+        dialog_context=dialog_context,
+        dialog_message_count=dialog_count,
+        memory_context=memory_context,
+        request_id=request_id,
+        request_context=request_context,
+    )
+    if memory_manager is not None and memory_manager.profile is not None:
+        profile = memory_manager.get_profile(user_id)
+        if profile is not None:
+            user_context["facts_mode_default"] = profile.facts_mode_default
+            user_context["verbosity"] = profile.verbosity
+            user_context["language"] = profile.language
     try:
-        result = await orchestrator.handle(
-            f"/ask {prompt}",
-            _build_user_context_with_dialog(
-                update,
-                dialog_context=dialog_context,
-                dialog_message_count=dialog_count,
-                memory_context=memory_context,
-                request_id=request_id,
-                request_context=request_context,
-            ),
-        )
+        result = await orchestrator.handle(f"/ask {prompt}", user_context)
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
@@ -2422,22 +2455,89 @@ async def memory_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat_id = update.effective_chat.id if update.effective_chat else 0
     enabled, count = await memory_manager.dialog_status(user_id, chat_id)
     status = "включён" if enabled else "выключён"
-    lines = [f"Контекст {status}. Сообщений в истории: {count}."]
+    lines = [
+        "Память:",
+        f"• Диалог (контекст): {status}, сообщений: {count}.",
+        f"• Сбор действий: {'вкл' if memory_manager.actions_log_enabled(user_id) else 'выкл'}.",
+    ]
     if memory_manager.profile is not None and memory_manager.profile_is_persisted(user_id):
         profile = memory_manager.get_profile(user_id)
         if profile is not None:
             facts_label = "вкл" if profile.facts_mode_default else "выкл"
-            lines.append("Профиль:")
-            lines.append(f"• язык: {profile.language}")
-            lines.append(f"• часовой пояс: {profile.timezone}")
-            lines.append(f"• режим фактов: {facts_label}")
+            ctx_label = "вкл" if profile.context_default else "выкл"
+            lines.append("Предпочтения:")
+            lines.append(f"  язык: {profile.language}, подробность: {profile.verbosity}")
+            lines.append(f"  режим фактов по умолчанию: {facts_label}, контекст по умолчанию: {ctx_label}")
+            lines.append(f"  формат даты: {profile.date_format}")
+            if profile.updated_at:
+                lines.append(f"  обновлено: {profile.updated_at[:10]}")
     else:
-        lines.append("Профиль: нет сохранённых данных.")
+        lines.append("Предпочтения: по умолчанию.")
+    if memory_manager.actions is not None:
+        entries = memory_manager.actions.list(user_id=user_id, limit=1)
+        if entries:
+            ts = entries[0].ts
+            ts_label = ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M") if ts else "-"
+            lines.append(f"Последнее действие: {ts_label}")
     result = _build_simple_result(
         "\n".join(lines),
         intent="command.memory_status",
         status="ok",
         mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def memory_actions_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None:
+        result = _build_simple_result(
+            "Память не настроена.",
+            intent="command.memory_actions_on",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    memory_manager.set_actions_log_enabled(user_id, True)
+    result = ensure_valid(
+        ok(
+            "Сбор действий включён.",
+            intent="command.memory_actions_on",
+            mode="local",
+            actions=[menu.menu_action()],
+        )
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def memory_actions_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None:
+        result = _build_simple_result(
+            "Память не настроена.",
+            intent="command.memory_actions_off",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    memory_manager.set_actions_log_enabled(user_id, False)
+    result = ensure_valid(
+        ok(
+            "Сбор действий выключен.",
+            intent="command.memory_actions_off",
+            mode="local",
+            actions=[menu.menu_action()],
+        )
     )
     await send_result(update, context, result)
 
@@ -2458,10 +2558,30 @@ async def memory_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
-    await memory_manager.clear_dialog(user_id, chat_id)
+    layer = (context.args[0].strip().lower() if context.args else "").strip()
+    if layer not in ("prefs", "actions", "dialog", ""):
+        result = _build_simple_result(
+            "Использование: /memory_clear или /memory_clear prefs|actions|dialog",
+            intent="command.memory_clear",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    done: list[str] = []
+    if layer in ("", "dialog"):
+        await memory_manager.clear_dialog(user_id, chat_id)
+        done.append("диалог")
+    if layer in ("", "prefs") and memory_manager.profile is not None:
+        memory_manager.clear_profile(user_id)
+        done.append("предпочтения")
+    if layer in ("", "actions") and memory_manager.actions is not None:
+        memory_manager.actions.clear(user_id)
+        done.append("действия")
+    msg = "Очищено: " + ", ".join(done) + "."
     result = ensure_valid(
         ok(
-            "Контекст очищен. Профиль пользователя сохранён.",
+            msg,
             intent="command.memory_clear",
             mode="local",
             actions=[menu.menu_action()],
@@ -2536,6 +2656,83 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     result = _build_simple_result(
         "\n".join(lines),
         intent="command.memory",
+        status="ok",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def prefs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.profile is None:
+        result = _build_simple_result(
+            "Предпочтения не настроены.",
+            intent="command.prefs",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    profile = memory_manager.get_profile(user_id)
+    if profile is None:
+        result = _build_simple_result(
+            "Предпочтения не настроены.",
+            intent="command.prefs",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    lines = [
+        f"Язык: {profile.language}",
+        f"Подробность: {profile.verbosity}",
+        f"Режим фактов по умолчанию: {'вкл' if profile.facts_mode_default else 'выкл'}",
+        f"Контекст по умолчанию: {'вкл' if profile.context_default else 'выкл'}",
+        f"Часовой пояс: {profile.timezone}",
+        f"Формат даты: {profile.date_format}",
+        f"Сбор действий: {'вкл' if profile.actions_log_enabled else 'выкл'}",
+    ]
+    result = ensure_valid(
+        ok(
+            "Предпочтения:\n" + "\n".join(lines),
+            intent="command.prefs",
+            mode="local",
+            actions=[
+                Action(
+                    id="prefs.edit",
+                    label="Изменить",
+                    payload={"op": "menu_section", "section": "settings"},
+                ),
+                menu.menu_action(),
+            ],
+        )
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def actions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.actions is None:
+        result = _build_simple_result(
+            "История действий не настроена.",
+            intent="command.actions",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    entries = memory_manager.actions.list(user_id=user_id, limit=10)
+    result = _build_simple_result(
+        _format_actions_history(entries),
+        intent="command.actions",
         status="ok",
         mode="local",
     )
@@ -2950,8 +3147,11 @@ async def _handle_menu_section(
     profile = memory_manager.get_profile(user_id) if memory_manager else None
     language_label = profile.language if profile else "ru"
     timezone_label = profile.timezone if profile else "Europe/Vilnius"
+    verbosity_label = profile.verbosity if profile else "normal"
     facts_current = profile.facts_mode_default if profile else facts_enabled
     facts_label = "on" if facts_current else "off"
+    context_default_label = "вкл" if (profile and profile.context_default) else "выкл"
+    date_format_label = profile.date_format if profile else "dd.mm.yyyy"
     if section == "chat":
         actions = [
             Action(
@@ -3085,6 +3285,16 @@ async def _handle_menu_section(
             mode="local",
             actions=[
                 Action(
+                    id="settings.memory_status",
+                    label="🧠 Память: Статус",
+                    payload={"op": "run_command", "command": "/memory_status", "args": ""},
+                ),
+                Action(
+                    id="settings.memory_clear",
+                    label="🧹 Очистить память",
+                    payload={"op": "settings.memory_clear"},
+                ),
+                Action(
                     id="settings.caldav",
                     label="📅 CalDAV → Подключить",
                     payload={"op": "caldav_settings"},
@@ -3100,6 +3310,11 @@ async def _handle_menu_section(
                     payload={"op": "settings.language"},
                 ),
                 Action(
+                    id="settings.verbosity",
+                    label=f"⚙️ Подробность ({verbosity_label})",
+                    payload={"op": "settings.verbosity"},
+                ),
+                Action(
                     id="settings.timezone",
                     label=f"⏱ Часовой пояс ({timezone_label})",
                     payload={"op": "settings.timezone"},
@@ -3108,6 +3323,16 @@ async def _handle_menu_section(
                     id="settings.facts",
                     label=f"📚 Режим фактов {facts_label}",
                     payload={"op": "settings.facts_toggle", "enabled": not facts_current},
+                ),
+                Action(
+                    id="settings.context_default",
+                    label=f"⚙️ Контекст по умолчанию ({context_default_label})",
+                    payload={"op": "settings.context_default_toggle", "enabled": not (profile and profile.context_default)},
+                ),
+                Action(
+                    id="settings.date_format",
+                    label=f"⚙️ Формат даты ({date_format_label})",
+                    payload={"op": "settings.date_format"},
                 ),
                 Action(
                     id="settings.profile",
@@ -3557,6 +3782,78 @@ async def _dispatch_action_payload(
             return refused("Профиль не настроен.", intent="settings.timezone", mode="local")
         memory_manager.update_profile(user_id, {"timezone": value})
         return ok("Часовой пояс обновлён.", intent="settings.timezone", mode="local", actions=[menu.menu_action()])
+    if op_value == "settings.memory_clear":
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is None or memory_manager.dialog is None:
+            return refused("Память не настроена.", intent="settings.memory_clear", mode="local")
+        await memory_manager.clear_dialog(user_id, chat_id)
+        if memory_manager.profile is not None:
+            memory_manager.clear_profile(user_id)
+        if memory_manager.actions is not None:
+            memory_manager.actions.clear(user_id)
+        return ok("Память очищена (диалог, предпочтения, действия).", intent="settings.memory_clear", mode="local", actions=[menu.menu_action()])
+    if op_value == "settings.verbosity":
+        return ok(
+            "Выбери подробность ответов:",
+            intent="settings.verbosity",
+            mode="local",
+            actions=_settings_verbosity_actions(),
+        )
+    if op_value == "settings.verbosity_pick":
+        value = payload.get("value")
+        if not isinstance(value, str) or value not in ("short", "normal", "detailed"):
+            return error("Некорректные данные действия.", intent="settings.verbosity", mode="local")
+        return ok(
+            f"Подробность: {value}. Подтвердить?",
+            intent="settings.verbosity.confirm",
+            mode="local",
+            actions=_settings_confirm_actions(op="settings.verbosity_confirm", value=value),
+        )
+    if op_value == "settings.verbosity_confirm":
+        value = payload.get("value")
+        if not isinstance(value, str) or value not in ("short", "normal", "detailed"):
+            return error("Некорректные данные действия.", intent="settings.verbosity", mode="local")
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is None or memory_manager.profile is None:
+            return refused("Профиль не настроен.", intent="settings.verbosity", mode="local")
+        memory_manager.update_profile(user_id, {"verbosity": value})
+        return ok("Подробность обновлена.", intent="settings.verbosity", mode="local", actions=[menu.menu_action()])
+    if op_value == "settings.context_default_toggle":
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            return error("Некорректные данные действия.", intent="settings.context_default", mode="local")
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is None or memory_manager.profile is None:
+            return refused("Профиль не настроен.", intent="settings.context_default", mode="local")
+        memory_manager.update_profile(user_id, {"context_default": enabled})
+        label = "вкл" if enabled else "выкл"
+        return ok(f"Контекст по умолчанию: {label}.", intent="settings.context_default", mode="local", actions=[menu.menu_action()])
+    if op_value == "settings.date_format":
+        return ok(
+            "Выбери формат даты:",
+            intent="settings.date_format",
+            mode="local",
+            actions=_settings_date_format_actions(),
+        )
+    if op_value == "settings.date_format_pick":
+        value = payload.get("value")
+        if not isinstance(value, str) or value not in ("dd.mm.yyyy", "yyyy-mm-dd"):
+            return error("Некорректные данные действия.", intent="settings.date_format", mode="local")
+        return ok(
+            f"Формат даты: {value}. Подтвердить?",
+            intent="settings.date_format.confirm",
+            mode="local",
+            actions=_settings_confirm_actions(op="settings.date_format_confirm", value=value),
+        )
+    if op_value == "settings.date_format_confirm":
+        value = payload.get("value")
+        if not isinstance(value, str) or value not in ("dd.mm.yyyy", "yyyy-mm-dd"):
+            return error("Некорректные данные действия.", intent="settings.date_format", mode="local")
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is None or memory_manager.profile is None:
+            return refused("Профиль не настроен.", intent="settings.date_format", mode="local")
+        memory_manager.update_profile(user_id, {"date_format": value})
+        return ok("Формат даты обновлён.", intent="settings.date_format", mode="local", actions=[menu.menu_action()])
     if op_value == "document.summary":
         doc_id = payload.get("doc_id")
         if not isinstance(doc_id, str) or not doc_id:

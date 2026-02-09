@@ -69,7 +69,11 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("context_status", handlers.context_status))
     application.add_handler(CommandHandler("memory_status", handlers.memory_status))
     application.add_handler(CommandHandler("memory_clear", handlers.memory_clear))
+    application.add_handler(CommandHandler("memory_actions_on", handlers.memory_actions_on))
+    application.add_handler(CommandHandler("memory_actions_off", handlers.memory_actions_off))
     application.add_handler(CommandHandler("memory", handlers.memory_command))
+    application.add_handler(CommandHandler("prefs", handlers.prefs_command))
+    application.add_handler(CommandHandler("actions", handlers.actions_command))
     application.add_handler(CommandHandler("profile", handlers.profile_command))
     application.add_handler(CommandHandler("profile_set", handlers.profile_set_command))
     application.add_handler(CommandHandler("remember", handlers.remember_command))
@@ -198,7 +202,10 @@ def build_ptb_application():  # noqa: C901
     document_store = DocumentSessionStore(settings.document_sessions_path, ttl_hours=24)
     document_store.load()
     profile_store = UserProfileStore(settings.db_path)
-    actions_log_store = ActionsLogStore(settings.db_path)
+    actions_log_store = ActionsLogStore(
+        settings.db_path,
+        ttl_days=settings.actions_log_ttl_days,
+    )
     memory_manager = MemoryManager(
         dialog=dialog_memory,
         profile=UserProfileMemory(profile_store),
