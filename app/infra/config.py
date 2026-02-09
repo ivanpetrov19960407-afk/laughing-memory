@@ -50,6 +50,7 @@ class Settings:
     reminder_max_future_days: int
     action_ttl_seconds: int
     action_max_size: int
+    actions_log_ttl_days: int
     enable_wizards: bool
     enable_menu: bool
     strict_no_pseudo_sources: bool
@@ -169,6 +170,11 @@ def load_settings() -> Settings:
     )
     action_ttl_seconds = _parse_int_with_default(os.getenv("ACTION_TTL_SECONDS"), 900)
     action_max_size = _parse_int_with_default(os.getenv("ACTION_MAX_SIZE"), 2000)
+    actions_log_ttl_days = _parse_int_with_default(os.getenv("ACTIONS_LOG_TTL_DAYS"), 60)
+    if actions_log_ttl_days < 30:
+        actions_log_ttl_days = 30
+    elif actions_log_ttl_days > 90:
+        actions_log_ttl_days = 90
     enable_wizards = _parse_optional_bool(os.getenv("ENABLE_WIZARDS"))
     if enable_wizards is None:
         enable_wizards = True
@@ -227,6 +233,7 @@ def load_settings() -> Settings:
         reminder_max_future_days=reminder_max_future_days,
         action_ttl_seconds=action_ttl_seconds,
         action_max_size=action_max_size,
+        actions_log_ttl_days=actions_log_ttl_days,
         enable_wizards=enable_wizards,
         enable_menu=enable_menu,
         strict_no_pseudo_sources=strict_no_pseudo_sources,
