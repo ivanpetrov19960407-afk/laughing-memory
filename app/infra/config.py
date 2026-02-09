@@ -190,11 +190,7 @@ def load_settings() -> Settings:
     )
     action_ttl_seconds = _parse_int_with_default(os.getenv("ACTION_TTL_SECONDS"), 900)
     action_max_size = _parse_int_with_default(os.getenv("ACTION_MAX_SIZE"), 2000)
-    actions_log_ttl_days = _parse_int_with_default(os.getenv("ACTIONS_LOG_TTL_DAYS"), 60)
-    if actions_log_ttl_days < 30:
-        actions_log_ttl_days = 30
-    elif actions_log_ttl_days > 90:
-        actions_log_ttl_days = 90
+    actions_log_ttl_days = _parse_int_with_default(os.getenv("ACTIONS_LOG_TTL_DAYS"), 30)
     enable_wizards = _parse_optional_bool(os.getenv("ENABLE_WIZARDS"))
     if enable_wizards is None:
         enable_wizards = True

@@ -57,7 +57,15 @@ class ActionsLogStore:
         ts: datetime | None = None,
         correlation_id: str | None = None,
     ) -> ActionLogEntry:
-        timestamp = (ts or datetime.now(timezone.utc)).isoformat()
+        if ts is None:
+            ts = datetime.now(timezone.utc)
+        elif ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        else:
+            ts = ts.astimezone(timezone.utc)
+        timestamp = ts.isoformat()
+        if not isinstance(payload, dict):
+            payload = {}
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         cursor = self._connection.execute(
             """
@@ -71,7 +79,7 @@ class ActionsLogStore:
         return ActionLogEntry(
             id=entry_id,
             user_id=user_id,
-            ts=_parse_datetime(timestamp),
+            ts=ts,
             action_type=action_type,
             payload=payload,
             correlation_id=correlation_id,
@@ -151,6 +159,38 @@ class ActionsLogStore:
             else:
                 sql += " AND (action_type LIKE ? OR payload LIKE ?)"
                 params.extend([f"%{normalized_query}%", f"%{normalized_query}%"])
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+        params.append(limit)
+        cursor = self._connection.execute(sql, params)
+        rows = cursor.fetchall()
+        return [_row_to_entry(row) for row in rows]
+
+    def list_recent(self, *, user_id: int, limit: int = 10) -> list[ActionLogEntry]:
+        return self.search(user_id=user_id, query=None, limit=limit)
+
+    def list(
+        self,
+        *,
+        user_id: int,
+        limit: int = 10,
+        since: datetime | None = None,
+    ) -> list[ActionLogEntry]:
+        if limit <= 0:
+            return []
+        params: list[object] = [user_id]
+        sql = """
+            SELECT id, user_id, ts, action_type, payload, correlation_id
+            FROM user_actions
+            WHERE user_id = ?
+        """
+        if since is not None:
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=timezone.utc)
+            else:
+                since = since.astimezone(timezone.utc)
+            since_iso = since.isoformat()
+            sql += " AND ts >= ?"
+            params.append(since_iso)
         sql += " ORDER BY ts DESC, id DESC LIMIT ?"
         params.append(limit)
         cursor = self._connection.execute(sql, params)

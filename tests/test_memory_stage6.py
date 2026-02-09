@@ -150,7 +150,7 @@ def test_actions_log_list_recent_with_since(tmp_path) -> None:
     store = ActionsLogStore(tmp_path / "actions.db", ttl_days=60)
     store.append(
         user_id=1,
-        action_type="reminder.created",
+        action_type="reminder.create",
         payload={"summary": "x"},
         ts=datetime(2024, 6, 1, tzinfo=timezone.utc),
     )
@@ -161,7 +161,7 @@ def test_actions_log_list_recent_with_since(tmp_path) -> None:
         ts=datetime(2024, 6, 15, tzinfo=timezone.utc),
     )
     since = datetime(2024, 6, 10, tzinfo=timezone.utc)
-    entries = store.list_recent(user_id=1, limit=10, since=since)
+    entries = store.list(user_id=1, limit=10, since=since)
     assert len(entries) == 1
     assert entries[0].action_type == "calendar.event_added"
 
@@ -170,7 +170,7 @@ def test_actions_log_ttl_cleanup(tmp_path) -> None:
     store = ActionsLogStore(tmp_path / "actions.db", ttl_days=2)
     store.append(
         user_id=1,
-        action_type="reminder.created",
+        action_type="reminder.create",
         payload={"summary": "x"},
         ts=datetime(2024, 1, 1, tzinfo=timezone.utc),
     )

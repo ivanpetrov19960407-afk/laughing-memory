@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
 from types import SimpleNamespace
+
+pytest.importorskip("aiogram")
 
 from app.bot.aiogram_bridge import (
     _ptb_markup_to_aiogram,
