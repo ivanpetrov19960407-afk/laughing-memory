@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from app.core.identity import BOT_IDENTITY_SYSTEM_PROMPT
 from app.core.orchestrator import Orchestrator
 from app.core.result import OrchestratorResult, ensure_valid, error, ok, refused
 from app.infra.request_context import RequestContext
 
 BASE_SYSTEM_PROMPT = (
+    f"{BOT_IDENTITY_SYSTEM_PROMPT}\n\n"
     "Ты аккуратный помощник. Не выдумывай, не добавляй источники без наличия, "
     "отмечай предположения. Если информации недостаточно, задавай вопросы. "
     "Если источники не были переданы инструментом sources, не используй ссылки, "

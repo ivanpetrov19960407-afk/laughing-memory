@@ -19,8 +19,14 @@ from typing import Any
 
 from app.core.decision import Decision
 from app.core.error_messages import map_error_text
-from app.core.models import TaskExecutionResult
 from app.core.facts import build_sources_prompt, render_fact_response_with_sources
+from app.core.identity import (
+    BOT_IDENTITY_SYSTEM_PROMPT,
+    CANONICAL_IDENTITY_ANSWER,
+    contains_forbidden_identity_mention,
+    is_identity_question,
+)
+from app.core.models import TaskExecutionResult
 from app.core.result import (
     OrchestratorResult,
     Source,
@@ -75,6 +81,8 @@ def detect_intent(text: str) -> str:
     trimmed = text.strip()
     if not trimmed:
         return "intent.unknown"
+    if is_identity_question(trimmed):
+        return "identity.query"
     lowered = trimmed.lower()
     if lowered.startswith("summary:") or lowered.startswith("/summary"):
         return "utility.summary"
@@ -226,6 +234,17 @@ class Orchestrator:
         )
         if decision.status != "ok":
             result = ensure_valid(self._result_from_decision(decision))
+            return self._finalize_request(request_context, start_time, result)
+
+        if decision.intent == "identity.query":
+            result = ensure_valid(
+                ok(
+                    CANONICAL_IDENTITY_ANSWER,
+                    intent="identity.query",
+                    mode="local",
+                    debug={"strategy": "identity_canonical"},
+                )
+            )
             return self._finalize_request(request_context, start_time, result)
 
         if decision.intent == "smalltalk.local":
@@ -511,6 +530,7 @@ class Orchestrator:
             model = self._llm_model or llm_config.get("model", "sonar")
             provider = _resolve_llm_provider(llm_client)
             llm_trace_name = f"{provider}/{model}" if provider else model
+<<<<<<< Current (Your changes)
             effective_system_prompt = system_prompt if system_prompt is not None else llm_config.get("system_prompt")
             if mode == "search":
                 effective_system_prompt = llm_config.get(
@@ -535,6 +555,16 @@ class Orchestrator:
             if prefs_parts:
                 prefs_suffix = " ".join(prefs_parts)
                 effective_system_prompt = (effective_system_prompt or "") + "\n\n" + prefs_suffix
+=======
+            # Единая system-identity для всех вызовов LLM (запрет самовыдумки идентичности).
+            effective_system_prompt = BOT_IDENTITY_SYSTEM_PROMPT
+            if system_prompt is not None:
+                effective_system_prompt = f"{BOT_IDENTITY_SYSTEM_PROMPT}\n\n{system_prompt}"
+            elif mode == "search":
+                extra = llm_config.get("search_system_prompt", "")
+                if extra:
+                    effective_system_prompt = f"{BOT_IDENTITY_SYSTEM_PROMPT}\n\n{extra}"
+>>>>>>> Incoming (Background Agent changes)
             def _build_messages(request_prompt: str) -> list[dict[str, Any]]:
                 messages: list[dict[str, Any]] = []
                 if effective_system_prompt:
@@ -1048,6 +1078,16 @@ class Orchestrator:
                     debug={"reason": "missing_payload"},
                 )
             )
+        # При двусмысленном/слишком коротком запросе — уточнение, а не ответ.
+        if len(trimmed_query) < 10 or len(trimmed_query.split()) < 2:
+            return ensure_valid(
+                refused(
+                    "Уточни, пожалуйста, запрос.",
+                    intent=intent,
+                    mode="local",
+                    debug={"reason": "ambiguous_query", "query": trimmed_query},
+                )
+            )
         started_at = time.monotonic()
         breaker = self._circuit_breakers.get("web_search")
         allowed, circuit_event = breaker.allow_request()
@@ -1218,7 +1258,9 @@ class Orchestrator:
             f"Вопрос пользователя: {trimmed_query}\n\n"
             f"{sources_prompt}\n\n"
             "Инструкция: Отвечай строго по источникам. Каждый факт помечай ссылками [N]. "
-            "Не придумывай. Если в источниках нет ответа — скажи, что данных нет."
+            "Запрещено добавлять факты сверх найденных источников. "
+            "Не придумывай. Если в источниках нет ответа — скажи, что данных нет. "
+            "При двусмысленном запросе попроси уточнить."
         )
         execution, _ = await self._request_llm(user_id, llm_prompt, mode="search")
         if execution.status != "success":
@@ -1380,6 +1422,16 @@ class Orchestrator:
                     intent=intent,
                     mode="llm",
                     debug={"reason": "facts_only_no_sources"},
+                )
+            )
+        # Запрет самовыдумки идентичности: отклоняем ответы с упоминанием компаний/провайдеров.
+        if execution.status == "success" and contains_forbidden_identity_mention(execution.result or ""):
+            return ensure_valid(
+                refused(
+                    "Не могу ответить на этот вопрос.",
+                    intent=intent,
+                    mode="llm",
+                    debug={"reason": "forbidden_identity_mention"},
                 )
             )
         final_text = execution.result

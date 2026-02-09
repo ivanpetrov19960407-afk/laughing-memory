@@ -1932,6 +1932,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context, bucket="ui"):
         return
     user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    # Полный reset при /start: dialog memory, режимы, визард.
+    dialog_memory = context.application.bot_data.get("dialog_memory")
+    if dialog_memory is not None and hasattr(dialog_memory, "clear"):
+        await dialog_memory.clear(user_id, chat_id)
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is not None:
+        await memory_manager.clear_dialog(user_id, chat_id)
+    wizard_manager = _get_wizard_manager(context)
+    if wizard_manager is not None and hasattr(wizard_manager, "clear_state"):
+        wizard_manager.clear_state(user_id=user_id, chat_id=chat_id)
+    orchestrator.set_facts_only(user_id, False)
+
     metadata = orchestrator.config.get("system_metadata", {})
     title = metadata.get("title", "Orchestrator")
     version = metadata.get("version", "unknown")
@@ -1940,7 +1953,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         access_note = "\nДоступ ограничен whitelist пользователей."
 
     message = (
-        "Привет! Я бот-оркестратор задач и напоминаний.\n"
+        "Привет! Я Telegram-бот-оркестратор задач и инструментов.\n"
         f"Конфигурация: {title} (v{version}).\n"
         "Основной вход — /menu.\n"
         "Можно писать обычные сообщения — подскажу дальше."

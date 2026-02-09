@@ -47,6 +47,10 @@ class WizardManager:
     def get_state(self, *, user_id: int, chat_id: int) -> tuple[WizardState | None, bool]:
         return self._store.load_state(user_id=user_id, chat_id=chat_id)
 
+    def clear_state(self, *, user_id: int, chat_id: int) -> None:
+        """Сброс состояния визарда для пользователя/чата (например при /start)."""
+        self._store.clear_state(user_id=user_id, chat_id=chat_id)
+
     async def handle_text(
         self,
         *,
