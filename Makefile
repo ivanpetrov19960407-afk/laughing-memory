@@ -1,30 +1,18 @@
-# Minimal targets for Infra-lite: venv, install, lint, fmt, test, run
+.PHONY: ci docker-build docker-run install test
 
-.PHONY: venv install lint fmt test run
-
-venv:
-	python3 -m venv .venv
-	@echo "Run: source .venv/bin/activate"
+# Local CI: install deps and run tests (no interactive steps)
+ci: install test
 
 install:
 	pip install -r requirements.txt
-	@if [ -f .pre-commit-config.yaml ]; then pip install pre-commit 2>/dev/null; pre-commit install 2>/dev/null; fi
-
-lint:
-	@if command -v pre-commit >/dev/null 2>&1 && [ -f .pre-commit-config.yaml ]; then \
-		pre-commit run --all-files; \
-	else \
-		python3 -m py_compile app/infra/config.py app/main.py 2>/dev/null || true; \
-		echo "Install pre-commit and add .pre-commit-config.yaml for full lint"; \
-	fi
-
-fmt:
-	@if command -v ruff >/dev/null 2>&1; then ruff format app tests; \
-	elif command -v black >/dev/null 2>&1; then black app tests; \
-	else echo "Install ruff or black for formatting"; fi
 
 test:
-	pytest -q
+	pytest
 
-run:
-	python bot.py
+docker-build:
+	docker build -t secretary-bot:latest .
+
+# Run container; requires BOT_TOKEN and ALLOWED_USER_IDS via env or .env
+# Example: make docker-run (with .env) or BOT_TOKEN=xxx ALLOWED_USER_IDS=1 make docker-run
+docker-run:
+	docker run --rm -it --env-file .env secretary-bot:latest
