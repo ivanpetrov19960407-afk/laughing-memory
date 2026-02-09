@@ -1,3 +1,10 @@
+"""Orchestrator result contract: OrchestratorResult and helpers.
+
+All handlers and tools return OrchestratorResult (text, status, mode, intent,
+sources, attachments, actions, debug). ensure_valid() normalizes raw results;
+ensure_safe_text_strict() enforces facts-only mode (sources + citations).
+"""
+
 from __future__ import annotations
 
 import base64
@@ -32,6 +39,8 @@ _PSEUDO_SOURCE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 
 @dataclass(frozen=True)
 class Source:
+    """A single reference (e.g. search result): title, URL, optional snippet."""
+
     title: str
     url: str
     snippet: str
@@ -39,6 +48,8 @@ class Source:
 
 @dataclass(frozen=True)
 class Attachment:
+    """File or URL attachment: type, name, and path/bytes/url for delivery."""
+
     type: str
     name: str
     path: str | None = None
@@ -48,6 +59,8 @@ class Attachment:
 
 @dataclass(frozen=True)
 class Action:
+    """Inline button: id (intent/op), label, payload for callback."""
+
     id: str
     label: str
     payload: dict[str, Any]
@@ -55,6 +68,8 @@ class Action:
 
 @dataclass(frozen=True)
 class OrchestratorResult:
+    """Unified response from orchestrator/tools: text, status, mode, intent, sources, actions, attachments, debug."""
+
     text: str
     status: ResultStatus
     mode: ResultMode
@@ -135,6 +150,7 @@ def ok(
     attachments: list[Attachment] | None = None,
     debug: dict[str, Any] | None = None,
 ) -> OrchestratorResult:
+    """Build OrchestratorResult with status='ok'."""
     return OrchestratorResult(
         text=text,
         status="ok",
@@ -157,6 +173,7 @@ def refused(
     attachments: list[Attachment] | None = None,
     debug: dict[str, Any] | None = None,
 ) -> OrchestratorResult:
+    """Build OrchestratorResult with status='refused' (policy/safety)."""
     return OrchestratorResult(
         text=text,
         status="refused",
@@ -179,6 +196,7 @@ def error(
     attachments: list[Attachment] | None = None,
     debug: dict[str, Any] | None = None,
 ) -> OrchestratorResult:
+    """Build OrchestratorResult with status='error'."""
     return OrchestratorResult(
         text=text,
         status="error",
@@ -201,6 +219,7 @@ def ratelimited(
     attachments: list[Attachment] | None = None,
     debug: dict[str, Any] | None = None,
 ) -> OrchestratorResult:
+    """Build OrchestratorResult with status='ratelimited'."""
     return OrchestratorResult(
         text=text,
         status="ratelimited",
@@ -219,6 +238,7 @@ def normalize_to_orchestrator_result(
     logger: logging.Logger | None = None,
     fallback_intent: str | None = None,
 ) -> OrchestratorResult:
+    """Alias for ensure_valid(); normalizes raw result to valid OrchestratorResult."""
     return ensure_valid(result, logger=logger, fallback_intent=fallback_intent)
 
 
@@ -228,6 +248,7 @@ def ensure_valid(
     logger: logging.Logger | None = None,
     fallback_intent: str | None = None,
 ) -> OrchestratorResult:
+    """Normalize result (OrchestratorResult, dict, str, None) to a valid OrchestratorResult."""
     logger = logger or LOGGER
     if result is None:
         return OrchestratorResult(
@@ -440,6 +461,7 @@ def ensure_safe_text_strict(
     *,
     allow_sources_in_text: bool = False,
 ) -> OrchestratorResult:
+    """Enforce facts-only: require sources and [N] citations when facts_enabled; strip pseudo-sources."""
     if facts_enabled and not result.sources:
         return OrchestratorResult(
             text=STRICT_NO_SOURCES_TEXT,

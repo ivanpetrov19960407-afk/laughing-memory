@@ -1,0 +1,3 @@
+# Dev: lint, format, pre-commit
+ruff>=0.8,<1
+pre-commit>=3.0,<4

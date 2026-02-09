@@ -1,3 +1,10 @@
+"""Orchestrator: routes user input to tasks/LLM/tools and returns OrchestratorResult.
+
+Business logic lives here and in Tools; Telegram layer only displays result and
+builds inline buttons from result.actions. Contract: handlers call orchestrator,
+get OrchestratorResult (text/status/mode/intent/sources/actions/attachments/debug).
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -64,6 +71,7 @@ _DESTRUCTIVE_REFUSAL = "Не могу выполнить разрушитель�
 
 
 def detect_intent(text: str) -> str:
+    """Classify raw text into intent namespace (e.g. smalltalk.local, question.general)."""
     trimmed = text.strip()
     if not trimmed:
         return "intent.unknown"
@@ -122,6 +130,8 @@ class TaskDisabledError(TaskError):
 
 
 class Orchestrator:
+    """Routes user input to tasks, LLM, or tools; returns OrchestratorResult."""
+
     _MAX_INPUT_LENGTH = 5500
 
     def __init__(
