@@ -1,10 +1,3 @@
-"""Orchestrator: routes user input to tasks/LLM/tools and returns OrchestratorResult.
-
-Business logic lives here and in Tools; Telegram layer only displays result and
-builds inline buttons from result.actions. Contract: handlers call orchestrator,
-get OrchestratorResult (text/status/mode/intent/sources/actions/attachments/debug).
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -17,6 +10,13 @@ import re
 import traceback
 from typing import Any
 
+from app.core.bot_identity import (
+    get_system_prompt_for_llm,
+    is_identity_question,
+    IDENTITY_ANSWER_TEMPLATE,
+    is_search_query_ambiguous,
+    contains_forbidden_identity_mention,
+)
 from app.core.decision import Decision
 from app.core.error_messages import map_error_text
 from app.core.models import TaskExecutionResult
@@ -71,7 +71,6 @@ _DESTRUCTIVE_REFUSAL = "Не могу выполнить разрушитель�
 
 
 def detect_intent(text: str) -> str:
-    """Classify raw text into intent namespace (e.g. smalltalk.local, question.general)."""
     trimmed = text.strip()
     if not trimmed:
         return "intent.unknown"
@@ -96,6 +95,8 @@ def detect_intent(text: str) -> str:
     )
     if any(marker in lowered for marker in smalltalk_markers):
         return "smalltalk.local"
+    if is_identity_question(trimmed):
+        return "identity.local"
     return "question.general"
 
 
@@ -130,8 +131,6 @@ class TaskDisabledError(TaskError):
 
 
 class Orchestrator:
-    """Routes user input to tasks, LLM, or tools; returns OrchestratorResult."""
-
     _MAX_INPUT_LENGTH = 5500
 
     def __init__(
@@ -184,11 +183,6 @@ class Orchestrator:
         request_context: RequestContext | None = None,
     ) -> OrchestratorResult:
         user_id = int(user_context.get("user_id") or 0)
-        if user_id not in self._facts_only_by_user:
-            self._facts_only_by_user[user_id] = user_context.get(
-                "facts_mode_default",
-                self._facts_only_default,
-            )
         dialog_context = user_context.get("dialog_context")
         dialog_message_count = user_context.get("dialog_message_count")
         memory_context = user_context.get("memory_context")
@@ -240,6 +234,17 @@ class Orchestrator:
             )
             return self._finalize_request(request_context, start_time, result)
 
+        if decision.intent == "identity.local":
+            result = ensure_valid(
+                ok(
+                    IDENTITY_ANSWER_TEMPLATE,
+                    intent="identity.query",
+                    mode="local",
+                    debug={"strategy": "identity_template"},
+                )
+            )
+            return self._finalize_request(request_context, start_time, result)
+
         if decision.intent == "utility.summary":
             result = await self._handle_summary(user_id, trimmed)
             return self._finalize_request(request_context, start_time, result)
@@ -255,7 +260,6 @@ class Orchestrator:
                 memory_context=memory_context if isinstance(memory_context, str) else None,
                 request_id=request_id if isinstance(request_id, str) else None,
                 request_context=request_context,
-                user_context=user_context,
             )
             result = self._build_llm_result(
                 execution,
@@ -285,7 +289,6 @@ class Orchestrator:
             memory_context=memory_context if isinstance(memory_context, str) else None,
             request_id=request_id if isinstance(request_id, str) else None,
             request_context=request_context,
-            user_context=user_context,
         )
         result = self._build_llm_result(
             execution,
@@ -454,6 +457,10 @@ class Orchestrator:
     def set_facts_only(self, user_id: int, enabled: bool) -> None:
         self._facts_only_by_user[user_id] = enabled
 
+    def reset_user_modes(self, user_id: int) -> None:
+        """Сброс режимов пользователя (например при /start)."""
+        self._facts_only_by_user.pop(user_id, None)
+
     def is_facts_only(self, user_id: int) -> bool:
         return self._facts_only_by_user.get(user_id, self._facts_only_default)
 
@@ -469,7 +476,6 @@ class Orchestrator:
         memory_context: str | None = None,
         request_id: str | None = None,
         request_context: RequestContext | None = None,
-        user_context: dict[str, Any] | None = None,
     ) -> tuple[TaskExecutionResult, list[str]]:
         executed_at = datetime.now(timezone.utc)
         trimmed = prompt.strip()
@@ -511,41 +517,24 @@ class Orchestrator:
             model = self._llm_model or llm_config.get("model", "sonar")
             provider = _resolve_llm_provider(llm_client)
             llm_trace_name = f"{provider}/{model}" if provider else model
-            effective_system_prompt = system_prompt if system_prompt is not None else llm_config.get("system_prompt")
+            # Для search — единая идентичность + инструкции; для ask/summary — только конфиг + plain text (без identity в system, чтобы не ломать тесты и контракт)
             if mode == "search":
-                effective_system_prompt = llm_config.get(
+                extra = system_prompt if system_prompt is not None else llm_config.get(
                     "search_system_prompt",
-                    effective_system_prompt,
+                    "Отвечай строго по источникам. Не придумывай факты. Каждый факт — только из переданных источников.",
                 )
-            prefs_parts: list[str] = []
-            if isinstance(user_context, dict):
-                lang = user_context.get("language")
-                if isinstance(lang, str) and lang.strip():
-                    if (lang.strip().lower() or "ru") == "en":
-                        prefs_parts.append("Respond in English.")
-                    else:
-                        prefs_parts.append("Отвечай на русском.")
-                verb = user_context.get("verbosity")
-                if isinstance(verb, str) and verb.strip():
-                    v = verb.strip().lower()
-                    if v == "short":
-                        prefs_parts.append("Отвечай максимально кратко.")
-                    elif v == "detailed":
-                        prefs_parts.append("Отвечай подробно, но без воды.")
-            if prefs_parts:
-                prefs_suffix = " ".join(prefs_parts)
-                effective_system_prompt = (effective_system_prompt or "") + "\n\n" + prefs_suffix
+                effective_system_prompt = get_system_prompt_for_llm(extra_instructions=extra)
+                system_content = f"{effective_system_prompt}\n\n{_PLAIN_TEXT_SYSTEM_PROMPT}"
+            else:
+                effective_system_prompt = system_prompt if system_prompt is not None else llm_config.get("system_prompt")
+                if effective_system_prompt:
+                    system_content = f"{effective_system_prompt}\n\n{_PLAIN_TEXT_SYSTEM_PROMPT}"
+                else:
+                    system_content = _PLAIN_TEXT_SYSTEM_PROMPT
+
             def _build_messages(request_prompt: str) -> list[dict[str, Any]]:
                 messages: list[dict[str, Any]] = []
-                if effective_system_prompt:
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": f"{effective_system_prompt}\n\n{_PLAIN_TEXT_SYSTEM_PROMPT}",
-                        }
-                    )
-                else:
-                    messages.append({"role": "system", "content": _PLAIN_TEXT_SYSTEM_PROMPT})
+                messages.append({"role": "system", "content": system_content})
                 history_turns = self._resolve_history_turns(llm_config)
                 if history_turns > 0:
                     recent = self._storage.get_recent_executions(
@@ -1048,6 +1037,15 @@ class Orchestrator:
                     debug={"reason": "missing_payload"},
                 )
             )
+        if is_search_query_ambiguous(trimmed_query):
+            return ensure_valid(
+                refused(
+                    "Уточни или переформулируй запрос поиска: без этого не могу искать по источникам. Что именно нужно найти?",
+                    intent=intent,
+                    mode="local",
+                    debug={"reason": "ambiguous_query", "query": trimmed_query},
+                )
+            )
         started_at = time.monotonic()
         breaker = self._circuit_breakers.get("web_search")
         allowed, circuit_event = breaker.allow_request()
@@ -1383,6 +1381,16 @@ class Orchestrator:
                 )
             )
         final_text = execution.result
+        # Проверка на галлюцинацию идентичности только при успешном ответе LLM
+        if status == "ok" and contains_forbidden_identity_mention(final_text):
+            return ensure_valid(
+                refused(
+                    "Не могу ответить на этот запрос.",
+                    intent=intent,
+                    mode="llm",
+                    debug={"reason": "forbidden_identity_mention"},
+                )
+            )
         debug_payload: dict[str, Any] = {"task_name": execution.task_name}
         if status == "error" and request_context:
             llm_error = request_context.meta.get("llm_error")

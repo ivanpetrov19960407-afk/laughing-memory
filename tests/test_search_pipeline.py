@@ -49,14 +49,17 @@ def test_search_integration_with_fake_clients(tmp_path: Path) -> None:
         Source(title="A", url="https://a.example", snippet="sa"),
         Source(title="B", url="https://b.example", snippet="sb"),
     ]
+    # Ответ с цитатой [1] без «по данным»/«согласно», чтобы санитайзер не вырезал цитату
     orchestrator = Orchestrator(
         config={},
         storage=storage,
-        llm_client=FakeLLM("Ответ по данным [1]."),
+        llm_client=FakeLLM("Интеграционное тестирование проверяет взаимодействие компонентов [1]."),
         search_client=FakeSearch(sources),
     )
-
-    result = asyncio.run(orchestrator.handle("/search test query", {"user_id": 1}))
+    # Запрос не должен быть двусмысленным (минимум длина и ясность)
+    result = asyncio.run(
+        orchestrator.handle("/search что такое интеграционное тестирование", {"user_id": 1})
+    )
 
     assert result.status == "ok"
     assert len(result.sources) == 2
@@ -77,3 +80,24 @@ def test_search_integration_without_results(tmp_path: Path) -> None:
 
     assert result.status == "refused"
     assert result.sources == []
+
+
+def test_search_ambiguous_query_refused(tmp_path: Path) -> None:
+    """Двусмысленный/короткий запрос поиска — отказ с просьбой уточнить."""
+    storage = TaskStorage(tmp_path / "bot.db")
+    orchestrator = Orchestrator(
+        config={},
+        storage=storage,
+        llm_client=FakeLLM("ignored"),
+        search_client=FakeSearch([Source(title="X", url="https://x", snippet="s")]),
+    )
+    result = asyncio.run(
+        orchestrator.run_fact_answer(
+            user_id=1,
+            query="а",
+            facts_only=False,
+            intent="command.search",
+        )
+    )
+    assert result.status == "refused"
+    assert result.debug.get("reason") == "ambiguous_query"
