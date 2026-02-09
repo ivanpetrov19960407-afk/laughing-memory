@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 from uuid import uuid4
@@ -27,9 +27,11 @@ class DocumentSessionStore:
         path: Path,
         *,
         now_provider: Callable[[], datetime] | None = None,
+        ttl_hours: int = 24,
     ) -> None:
         self._path = path
         self._now_provider = now_provider or (lambda: datetime.now(timezone.utc))
+        self._ttl_hours = ttl_hours
         self._sessions: dict[str, DocumentSession] = {}
         self._active_by_key: dict[str, str] = {}
 
@@ -41,12 +43,24 @@ class DocumentSessionStore:
         active = payload.get("active_by_key", {})
         if isinstance(active, dict):
             self._active_by_key = {str(key): str(value) for key, value in active.items()}
+        now = self._now_provider()
+        ttl_delta = timedelta(hours=self._ttl_hours)
         for item in sessions:
             if not isinstance(item, dict):
                 continue
             session = _deserialize_session(item)
             if session:
+                # Проверяем TTL при загрузке
+                if now - session.updated_at > ttl_delta:
+                    continue  # Пропускаем истёкшие сессии
                 self._sessions[session.doc_id] = session
+        # Очищаем активные сессии, если они истекли
+        expired_keys = []
+        for key, doc_id in self._active_by_key.items():
+            if doc_id not in self._sessions:
+                expired_keys.append(key)
+        for key in expired_keys:
+            self._active_by_key.pop(key, None)
 
     def save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,7 +104,19 @@ class DocumentSessionStore:
         doc_id = self._active_by_key.get(_active_key(user_id, chat_id))
         if not doc_id:
             return None
-        return self._sessions.get(doc_id)
+        session = self._sessions.get(doc_id)
+        if session is None:
+            return None
+        # Проверяем TTL
+        now = self._now_provider()
+        ttl_delta = timedelta(hours=self._ttl_hours)
+        if now - session.updated_at > ttl_delta:
+            # Сессия истекла, удаляем
+            self._sessions.pop(doc_id, None)
+            self._active_by_key.pop(_active_key(user_id, chat_id), None)
+            self.save()
+            return None
+        return session
 
     def set_state(self, *, doc_id: str, state: str) -> DocumentSession | None:
         session = self._sessions.get(doc_id)

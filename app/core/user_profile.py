@@ -8,8 +8,11 @@ from typing import Any
 
 DEFAULT_LANGUAGE = "ru"
 DEFAULT_TIMEZONE = "Europe/Vilnius"
-DEFAULT_VERBOSITY = "short"
+DEFAULT_VERBOSITY = "normal"
 DEFAULT_FACTS_MODE = False
+DEFAULT_CONTEXT_DEFAULT = False
+DEFAULT_DATE_FORMAT = "dd.mm.yyyy"
+DEFAULT_ACTIONS_LOG_ENABLED = True
 DEFAULT_REMINDER_OFFSET_MINUTES: int | None = None
 DEFAULT_REMINDERS_ENABLED = False
 DEFAULT_NOTES_LIMIT = 20
@@ -70,6 +73,9 @@ class UserProfile:
     timezone: str
     verbosity: str
     facts_mode_default: bool
+    context_default: bool
+    date_format: str
+    actions_log_enabled: bool
     default_reminders: ReminderDefaults
     style: str | None
     notes: tuple[UserNote, ...]
@@ -83,6 +89,9 @@ class UserProfile:
             "timezone": self.timezone,
             "verbosity": self.verbosity,
             "facts_mode_default": self.facts_mode_default,
+            "context_default": self.context_default,
+            "date_format": self.date_format,
+            "actions_log_enabled": self.actions_log_enabled,
             "default_reminders": self.default_reminders.to_dict(),
             "style": self.style,
             "notes": [note.to_dict() for note in self.notes],
@@ -105,6 +114,9 @@ class UserProfile:
         timezone_value = payload.get("timezone")
         verbosity = payload.get("verbosity")
         facts_mode_default = payload.get("facts_mode_default")
+        context_default = payload.get("context_default")
+        date_format = payload.get("date_format")
+        actions_log_enabled = payload.get("actions_log_enabled")
         style = payload.get("style")
         created_payload = payload.get("created_at")
         updated_payload = payload.get("updated_at")
@@ -131,6 +143,9 @@ class UserProfile:
             timezone=timezone_value if isinstance(timezone_value, str) and timezone_value else DEFAULT_TIMEZONE,
             verbosity=verbosity if isinstance(verbosity, str) and verbosity else DEFAULT_VERBOSITY,
             facts_mode_default=bool(DEFAULT_FACTS_MODE if facts_mode_default is None else facts_mode_default),
+            context_default=bool(DEFAULT_CONTEXT_DEFAULT if context_default is None else context_default),
+            date_format=date_format if isinstance(date_format, str) and date_format else DEFAULT_DATE_FORMAT,
+            actions_log_enabled=bool(DEFAULT_ACTIONS_LOG_ENABLED if actions_log_enabled is None else actions_log_enabled),
             default_reminders=ReminderDefaults.from_dict(payload.get("default_reminders")),
             style=style if isinstance(style, str) and style else None,
             notes=tuple(notes),
@@ -153,6 +168,9 @@ def default_profile(
         timezone=DEFAULT_TIMEZONE,
         verbosity=DEFAULT_VERBOSITY,
         facts_mode_default=DEFAULT_FACTS_MODE,
+        context_default=DEFAULT_CONTEXT_DEFAULT,
+        date_format=DEFAULT_DATE_FORMAT,
+        actions_log_enabled=DEFAULT_ACTIONS_LOG_ENABLED,
         default_reminders=default_reminder_defaults(),
         style=None,
         notes=tuple(),
@@ -172,6 +190,9 @@ def apply_profile_patch(profile: UserProfile, patch: dict[str, Any]) -> UserProf
     timezone_value = patch.get("timezone")
     verbosity = patch.get("verbosity")
     facts_mode_default = patch.get("facts_mode_default")
+    context_default = patch.get("context_default")
+    date_format = patch.get("date_format")
+    actions_log_enabled = patch.get("actions_log_enabled")
     style = patch.get("style")
     defaults_patch = patch.get("default_reminders")
     updated_defaults = profile.default_reminders
@@ -194,6 +215,9 @@ def apply_profile_patch(profile: UserProfile, patch: dict[str, Any]) -> UserProf
         else profile.timezone,
         verbosity=verbosity.strip() if isinstance(verbosity, str) and verbosity.strip() else profile.verbosity,
         facts_mode_default=bool(profile.facts_mode_default if facts_mode_default is None else facts_mode_default),
+        context_default=bool(profile.context_default if context_default is None else context_default),
+        date_format=date_format.strip() if isinstance(date_format, str) and date_format.strip() else profile.date_format,
+        actions_log_enabled=bool(profile.actions_log_enabled if actions_log_enabled is None else actions_log_enabled),
         default_reminders=updated_defaults,
         style=style.strip() if isinstance(style, str) and style.strip() else profile.style,
     )

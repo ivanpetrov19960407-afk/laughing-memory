@@ -1,3 +1,10 @@
+"""Orchestrator: routes user input to tasks/LLM/tools and returns OrchestratorResult.
+
+Business logic lives here and in Tools; Telegram layer only displays result and
+builds inline buttons from result.actions. Contract: handlers call orchestrator,
+get OrchestratorResult (text/status/mode/intent/sources/actions/attachments/debug).
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -64,6 +71,7 @@ _DESTRUCTIVE_REFUSAL = "Не могу выполнить разрушитель�
 
 
 def detect_intent(text: str) -> str:
+    """Classify raw text into intent namespace (e.g. smalltalk.local, question.general)."""
     trimmed = text.strip()
     if not trimmed:
         return "intent.unknown"
@@ -122,6 +130,8 @@ class TaskDisabledError(TaskError):
 
 
 class Orchestrator:
+    """Routes user input to tasks, LLM, or tools; returns OrchestratorResult."""
+
     _MAX_INPUT_LENGTH = 5500
 
     def __init__(
@@ -174,6 +184,11 @@ class Orchestrator:
         request_context: RequestContext | None = None,
     ) -> OrchestratorResult:
         user_id = int(user_context.get("user_id") or 0)
+        if user_id not in self._facts_only_by_user:
+            self._facts_only_by_user[user_id] = user_context.get(
+                "facts_mode_default",
+                self._facts_only_default,
+            )
         dialog_context = user_context.get("dialog_context")
         dialog_message_count = user_context.get("dialog_message_count")
         memory_context = user_context.get("memory_context")
@@ -240,6 +255,7 @@ class Orchestrator:
                 memory_context=memory_context if isinstance(memory_context, str) else None,
                 request_id=request_id if isinstance(request_id, str) else None,
                 request_context=request_context,
+                user_context=user_context,
             )
             result = self._build_llm_result(
                 execution,
@@ -269,6 +285,7 @@ class Orchestrator:
             memory_context=memory_context if isinstance(memory_context, str) else None,
             request_id=request_id if isinstance(request_id, str) else None,
             request_context=request_context,
+            user_context=user_context,
         )
         result = self._build_llm_result(
             execution,
@@ -452,6 +469,7 @@ class Orchestrator:
         memory_context: str | None = None,
         request_id: str | None = None,
         request_context: RequestContext | None = None,
+        user_context: dict[str, Any] | None = None,
     ) -> tuple[TaskExecutionResult, list[str]]:
         executed_at = datetime.now(timezone.utc)
         trimmed = prompt.strip()
@@ -499,6 +517,24 @@ class Orchestrator:
                     "search_system_prompt",
                     effective_system_prompt,
                 )
+            prefs_parts: list[str] = []
+            if isinstance(user_context, dict):
+                lang = user_context.get("language")
+                if isinstance(lang, str) and lang.strip():
+                    if (lang.strip().lower() or "ru") == "en":
+                        prefs_parts.append("Respond in English.")
+                    else:
+                        prefs_parts.append("Отвечай на русском.")
+                verb = user_context.get("verbosity")
+                if isinstance(verb, str) and verb.strip():
+                    v = verb.strip().lower()
+                    if v == "short":
+                        prefs_parts.append("Отвечай максимально кратко.")
+                    elif v == "detailed":
+                        prefs_parts.append("Отвечай подробно, но без воды.")
+            if prefs_parts:
+                prefs_suffix = " ".join(prefs_parts)
+                effective_system_prompt = (effective_system_prompt or "") + "\n\n" + prefs_suffix
             def _build_messages(request_prompt: str) -> list[dict[str, Any]]:
                 messages: list[dict[str, Any]] = []
                 if effective_system_prompt:

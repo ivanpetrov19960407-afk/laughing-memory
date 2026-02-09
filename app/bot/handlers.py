@@ -677,6 +677,13 @@ async def _build_user_context(update: Update, context: ContextTypes.DEFAULT_TYPE
     memory_context = await _build_memory_context(context)
     if memory_context:
         payload["memory_context"] = memory_context
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is not None and memory_manager.profile is not None:
+        profile = memory_manager.get_profile(user_id)
+        if profile is not None:
+            payload["facts_mode_default"] = profile.facts_mode_default
+            payload["verbosity"] = profile.verbosity
+            payload["language"] = profile.language
     return payload
 
 
@@ -743,6 +750,23 @@ def _settings_timezone_actions() -> list[Action]:
             label="Europe/Berlin",
             payload={"op": "settings.timezone_pick", "value": "Europe/Berlin"},
         ),
+        *_settings_back_actions(),
+    ]
+
+
+def _settings_verbosity_actions() -> list[Action]:
+    return [
+        Action(id="settings.verbosity.short", label="Кратко", payload={"op": "settings.verbosity_pick", "value": "short"}),
+        Action(id="settings.verbosity.normal", label="Обычно", payload={"op": "settings.verbosity_pick", "value": "normal"}),
+        Action(id="settings.verbosity.detailed", label="Подробно", payload={"op": "settings.verbosity_pick", "value": "detailed"}),
+        *_settings_back_actions(),
+    ]
+
+
+def _settings_date_format_actions() -> list[Action]:
+    return [
+        Action(id="settings.date.ddmm", label="dd.mm.yyyy", payload={"op": "settings.date_format_pick", "value": "dd.mm.yyyy"}),
+        Action(id="settings.date.yyyymm", label="yyyy-mm-dd", payload={"op": "settings.date_format_pick", "value": "yyyy-mm-dd"}),
         *_settings_back_actions(),
     ]
 
@@ -820,28 +844,29 @@ def _log_action_from_result(
     if result.status != "ok" or not user_id:
         return
     memory_manager = _get_memory_manager(context)
-    if memory_manager is None or memory_manager.actions is None:
+    if memory_manager is None:
         return
     intent = result.intent or ""
     mapping = {
-        "utility_calendar.add": "calendar.event.create",
-        "utility_calendar.delete": "calendar.event.delete",
-        "utility_calendar.update": "calendar.event.update",
-        "utility_calendar.move": "calendar.event.update",
+        "utility_calendar.add": "calendar.event_added",
+        "utility_calendar.delete": "calendar.event_deleted",
+        "utility_calendar.update": "calendar.event_added",
+        "utility_calendar.move": "calendar.event_added",
         "utility_reminders.create": "reminder.create",
         "utility_reminders.add": "reminder.create",
-        "utility_reminders.delete": "reminder.delete",
-        "utility_reminders.disable": "reminder.disable",
-        "utility_reminders.off": "reminder.disable",
-        "utility_reminders.on": "reminder.enable",
-        "utility_reminders.reschedule": "reminder.reschedule",
-        "utility_reminders.snooze": "reminder.snooze",
+        "utility_reminders.delete": "reminder.deleted",
+        "utility_reminders.disable": "reminder.deleted",
+        "utility_reminders.off": "reminder.deleted",
+        "utility_reminders.on": "reminder.create",
+        "utility_reminders.reschedule": "reminder.rescheduled",
+        "utility_reminders.snooze": "reminder.snoozed",
         "command.facts_on": "mode.facts_on",
         "command.facts_off": "mode.facts_off",
         "command.context_on": "mode.context_on",
         "command.context_off": "mode.context_off",
         "command.context_clear": "mode.context_clear",
         "command.memory_clear": "mode.context_clear",
+        "command.search": "search.performed",
         "wizard.profile.done": "profile.update",
     }
     action_type = mapping.get(intent)
@@ -856,11 +881,10 @@ def _log_action_from_result(
         "refs": _extract_result_refs(result),
     }
     correlation_id = request_context.correlation_id if request_context else result.request_id
-    memory_manager.actions.set(
+    memory_manager.log_user_action(
         user_id=user_id,
         action_type=action_type,
         payload=payload,
-        ts=request_context.ts if request_context else None,
         correlation_id=correlation_id,
     )
 
@@ -919,7 +943,7 @@ def _document_actions(doc_id: str) -> list[Action]:
     return [
         Action(
             id="document.summary",
-            label="📝 Сделать резюме",
+            label="📌 Сделать резюме",
             payload={"op": "document.summary", "doc_id": doc_id},
         ),
         Action(
@@ -991,6 +1015,20 @@ def _trim_document_text(text: str, *, max_chars: int = 8000) -> str:
     return text[:max_chars].rsplit("\n", 1)[0].strip() or text[:max_chars]
 
 
+def _limit_document_text(text: str, *, max_chars: int = 300000) -> tuple[str, dict[str, Any]]:
+    """Ограничивает размер текста документа и возвращает обрезанный текст + метаданные."""
+    original_length = len(text)
+    if original_length <= max_chars:
+        return text, {"original_length": original_length, "truncated": False}
+    truncated_text = text[:max_chars].rsplit("\n", 1)[0].strip() or text[:max_chars]
+    return truncated_text, {
+        "original_length": original_length,
+        "truncated": True,
+        "truncated_length": len(truncated_text),
+        "max_chars": max_chars,
+    }
+
+
 async def _handle_document_summary(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -998,44 +1036,84 @@ async def _handle_document_summary(
     chat_id: int,
     doc_id: str,
 ) -> OrchestratorResult:
+    from app.core.document_qa import split_text
+
     document_store = _get_document_store(context)
     if document_store is None:
-        return error("Хранилище документов недоступно.", intent="document.summary", mode="local")
+        return error("Хранилище документов недоступно.", intent="file.summary", mode="local")
     session = document_store.get_session(doc_id) or document_store.get_active(user_id=user_id, chat_id=chat_id)
     if session is None:
-        return refused("Сначала пришлите файл.", intent="document.summary", mode="local")
+        return refused("Сначала пришлите файл.", intent="file.summary", mode="local")
     text = _load_document_text(session.text_path)
     if not text.strip():
-        return error("Текст документа не найден.", intent="document.summary", mode="local")
+        return error("Текст документа не найден.", intent="file.summary", mode="local")
     llm_client = _get_llm_client(context)
     model = _resolve_llm_model(context)
     if llm_client is None or model is None:
-        return error("LLM не настроен.", intent="document.summary", mode="local")
+        return error("LLM не настроен.", intent="file.summary", mode="local")
     orchestrator = _get_orchestrator(context)
     facts_only = orchestrator.is_facts_only(user_id)
+    # Используем чанки: первые N + 1-2 из конца
+    chunks = split_text(text, chunk_size=1000, overlap=200)
+    if not chunks:
+        return error("Не удалось разбить документ на части.", intent="file.summary", mode="local")
+    # Берём первые 6-8 чанков и последние 1-2
+    first_chunks = chunks[:8]
+    last_chunks = chunks[-2:] if len(chunks) > 2 else []
+    # Убираем дубликаты
+    selected_chunks = list(dict.fromkeys(first_chunks + last_chunks))
+    # Ограничиваем общий размер контекста
+    context_parts: list[str] = []
+    total_chars = 0
+    max_context_chars = 12000
+    for chunk in selected_chunks:
+        if total_chars + len(chunk) > max_context_chars:
+            break
+        context_parts.append(chunk)
+        total_chars += len(chunk)
+    if not context_parts:
+        context_parts = [text[:max_context_chars]]
+    context_text = "\n\n---\n\n".join(context_parts)
     system_prompt = (
-        "Ты помощник. Сделай краткое тезисное резюме по документу. "
+        "Ты помощник. Сделай краткое структурированное резюме по документу (5-12 пунктов). "
+        "Отдельно выдели блок 'Задачи/дедлайны', если они обнаружены. "
         "Используй только текст документа."
     )
     if facts_only:
         system_prompt += " Не добавляй домыслы. Если данных нет, так и скажи."
-    trimmed_text = _trim_document_text(text)
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Текст документа:\n{trimmed_text}\n\nСделай резюме."},
+        {"role": "user", "content": f"Текст документа:\n{context_text}\n\nСделай резюме."},
     ]
     try:
         response = await llm_client.generate_text(model=model, messages=messages)
         response = ensure_plain_text(response)
     except Exception:
-        return error("Не удалось получить резюме.", intent="document.summary", mode="local")
+        return error("Не удалось получить резюме.", intent="file.summary", mode="local")
     if not response.strip():
-        return error("Не удалось получить резюме.", intent="document.summary", mode="local")
+        return error("Не удалось получить резюме.", intent="file.summary", mode="local")
     return ok(
         response.strip(),
-        intent="document.summary",
-        mode="local",
-        actions=_document_actions(session.doc_id),
+        intent="file.summary",
+        mode="llm",
+        actions=[
+            Action(
+                id="document.qa",
+                label="❓ Вопрос по документу",
+                payload={"op": "document.qa", "doc_id": session.doc_id},
+            ),
+            Action(
+                id="document.close",
+                label="🗑 Закрыть документ",
+                payload={"op": "document.close", "doc_id": session.doc_id},
+            ),
+        ],
+        debug={
+            "doc_id": session.doc_id,
+            "chunks_used": len(context_parts),
+            "chars_in_context": total_chars,
+            "total_chunks": len(chunks),
+        },
     )
 
 
@@ -1048,29 +1126,30 @@ async def _handle_document_question(
 ) -> OrchestratorResult:
     document_store = _get_document_store(context)
     if document_store is None:
-        return error("Хранилище документов недоступно.", intent="document.qa", mode="local")
+        return error("Хранилище документов недоступно.", intent="file.qa", mode="local")
     session = document_store.get_active(user_id=user_id, chat_id=chat_id)
     if session is None or session.state != "qa_mode":
-        return refused("Сначала пришлите файл.", intent="document.qa", mode="local")
+        return refused("Сначала пришлите файл.", intent="file.qa", mode="local")
     text = _load_document_text(session.text_path)
     if not text.strip():
-        return error("Текст документа не найден.", intent="document.qa", mode="local")
+        return error("Текст документа не найден.", intent="file.qa", mode="local")
     llm_client = _get_llm_client(context)
     model = _resolve_llm_model(context)
     if llm_client is None or model is None:
-        return error("LLM не настроен.", intent="document.qa", mode="local")
+        return error("LLM не настроен.", intent="file.qa", mode="local")
     orchestrator = _get_orchestrator(context)
     facts_only = orchestrator.is_facts_only(user_id)
-    chunks = select_relevant_chunks(text, question, top_k=4)
+    chunks = select_relevant_chunks(text, question, top_k=6, chunk_size=1000, overlap=200)
     if not chunks:
-        return refused("В документе нет ответа.", intent="document.qa", mode="local")
+        return refused("В документе нет ответа.", intent="file.qa", mode="local")
     system_prompt = (
-        "Отвечай только на основе предоставленных фрагментов документа. "
-        "Если ответа нет во фрагментах, скажи: \"В документе нет ответа\"."
+        "Отвечай строго по контексту из документа. "
+        "Если ответа нет в предоставленных фрагментах, скажи: \"В документе нет ответа\"."
     )
     if facts_only:
         system_prompt += " Никаких домыслов, только факты из текста."
-    context_text = "\n\n".join(f"Фрагмент {idx + 1}:\n{chunk}" for idx, chunk in enumerate(chunks))
+    context_text = "\n\n".join(f"[Chunk {idx + 1}]\n{chunk}" for idx, chunk in enumerate(chunks))
+    chars_in_context = sum(len(chunk) for chunk in chunks)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"Вопрос: {question}\n\n{context_text}"},
@@ -1079,14 +1158,19 @@ async def _handle_document_question(
         response = await llm_client.generate_text(model=model, messages=messages)
         response = ensure_plain_text(response)
     except Exception:
-        return error("Не удалось получить ответ.", intent="document.qa", mode="local")
+        return error("Не удалось получить ответ.", intent="file.qa", mode="local")
     if not response.strip():
-        return error("Не удалось получить ответ.", intent="document.qa", mode="local")
+        return error("Не удалось получить ответ.", intent="file.qa", mode="local")
     return ok(
         response.strip(),
-        intent="document.qa",
-        mode="local",
+        intent="file.qa",
+        mode="llm",
         actions=_document_qa_actions(session.doc_id),
+        debug={
+            "doc_id": session.doc_id,
+            "chunks_used": len(chunks),
+            "chars_in_context": chars_in_context,
+        },
     )
 
 
@@ -1242,18 +1326,88 @@ async def _build_reminders_list_result(
     for item in limited:
         when_label = item.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         lines.append(f"• {item.text}\n  Когда: {when_label} (МСК)")
+        base_trigger = item.trigger_at.isoformat()
         actions.append(
             Action(
-                id=f"reminder_snooze_menu:{item.id}",
-                label=f"⏸ Отложить: {_short_label(item.text)}",
-                payload={"op": "reminder_snooze_menu", "reminder_id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
+                id=f"reminder_snooze:{item.id}:10",
+                label=f"⏸ 10 мин: {_short_label(item.text)}",
+                payload={"op": "reminder_snooze", "reminder_id": item.id, "minutes": 10, "base_trigger_at": base_trigger},
+            )
+        )
+        actions.append(
+            Action(
+                id=f"reminder_snooze:{item.id}:60",
+                label=f"⏸ 1 час: {_short_label(item.text)}",
+                payload={"op": "reminder_snooze", "reminder_id": item.id, "minutes": 60, "base_trigger_at": base_trigger},
             )
         )
         actions.append(
             Action(
                 id="utility_reminders.reschedule",
                 label=f"✏ Перенести: {_short_label(item.text)}",
-                payload={"op": "reminder_reschedule", "reminder_id": item.id, "base_trigger_at": item.trigger_at.isoformat()},
+                payload={"op": "reminder_reschedule", "reminder_id": item.id, "base_trigger_at": base_trigger},
+            )
+        )
+        actions.append(
+            Action(
+                id="utility_reminders.delete",
+                label=f"🗑 Удалить: {_short_label(item.text)}",
+                payload={"op": "reminder.delete_confirm", "reminder_id": item.id},
+            )
+        )
+    return ok("\n".join(lines), intent=intent, mode="local", actions=actions)
+
+
+async def _build_reminders_next_24h_result(
+    now: datetime,
+    *,
+    user_id: int,
+    chat_id: int,
+    intent: str,
+) -> OrchestratorResult:
+    end_time = now + timedelta(hours=24)
+    items = await calendar_store.list_reminders(now, limit=None, include_disabled=False)
+    filtered = [
+        item
+        for item in items
+        if item.user_id == user_id
+        and item.chat_id == chat_id
+        and item.trigger_at <= end_time
+        and item.trigger_at >= now
+    ]
+    filtered.sort(key=lambda item: item.trigger_at)
+    actions = _reminder_list_controls_actions()
+    if not filtered:
+        return ok(
+            "На сегодня напоминаний нет.",
+            intent=intent,
+            mode="local",
+            actions=_reminder_list_controls_actions(include_refresh=False),
+        )
+    lines: list[str] = []
+    for item in filtered:
+        when_label = item.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+        lines.append(f"• {item.text}\n  Когда: {when_label} (МСК)")
+        base_trigger = item.trigger_at.isoformat()
+        actions.append(
+            Action(
+                id=f"reminder_snooze:{item.id}:10",
+                label=f"⏸ 10 мин: {_short_label(item.text)}",
+                payload={"op": "reminder_snooze", "reminder_id": item.id, "minutes": 10, "base_trigger_at": base_trigger},
+            )
+        )
+        actions.append(
+            Action(
+                id=f"reminder_snooze:{item.id}:60",
+                label=f"⏸ 1 час: {_short_label(item.text)}",
+                payload={"op": "reminder_snooze", "reminder_id": item.id, "minutes": 60, "base_trigger_at": base_trigger},
+            )
+        )
+        actions.append(
+            Action(
+                id="utility_reminders.reschedule",
+                label=f"✏ Перенести: {_short_label(item.text)}",
+                payload={"op": "reminder_reschedule", "reminder_id": item.id, "base_trigger_at": base_trigger},
             )
         )
         actions.append(
@@ -2068,6 +2222,11 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
     memory_manager = _get_memory_manager(context)
+    if memory_manager is not None and memory_manager.profile is not None:
+        profile = memory_manager.get_profile(user_id)
+        if profile is not None and profile.context_default:
+            if not await memory_manager.dialog_enabled(user_id):
+                await memory_manager.set_dialog_enabled(user_id, True)
     if memory_manager and await memory_manager.dialog_enabled(user_id):
         await memory_manager.add_dialog_message(user_id, chat_id, "user", prompt)
     dialog_context, dialog_count = await _prepare_dialog_context(
@@ -2079,18 +2238,22 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     request_context = get_request_context(context)
     request_id = request_context.correlation_id if request_context else None
     memory_context = await _build_memory_context(context)
+    user_context = _build_user_context_with_dialog(
+        update,
+        dialog_context=dialog_context,
+        dialog_message_count=dialog_count,
+        memory_context=memory_context,
+        request_id=request_id,
+        request_context=request_context,
+    )
+    if memory_manager is not None and memory_manager.profile is not None:
+        profile = memory_manager.get_profile(user_id)
+        if profile is not None:
+            user_context["facts_mode_default"] = profile.facts_mode_default
+            user_context["verbosity"] = profile.verbosity
+            user_context["language"] = profile.language
     try:
-        result = await orchestrator.handle(
-            f"/ask {prompt}",
-            _build_user_context_with_dialog(
-                update,
-                dialog_context=dialog_context,
-                dialog_message_count=dialog_count,
-                memory_context=memory_context,
-                request_id=request_id,
-                request_context=request_context,
-            ),
-        )
+        result = await orchestrator.handle(f"/ask {prompt}", user_context)
     except Exception as exc:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
@@ -2292,22 +2455,89 @@ async def memory_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat_id = update.effective_chat.id if update.effective_chat else 0
     enabled, count = await memory_manager.dialog_status(user_id, chat_id)
     status = "включён" if enabled else "выключён"
-    lines = [f"Контекст {status}. Сообщений в истории: {count}."]
+    lines = [
+        "Память:",
+        f"• Диалог (контекст): {status}, сообщений: {count}.",
+        f"• Сбор действий: {'вкл' if memory_manager.actions_log_enabled(user_id) else 'выкл'}.",
+    ]
     if memory_manager.profile is not None and memory_manager.profile_is_persisted(user_id):
         profile = memory_manager.get_profile(user_id)
         if profile is not None:
             facts_label = "вкл" if profile.facts_mode_default else "выкл"
-            lines.append("Профиль:")
-            lines.append(f"• язык: {profile.language}")
-            lines.append(f"• часовой пояс: {profile.timezone}")
-            lines.append(f"• режим фактов: {facts_label}")
+            ctx_label = "вкл" if profile.context_default else "выкл"
+            lines.append("Предпочтения:")
+            lines.append(f"  язык: {profile.language}, подробность: {profile.verbosity}")
+            lines.append(f"  режим фактов по умолчанию: {facts_label}, контекст по умолчанию: {ctx_label}")
+            lines.append(f"  формат даты: {profile.date_format}")
+            if profile.updated_at:
+                lines.append(f"  обновлено: {profile.updated_at[:10]}")
     else:
-        lines.append("Профиль: нет сохранённых данных.")
+        lines.append("Предпочтения: по умолчанию.")
+    if memory_manager.actions is not None:
+        entries = memory_manager.actions.list(user_id=user_id, limit=1)
+        if entries:
+            ts = entries[0].ts
+            ts_label = ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M") if ts else "-"
+            lines.append(f"Последнее действие: {ts_label}")
     result = _build_simple_result(
         "\n".join(lines),
         intent="command.memory_status",
         status="ok",
         mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def memory_actions_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None:
+        result = _build_simple_result(
+            "Память не настроена.",
+            intent="command.memory_actions_on",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    memory_manager.set_actions_log_enabled(user_id, True)
+    result = ensure_valid(
+        ok(
+            "Сбор действий включён.",
+            intent="command.memory_actions_on",
+            mode="local",
+            actions=[menu.menu_action()],
+        )
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def memory_actions_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None:
+        result = _build_simple_result(
+            "Память не настроена.",
+            intent="command.memory_actions_off",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    memory_manager.set_actions_log_enabled(user_id, False)
+    result = ensure_valid(
+        ok(
+            "Сбор действий выключен.",
+            intent="command.memory_actions_off",
+            mode="local",
+            actions=[menu.menu_action()],
+        )
     )
     await send_result(update, context, result)
 
@@ -2328,10 +2558,30 @@ async def memory_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else 0
-    await memory_manager.clear_dialog(user_id, chat_id)
+    layer = (context.args[0].strip().lower() if context.args else "").strip()
+    if layer not in ("prefs", "actions", "dialog", ""):
+        result = _build_simple_result(
+            "Использование: /memory_clear или /memory_clear prefs|actions|dialog",
+            intent="command.memory_clear",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    done: list[str] = []
+    if layer in ("", "dialog"):
+        await memory_manager.clear_dialog(user_id, chat_id)
+        done.append("диалог")
+    if layer in ("", "prefs") and memory_manager.profile is not None:
+        memory_manager.clear_profile(user_id)
+        done.append("предпочтения")
+    if layer in ("", "actions") and memory_manager.actions is not None:
+        memory_manager.actions.clear(user_id)
+        done.append("действия")
+    msg = "Очищено: " + ", ".join(done) + "."
     result = ensure_valid(
         ok(
-            "Контекст очищен. Профиль пользователя сохранён.",
+            msg,
             intent="command.memory_clear",
             mode="local",
             actions=[menu.menu_action()],
@@ -2406,6 +2656,83 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     result = _build_simple_result(
         "\n".join(lines),
         intent="command.memory",
+        status="ok",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def prefs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.profile is None:
+        result = _build_simple_result(
+            "Предпочтения не настроены.",
+            intent="command.prefs",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    profile = memory_manager.get_profile(user_id)
+    if profile is None:
+        result = _build_simple_result(
+            "Предпочтения не настроены.",
+            intent="command.prefs",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    lines = [
+        f"Язык: {profile.language}",
+        f"Подробность: {profile.verbosity}",
+        f"Режим фактов по умолчанию: {'вкл' if profile.facts_mode_default else 'выкл'}",
+        f"Контекст по умолчанию: {'вкл' if profile.context_default else 'выкл'}",
+        f"Часовой пояс: {profile.timezone}",
+        f"Формат даты: {profile.date_format}",
+        f"Сбор действий: {'вкл' if profile.actions_log_enabled else 'выкл'}",
+    ]
+    result = ensure_valid(
+        ok(
+            "Предпочтения:\n" + "\n".join(lines),
+            intent="command.prefs",
+            mode="local",
+            actions=[
+                Action(
+                    id="prefs.edit",
+                    label="Изменить",
+                    payload={"op": "menu_section", "section": "settings"},
+                ),
+                menu.menu_action(),
+            ],
+        )
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def actions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.actions is None:
+        result = _build_simple_result(
+            "История действий не настроена.",
+            intent="command.actions",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    entries = memory_manager.actions.list(user_id=user_id, limit=10)
+    result = _build_simple_result(
+        _format_actions_history(entries),
+        intent="command.actions",
         status="ok",
         mode="local",
     )
@@ -2820,8 +3147,11 @@ async def _handle_menu_section(
     profile = memory_manager.get_profile(user_id) if memory_manager else None
     language_label = profile.language if profile else "ru"
     timezone_label = profile.timezone if profile else "Europe/Vilnius"
+    verbosity_label = profile.verbosity if profile else "normal"
     facts_current = profile.facts_mode_default if profile else facts_enabled
     facts_label = "on" if facts_current else "off"
+    context_default_label = "вкл" if (profile and profile.context_default) else "выкл"
+    date_format_label = profile.date_format if profile else "dd.mm.yyyy"
     if section == "chat":
         actions = [
             Action(
@@ -2919,8 +3249,33 @@ async def _handle_menu_section(
                     label="📋 Список",
                     payload={"op": "reminder.list", "limit": 5},
                 ),
+                Action(
+                    id="utility_reminders.list_24h",
+                    label="📅 Ближайшие 24 часа",
+                    payload={"op": "reminder.list_24h"},
+                ),
                 menu.menu_action(),
             ],
+        )
+    if section == "documents":
+        document_store = _get_document_store(context)
+        actions_list = []
+        if document_store is not None:
+            active_session = document_store.get_active(user_id=user_id, chat_id=chat_id)
+            if active_session:
+                actions_list.append(
+                    Action(
+                        id="document.close",
+                        label="🗑 Закрыть документ",
+                        payload={"op": "document.close", "doc_id": active_session.doc_id},
+                    )
+                )
+        actions_list.append(menu.menu_action())
+        return ok(
+            "Отправь PDF, DOCX или фото с текстом — извлеку текст и предложу действия: резюме, вопросы по документу.",
+            intent="menu.documents",
+            mode="local",
+            actions=actions_list,
         )
     if section == "settings":
         caldav_status = "подключён" if _caldav_configured(context) else "не подключён"
@@ -2929,6 +3284,16 @@ async def _handle_menu_section(
             intent="menu.settings",
             mode="local",
             actions=[
+                Action(
+                    id="settings.memory_status",
+                    label="🧠 Память: Статус",
+                    payload={"op": "run_command", "command": "/memory_status", "args": ""},
+                ),
+                Action(
+                    id="settings.memory_clear",
+                    label="🧹 Очистить память",
+                    payload={"op": "settings.memory_clear"},
+                ),
                 Action(
                     id="settings.caldav",
                     label="📅 CalDAV → Подключить",
@@ -2945,6 +3310,11 @@ async def _handle_menu_section(
                     payload={"op": "settings.language"},
                 ),
                 Action(
+                    id="settings.verbosity",
+                    label=f"⚙️ Подробность ({verbosity_label})",
+                    payload={"op": "settings.verbosity"},
+                ),
+                Action(
                     id="settings.timezone",
                     label=f"⏱ Часовой пояс ({timezone_label})",
                     payload={"op": "settings.timezone"},
@@ -2953,6 +3323,16 @@ async def _handle_menu_section(
                     id="settings.facts",
                     label=f"📚 Режим фактов {facts_label}",
                     payload={"op": "settings.facts_toggle", "enabled": not facts_current},
+                ),
+                Action(
+                    id="settings.context_default",
+                    label=f"⚙️ Контекст по умолчанию ({context_default_label})",
+                    payload={"op": "settings.context_default_toggle", "enabled": not (profile and profile.context_default)},
+                ),
+                Action(
+                    id="settings.date_format",
+                    label=f"⚙️ Формат даты ({date_format_label})",
+                    payload={"op": "settings.date_format"},
                 ),
                 Action(
                     id="settings.profile",
@@ -3402,24 +3782,96 @@ async def _dispatch_action_payload(
             return refused("Профиль не настроен.", intent="settings.timezone", mode="local")
         memory_manager.update_profile(user_id, {"timezone": value})
         return ok("Часовой пояс обновлён.", intent="settings.timezone", mode="local", actions=[menu.menu_action()])
+    if op_value == "settings.memory_clear":
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is None or memory_manager.dialog is None:
+            return refused("Память не настроена.", intent="settings.memory_clear", mode="local")
+        await memory_manager.clear_dialog(user_id, chat_id)
+        if memory_manager.profile is not None:
+            memory_manager.clear_profile(user_id)
+        if memory_manager.actions is not None:
+            memory_manager.actions.clear(user_id)
+        return ok("Память очищена (диалог, предпочтения, действия).", intent="settings.memory_clear", mode="local", actions=[menu.menu_action()])
+    if op_value == "settings.verbosity":
+        return ok(
+            "Выбери подробность ответов:",
+            intent="settings.verbosity",
+            mode="local",
+            actions=_settings_verbosity_actions(),
+        )
+    if op_value == "settings.verbosity_pick":
+        value = payload.get("value")
+        if not isinstance(value, str) or value not in ("short", "normal", "detailed"):
+            return error("Некорректные данные действия.", intent="settings.verbosity", mode="local")
+        return ok(
+            f"Подробность: {value}. Подтвердить?",
+            intent="settings.verbosity.confirm",
+            mode="local",
+            actions=_settings_confirm_actions(op="settings.verbosity_confirm", value=value),
+        )
+    if op_value == "settings.verbosity_confirm":
+        value = payload.get("value")
+        if not isinstance(value, str) or value not in ("short", "normal", "detailed"):
+            return error("Некорректные данные действия.", intent="settings.verbosity", mode="local")
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is None or memory_manager.profile is None:
+            return refused("Профиль не настроен.", intent="settings.verbosity", mode="local")
+        memory_manager.update_profile(user_id, {"verbosity": value})
+        return ok("Подробность обновлена.", intent="settings.verbosity", mode="local", actions=[menu.menu_action()])
+    if op_value == "settings.context_default_toggle":
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            return error("Некорректные данные действия.", intent="settings.context_default", mode="local")
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is None or memory_manager.profile is None:
+            return refused("Профиль не настроен.", intent="settings.context_default", mode="local")
+        memory_manager.update_profile(user_id, {"context_default": enabled})
+        label = "вкл" if enabled else "выкл"
+        return ok(f"Контекст по умолчанию: {label}.", intent="settings.context_default", mode="local", actions=[menu.menu_action()])
+    if op_value == "settings.date_format":
+        return ok(
+            "Выбери формат даты:",
+            intent="settings.date_format",
+            mode="local",
+            actions=_settings_date_format_actions(),
+        )
+    if op_value == "settings.date_format_pick":
+        value = payload.get("value")
+        if not isinstance(value, str) or value not in ("dd.mm.yyyy", "yyyy-mm-dd"):
+            return error("Некорректные данные действия.", intent="settings.date_format", mode="local")
+        return ok(
+            f"Формат даты: {value}. Подтвердить?",
+            intent="settings.date_format.confirm",
+            mode="local",
+            actions=_settings_confirm_actions(op="settings.date_format_confirm", value=value),
+        )
+    if op_value == "settings.date_format_confirm":
+        value = payload.get("value")
+        if not isinstance(value, str) or value not in ("dd.mm.yyyy", "yyyy-mm-dd"):
+            return error("Некорректные данные действия.", intent="settings.date_format", mode="local")
+        memory_manager = _get_memory_manager(context)
+        if memory_manager is None or memory_manager.profile is None:
+            return refused("Профиль не настроен.", intent="settings.date_format", mode="local")
+        memory_manager.update_profile(user_id, {"date_format": value})
+        return ok("Формат даты обновлён.", intent="settings.date_format", mode="local", actions=[menu.menu_action()])
     if op_value == "document.summary":
         doc_id = payload.get("doc_id")
         if not isinstance(doc_id, str) or not doc_id:
-            return error("Некорректные данные действия.", intent="document.summary", mode="local")
+            return error("Некорректные данные действия.", intent="file.summary", mode="local")
         return await _handle_document_summary(context, user_id=user_id, chat_id=chat_id, doc_id=doc_id)
     if op_value == "document.qa":
         doc_id = payload.get("doc_id")
         if not isinstance(doc_id, str) or not doc_id:
-            return error("Некорректные данные действия.", intent="document.qa", mode="local")
+            return error("Некорректные данные действия.", intent="file.qa", mode="local")
         document_store = _get_document_store(context)
         if document_store is None:
-            return error("Хранилище документов недоступно.", intent="document.qa", mode="local")
+            return error("Хранилище документов недоступно.", intent="file.qa", mode="local")
         session = document_store.set_state(doc_id=doc_id, state="qa_mode")
         if session is None:
-            return refused("Сначала пришлите файл.", intent="document.qa", mode="local")
+            return refused("Сначала пришлите файл.", intent="file.qa", mode="local")
         return ok(
             "Задайте вопрос по документу.",
-            intent="document.qa.start",
+            intent="file.qa.start",
             mode="local",
             actions=_document_qa_actions(doc_id),
         )
@@ -3721,6 +4173,13 @@ async def _dispatch_action_payload(
             chat_id=chat_id,
             limit=max(1, limit_value),
             intent="utility_reminders.list",
+        )
+    if op_value == "reminder.list_24h":
+        return await _handle_reminders_list_24h(
+            context,
+            user_id=user_id,
+            chat_id=chat_id,
+            intent="utility_reminders.list_24h",
         )
     if op_value == "reminder.delete_confirm":
         reminder_id = payload.get("reminder_id") or payload.get("id")
@@ -4110,6 +4569,22 @@ async def _handle_reminders_list(
     )
 
 
+async def _handle_reminders_list_24h(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    intent: str = "utility_reminders.list_24h",
+) -> OrchestratorResult:
+    now = datetime.now(tz=calendar_store.BOT_TZ)
+    return await _build_reminders_next_24h_result(
+        now,
+        user_id=user_id,
+        chat_id=chat_id,
+        intent=intent,
+    )
+
+
 async def _handle_reminder_snooze(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -4146,12 +4621,18 @@ async def _handle_reminder_snooze(
                 intent="utility_reminders.snooze",
                 mode="local",
             )
-    LOGGER.info(
-        "Reminder snoozed: reminder_id=%s user_id=%s old_trigger_at=%s new_trigger_at=%s",
-        reminder_id,
-        user_id,
-        reminder.trigger_at.isoformat(),
-        updated.trigger_at.isoformat(),
+    request_context = get_request_context(context)
+    log_event(
+        LOGGER,
+        request_context,
+        component="reminder",
+        event="snoozed",
+        status="ok",
+        reminder_id=reminder_id,
+        user_id=user_id,
+        minutes=offset,
+        old_trigger_at=reminder.trigger_at.isoformat(),
+        new_trigger_at=updated.trigger_at.isoformat(),
     )
     when_label = updated.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
     return ok(
@@ -5315,10 +5796,12 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             refused("Не удалось извлечь текст.", intent="document.extract.empty", mode="local"),
         )
         return
+    # Ограничиваем размер текста (200-400k символов)
+    limited_text, text_meta = _limit_document_text(extracted.text, max_chars=300000)
     text_dir = settings.document_texts_path / str(user_id)
     text_dir.mkdir(parents=True, exist_ok=True)
     text_path = text_dir / f"{file_id}.txt"
-    text_path.write_text(extracted.text, encoding="utf-8")
+    text_path.write_text(limited_text, encoding="utf-8")
     session = document_store.create_session(
         user_id=user_id,
         chat_id=chat_id,
@@ -5326,11 +5809,27 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         file_type=file_type,
         text_path=str(text_path),
     )
+    # Формируем сообщение с метриками
+    chars_count = len(limited_text)
+    pages_count = extracted.metadata.get("pages", 0)
+    if pages_count > 0:
+        metrics_text = f"Текст извлечён: {chars_count:,} символов, {pages_count} страниц"
+    else:
+        metrics_text = f"Текст извлечён: {chars_count:,} символов"
+    if text_meta.get("truncated"):
+        metrics_text += f"\n(текст обрезан с {text_meta['original_length']:,} символов)"
     result = ok(
-        "Документ обработан. Что сделать?",
-        intent="document.processed",
+        metrics_text,
+        intent="file.processed",
         mode="local",
         actions=_document_actions(session.doc_id),
+        debug={
+            "doc_id": session.doc_id,
+            "file_type": file_type,
+            "chars": chars_count,
+            "pages": pages_count,
+            "text_meta": text_meta,
+        },
     )
     await send_result(update, context, result)
 

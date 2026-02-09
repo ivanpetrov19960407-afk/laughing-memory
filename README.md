@@ -70,13 +70,24 @@ OCR для изображений использует `tesseract`. Если о�
 - Перед отправкой в UI применяется `ensure_valid`.
 
 ## Запуск
+
+### Локально (python-telegram-bot)
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env
+# Заполните BOT_TOKEN и ALLOWED_USER_IDS в .env
 python bot.py
 ```
+
+Или через Makefile: `make venv`, `make install`, `make run`.
+
+### Логирование (LOG_LEVEL)
+Уровень логирования задаётся переменной окружения `LOG_LEVEL` (значения: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`). По умолчанию — `INFO`. Пример: `LOG_LEVEL=DEBUG python bot.py`.
+
+### Pre-commit и линтинг
+Установка хуков: `pip install -r requirements-dev.txt`, затем `pre-commit install`. Запуск по всем файлам: `pre-commit run -a` или `make lint`. Тесты: `pytest` или `make test`.
 
 ## Переменные окружения
 См. `.env.example` — в файле оставлены только актуальные переменные.
@@ -106,6 +117,7 @@ make test      # pytest -q
 make lint      # pre-commit run -a (если установлен pre-commit)
 ```
 Или напрямую: `pytest`, `pre-commit run --all-files`.
+Или `make test`.
 
 ## Поиск и строгий facts-mode
 - `/search` без аргументов возвращает отказ с подсказкой: `Использование: /search <запрос>`.

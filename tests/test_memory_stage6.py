@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.core.dialog_memory import DialogMemory
 from app.core.memory_layers import build_memory_layers_context
-from app.core.memory_manager import MemoryManager, UserProfileMemory
+from app.core.memory_manager import MemoryManager, UserActionsLog, UserProfileMemory
 from app.infra.actions_log_store import ActionsLogStore
 from app.infra.request_context import RequestContext
 from app.infra.user_profile_store import UserProfileStore
@@ -111,3 +111,70 @@ def test_memory_clear_does_not_touch_profile(tmp_path) -> None:
     assert profile is not None
     assert profile.language == "en"
     assert profile.timezone == "Europe/London"
+
+
+def test_get_user_prefs_and_set_user_pref(tmp_path) -> None:
+    profile_store = UserProfileStore(tmp_path / "profiles.db")
+    profile_store.update(1, {"language": "en", "verbosity": "short", "context_default": True})
+    memory_manager = MemoryManager(
+        dialog=None,
+        profile=UserProfileMemory(profile_store),
+        actions=None,
+    )
+    prefs = memory_manager.get_user_prefs(1)
+    assert prefs.get("language") == "en"
+    assert prefs.get("verbosity") == "short"
+    assert prefs.get("context_default") is True
+
+    memory_manager.set_user_pref(1, "verbosity", "detailed")
+    prefs2 = memory_manager.get_user_prefs(1)
+    assert prefs2.get("verbosity") == "detailed"
+
+
+def test_actions_log_enabled_default_and_toggle(tmp_path) -> None:
+    profile_store = UserProfileStore(tmp_path / "profiles.db")
+    actions_store = ActionsLogStore(tmp_path / "actions.db", ttl_days=60)
+    memory_manager = MemoryManager(
+        dialog=None,
+        profile=UserProfileMemory(profile_store),
+        actions=UserActionsLog(actions_store),
+    )
+    assert memory_manager.actions_log_enabled(1) is True
+    memory_manager.set_actions_log_enabled(1, False)
+    assert memory_manager.actions_log_enabled(1) is False
+    memory_manager.set_actions_log_enabled(1, True)
+    assert memory_manager.actions_log_enabled(1) is True
+
+
+def test_actions_log_list_recent_with_since(tmp_path) -> None:
+    store = ActionsLogStore(tmp_path / "actions.db", ttl_days=60)
+    store.append(
+        user_id=1,
+        action_type="reminder.create",
+        payload={"summary": "x"},
+        ts=datetime(2024, 6, 1, tzinfo=timezone.utc),
+    )
+    store.append(
+        user_id=1,
+        action_type="calendar.event_added",
+        payload={"summary": "y"},
+        ts=datetime(2024, 6, 15, tzinfo=timezone.utc),
+    )
+    since = datetime(2024, 6, 10, tzinfo=timezone.utc)
+    entries = store.list(user_id=1, limit=10, since=since)
+    assert len(entries) == 1
+    assert entries[0].action_type == "calendar.event_added"
+
+
+def test_actions_log_ttl_cleanup(tmp_path) -> None:
+    store = ActionsLogStore(tmp_path / "actions.db", ttl_days=2)
+    store.append(
+        user_id=1,
+        action_type="reminder.create",
+        payload={"summary": "x"},
+        ts=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    deleted = store.cleanup_old(ttl_days=2)
+    assert isinstance(deleted, int)
+    entries = store.list_recent(user_id=1, limit=10)
+    assert isinstance(entries, list)

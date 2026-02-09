@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +12,13 @@ from app.core.actions_log import ActionLogEntry
 LOGGER = logging.getLogger(__name__)
 
 ACTION_LOG_SCHEMA_VERSION = 1
+DEFAULT_TTL_DAYS = 60
 
 
 class ActionsLogStore:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, ttl_days: int = DEFAULT_TTL_DAYS) -> None:
         self._db_path = db_path
+        self._ttl_days = max(1, min(365, ttl_days))
         self._connection = sqlite3.connect(db_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._ensure_schema()
@@ -55,7 +57,15 @@ class ActionsLogStore:
         ts: datetime | None = None,
         correlation_id: str | None = None,
     ) -> ActionLogEntry:
-        timestamp = (ts or datetime.now(timezone.utc)).isoformat()
+        if ts is None:
+            ts = datetime.now(timezone.utc)
+        elif ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        else:
+            ts = ts.astimezone(timezone.utc)
+        timestamp = ts.isoformat()
+        if not isinstance(payload, dict):
+            payload = {}
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         cursor = self._connection.execute(
             """
@@ -69,11 +79,60 @@ class ActionsLogStore:
         return ActionLogEntry(
             id=entry_id,
             user_id=user_id,
-            ts=_parse_datetime(timestamp),
+            ts=ts,
             action_type=action_type,
             payload=payload,
             correlation_id=correlation_id,
         )
+
+    def list_recent(
+        self,
+        *,
+        user_id: int,
+        limit: int = 10,
+        since: datetime | None = None,
+    ) -> list[ActionLogEntry]:
+        if limit <= 0:
+            return []
+        params: list[object] = [user_id]
+        sql = """
+            SELECT id, user_id, ts, action_type, payload, correlation_id
+            FROM user_actions
+            WHERE user_id = ?
+        """
+        if since is not None:
+            sql += " AND ts >= ?"
+            params.append(since.astimezone(timezone.utc).isoformat())
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+        params.append(limit)
+        cursor = self._connection.execute(sql, params)
+        rows = cursor.fetchall()
+        return [_row_to_entry(row) for row in rows]
+
+    def _cleanup_old_lazy(self) -> None:
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=self._ttl_days)).isoformat()
+            cursor = self._connection.execute(
+                "DELETE FROM user_actions WHERE ts < ?",
+                (cutoff,),
+            )
+            self._connection.commit()
+            if cursor.rowcount and cursor.rowcount > 0:
+                LOGGER.debug("Actions log TTL cleanup: removed %s rows", cursor.rowcount)
+        except sqlite3.Error:
+            LOGGER.exception("Actions log TTL cleanup failed")
+            self._connection.rollback()
+
+    def cleanup_old(self, *, ttl_days: int | None = None) -> int:
+        days = ttl_days if ttl_days is not None else self._ttl_days
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+        cursor = self._connection.execute(
+            "DELETE FROM user_actions WHERE ts < ?",
+            (cutoff,),
+        )
+        deleted = cursor.rowcount or 0
+        self._connection.commit()
+        return deleted
 
     def search(
         self,
@@ -119,6 +178,35 @@ class ActionsLogStore:
         limit: int = 10,
     ) -> list[ActionLogEntry]:
         return self.search(user_id=user_id, query=None, since=since, limit=limit)
+
+    def list(
+        self,
+        *,
+        user_id: int,
+        limit: int = 10,
+        since: datetime | None = None,
+    ) -> list[ActionLogEntry]:
+        if limit <= 0:
+            return []
+        params: list[object] = [user_id]
+        sql = """
+            SELECT id, user_id, ts, action_type, payload, correlation_id
+            FROM user_actions
+            WHERE user_id = ?
+        """
+        if since is not None:
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=timezone.utc)
+            else:
+                since = since.astimezone(timezone.utc)
+            since_iso = since.isoformat()
+            sql += " AND ts >= ?"
+            params.append(since_iso)
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+        params.append(limit)
+        cursor = self._connection.execute(sql, params)
+        rows = cursor.fetchall()
+        return [_row_to_entry(row) for row in rows]
 
     def clear(self, *, user_id: int) -> None:
         self._connection.execute("DELETE FROM user_actions WHERE user_id = ?", (user_id,))

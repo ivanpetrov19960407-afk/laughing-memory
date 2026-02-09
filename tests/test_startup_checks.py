@@ -42,6 +42,7 @@ def _build_settings(tmp_path: Path) -> Settings:
         reminder_max_future_days=365,
         action_ttl_seconds=900,
         action_max_size=2000,
+        actions_log_ttl_days=30,
         enable_wizards=True,
         enable_menu=True,
         strict_no_pseudo_sources=True,

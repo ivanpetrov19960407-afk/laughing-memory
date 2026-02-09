@@ -1,3 +1,5 @@
+"""Application settings from environment: paths, API keys, feature flags, limits."""
+
 from __future__ import annotations
 
 import logging
@@ -6,6 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
+
+_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+DEFAULT_LOG_LEVEL = logging.INFO
 
 DEFAULT_CONFIG_PATH = Path("config/orchestrator.json")
 DEFAULT_DB_PATH = Path("data/bot.db")
@@ -18,6 +23,8 @@ DEFAULT_DOCUMENT_SESSIONS_PATH = Path("data/document_sessions.json")
 
 @dataclass(frozen=True)
 class Settings:
+    """Immutable app settings loaded from env (BOT_TOKEN, paths, LLM, CalDAV, limits)."""
+
     bot_token: str
     orchestrator_config_path: Path
     db_path: Path
@@ -46,6 +53,7 @@ class Settings:
     reminder_max_future_days: int
     action_ttl_seconds: int
     action_max_size: int
+    actions_log_ttl_days: int
     enable_wizards: bool
     enable_menu: bool
     strict_no_pseudo_sources: bool
@@ -85,6 +93,23 @@ def get_log_level(raw_env: dict[str, str] | None = None) -> int:
     if value:
         LOGGER.warning("Invalid LOG_LEVEL=%r; using INFO", value)
     return logging.INFO
+
+
+def get_log_level(
+    raw_env: dict[str, str] | None = None,
+    logger: logging.Logger | None = None,
+) -> int:
+    """Resolve logging level from LOG_LEVEL env. Default INFO; invalid values fallback with optional warning."""
+    source = raw_env if raw_env is not None else os.environ
+    value = source.get("LOG_LEVEL")
+    if not value or not value.strip():
+        return DEFAULT_LOG_LEVEL
+    name = value.strip().upper()
+    if name not in _VALID_LOG_LEVELS:
+        log = logger or LOGGER
+        log.warning("Invalid LOG_LEVEL=%r, using default INFO", value)
+        return DEFAULT_LOG_LEVEL
+    return getattr(logging, name)
 
 
 def resolve_env_label(raw_env: dict[str, str] | None = None) -> str:
@@ -135,6 +160,7 @@ def validate_startup_env(
 
 
 def load_settings() -> Settings:
+    """Load Settings from environment; raises RuntimeError if BOT_TOKEN missing."""
     _load_dotenv()
 
     token = os.getenv("BOT_TOKEN")
@@ -179,6 +205,7 @@ def load_settings() -> Settings:
     )
     action_ttl_seconds = _parse_int_with_default(os.getenv("ACTION_TTL_SECONDS"), 900)
     action_max_size = _parse_int_with_default(os.getenv("ACTION_MAX_SIZE"), 2000)
+    actions_log_ttl_days = _parse_int_with_default(os.getenv("ACTIONS_LOG_TTL_DAYS"), 30)
     enable_wizards = _parse_optional_bool(os.getenv("ENABLE_WIZARDS"))
     if enable_wizards is None:
         enable_wizards = True
@@ -238,6 +265,7 @@ def load_settings() -> Settings:
         reminder_max_future_days=reminder_max_future_days,
         action_ttl_seconds=action_ttl_seconds,
         action_max_size=action_max_size,
+        actions_log_ttl_days=actions_log_ttl_days,
         enable_wizards=enable_wizards,
         enable_menu=enable_menu,
         strict_no_pseudo_sources=strict_no_pseudo_sources,
