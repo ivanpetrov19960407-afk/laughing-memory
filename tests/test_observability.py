@@ -329,7 +329,7 @@ def test_metrics_collector_graceful_degradation() -> None:
     assert isinstance(metrics_text, str)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_http_server_healthz_endpoint() -> None:
     """Test HTTP server /healthz endpoint."""
     try:
@@ -373,7 +373,7 @@ async def test_http_server_healthz_endpoint() -> None:
         await server.stop()
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_http_server_readyz_endpoint() -> None:
     """Test HTTP server /readyz endpoint."""
     try:
@@ -414,7 +414,7 @@ async def test_http_server_readyz_endpoint() -> None:
         await server.stop()
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_http_server_metrics_endpoint() -> None:
     """Test HTTP server /metrics endpoint."""
     try:
