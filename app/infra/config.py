@@ -1,3 +1,5 @@
+"""Application settings from environment: paths, API keys, feature flags, limits."""
+
 from __future__ import annotations
 
 import logging
@@ -18,6 +20,8 @@ DEFAULT_DOCUMENT_SESSIONS_PATH = Path("data/document_sessions.json")
 
 @dataclass(frozen=True)
 class Settings:
+    """Immutable app settings loaded from env (BOT_TOKEN, paths, LLM, CalDAV, limits)."""
+
     bot_token: str
     orchestrator_config_path: Path
     db_path: Path
@@ -120,6 +124,7 @@ def validate_startup_env(
 
 
 def load_settings() -> Settings:
+    """Load Settings from environment; raises RuntimeError if BOT_TOKEN missing."""
     _load_dotenv()
 
     token = os.getenv("BOT_TOKEN")
