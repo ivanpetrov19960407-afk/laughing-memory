@@ -2,7 +2,7 @@
 
 Single entry point: configure_logging() sets root logger level, format,
 optional file handler with rotation, and suppresses noisy third-party loggers.
-LOG_LEVEL and LOG_FILE are read from environment; no secrets are logged.
+LOG_LEVEL and LOG_FILE (or LOG_TO_FILE + LOG_FILE_PATH) are read from environment; no secrets are logged.
 """
 
 from __future__ import annotations
@@ -27,10 +27,21 @@ def _get_level() -> int:
 
 
 def _get_log_file() -> str | None:
+    # Support legacy LOG_FILE env var
     path = os.environ.get("LOG_FILE", "").strip()
-    if not path:
-        return None
-    return path
+    if path:
+        return path
+    
+    # Support new optional file logging: LOG_TO_FILE=1 and LOG_FILE_PATH=...
+    log_to_file = os.environ.get("LOG_TO_FILE", "").strip().lower()
+    if log_to_file in ("1", "true", "yes", "on"):
+        log_file_path = os.environ.get("LOG_FILE_PATH", "").strip()
+        if log_file_path:
+            return log_file_path
+        # Default path if LOG_TO_FILE=1 but LOG_FILE_PATH not set
+        return "data/bot.log"
+    
+    return None
 
 
 def configure_logging(*, level: int | None = None, log_file: str | None = None) -> None:
@@ -41,7 +52,8 @@ def configure_logging(*, level: int | None = None, log_file: str | None = None) 
 
     Args:
         level: Log level (e.g. logging.INFO). If None, taken from LOG_LEVEL env.
-        log_file: If set, log to this file with rotation. If None, from LOG_FILE env.
+        log_file: If set, log to this file with rotation. If None, from LOG_FILE or
+            LOG_TO_FILE+LOG_FILE_PATH env vars.
     """
     if level is None:
         level = _get_level()

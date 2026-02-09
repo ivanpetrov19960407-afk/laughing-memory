@@ -91,19 +91,42 @@ python bot_aiogram.py
 
 ### Dev: Makefile, тесты, pre-commit
 ```bash
+make venv      # создать .venv (если нет)
 make install   # зависимости + pre-commit hook
-make test      # pytest
-make lint      # ruff check
-make format    # ruff format + автофикс
+make test      # pytest -q
+make test-fast # pytest -q -k "not integration" (быстрые тесты)
+make lint      # ruff check + format check
+make format    # ruff check --fix + format
 make run       # python bot.py
 make precommit # pre-commit run -a
 make clean     # кэши, __pycache__
 ```
 
+#### Pre-commit установка
+Pre-commit проверяет код перед коммитом (форматирование, линтинг, секреты):
+```bash
+# Установка хуков (выполняется автоматически через make install)
+pip install pre-commit
+pre-commit install
+
+# Ручной запуск всех хуков
+pre-commit run -a
+```
+
+Pre-commit проверяет:
+- Форматирование (ruff format)
+- Линтинг (ruff check)
+- YAML/JSON/TOML синтаксис
+- Трейлинг пробелы и EOF
+- Большие файлы (>500KB)
+- Секреты в коде (detect-secrets)
+
 ### Логирование
-- Уровень: `LOG_LEVEL` (по умолчанию `INFO`).
-- Файл (опционально): `LOG_FILE` — путь к файлу с ротацией (5 MB, 3 бэкапа).
-- Секреты в логах не выводятся (обработка в request_context).
+- Уровень: `LOG_LEVEL` (по умолчанию `INFO`). Поддерживаются: `DEBUG`, `INFO`, `WARNING`, `ERROR`.
+- Файл (опционально):
+  - `LOG_FILE` — путь к файлу с ротацией (5 MB, 3 бэкапа) — legacy способ
+  - `LOG_TO_FILE=1` + `LOG_FILE_PATH=...` — новый способ (если `LOG_FILE_PATH` не задан, используется `data/bot.log`)
+- Секреты в логах не выводятся (обработка в request_context через `safe_log_payload`).
 
 ### Docker
 - **Сборка:** `docker build -t secretary-bot:latest .`
