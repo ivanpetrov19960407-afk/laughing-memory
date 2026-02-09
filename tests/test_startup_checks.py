@@ -58,7 +58,13 @@ def _build_settings(tmp_path: Path) -> Settings:
         caldav_username=None,
         caldav_password=None,
         caldav_calendar_name=None,
-        actions_log_ttl_days=30,
+        obs_http_enabled=False,
+        obs_http_host="127.0.0.1",
+        obs_http_port=8080,
+        otel_enabled=False,
+        otel_exporter="console",
+        otel_otlp_endpoint=None,
+        systemd_watchdog_enabled=False,
     )
 
 
