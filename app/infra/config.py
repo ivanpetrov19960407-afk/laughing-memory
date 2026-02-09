@@ -69,7 +69,6 @@ class Settings:
     caldav_username: str | None
     caldav_password: str | None
     caldav_calendar_name: str | None
-    actions_log_ttl_days: int
 
 
 @dataclass(frozen=True)
@@ -191,11 +190,7 @@ def load_settings() -> Settings:
     )
     action_ttl_seconds = _parse_int_with_default(os.getenv("ACTION_TTL_SECONDS"), 900)
     action_max_size = _parse_int_with_default(os.getenv("ACTION_MAX_SIZE"), 2000)
-    actions_log_ttl_days = _parse_int_with_default(os.getenv("ACTIONS_LOG_TTL_DAYS"), 60)
-    if actions_log_ttl_days < 30:
-        actions_log_ttl_days = 30
-    elif actions_log_ttl_days > 90:
-        actions_log_ttl_days = 90
+    actions_log_ttl_days = _parse_int_with_default(os.getenv("ACTIONS_LOG_TTL_DAYS"), 30)
     enable_wizards = _parse_optional_bool(os.getenv("ENABLE_WIZARDS"))
     if enable_wizards is None:
         enable_wizards = True
@@ -225,7 +220,6 @@ def load_settings() -> Settings:
     caldav_username = os.getenv("CALDAV_USERNAME") or None
     caldav_password = os.getenv("CALDAV_PASSWORD") or None
     caldav_calendar_name = os.getenv("CALDAV_CALENDAR_NAME") or None
-    actions_log_ttl_days = _parse_int_with_default(os.getenv("ACTIONS_LOG_TTL_DAYS"), 30)
     return Settings(
         bot_token=token,
         orchestrator_config_path=config_path,
@@ -271,7 +265,6 @@ def load_settings() -> Settings:
         caldav_username=caldav_username,
         caldav_password=caldav_password,
         caldav_calendar_name=caldav_calendar_name,
-        actions_log_ttl_days=actions_log_ttl_days,
     )
 
 

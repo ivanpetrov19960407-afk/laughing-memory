@@ -165,8 +165,6 @@ class ActionsLogStore:
         rows = cursor.fetchall()
         return [_row_to_entry(row) for row in rows]
 
-<<<<<<< Current (Your changes)
-=======
     def list_recent(self, *, user_id: int, limit: int = 10) -> list[ActionLogEntry]:
         return self.search(user_id=user_id, query=None, limit=limit)
 
@@ -199,7 +197,6 @@ class ActionsLogStore:
         rows = cursor.fetchall()
         return [_row_to_entry(row) for row in rows]
 
->>>>>>> Incoming (Background Agent changes)
     def clear(self, *, user_id: int) -> None:
         self._connection.execute("DELETE FROM user_actions WHERE user_id = ?", (user_id,))
         self._connection.commit()
