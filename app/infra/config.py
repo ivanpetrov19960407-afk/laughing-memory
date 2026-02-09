@@ -76,6 +76,7 @@ class Settings:
     otel_exporter: str
     otel_otlp_endpoint: str | None
     systemd_watchdog_enabled: bool
+    actions_log_ttl_days: int = 30
 
 
 @dataclass(frozen=True)
@@ -234,6 +235,7 @@ def load_settings() -> Settings:
     otel_exporter = os.getenv("OTEL_EXPORTER", "console").strip().lower()
     otel_otlp_endpoint = os.getenv("OTEL_OTLP_ENDPOINT") or None
     systemd_watchdog_enabled = _parse_optional_bool(os.getenv("SYSTEMD_WATCHDOG")) or False
+    actions_log_ttl_days = _parse_int_with_default(os.getenv("ACTIONS_LOG_TTL_DAYS"), 30)
     return Settings(
         bot_token=token,
         orchestrator_config_path=config_path,
@@ -286,6 +288,7 @@ def load_settings() -> Settings:
         otel_exporter=otel_exporter,
         otel_otlp_endpoint=otel_otlp_endpoint,
         systemd_watchdog_enabled=systemd_watchdog_enabled,
+        actions_log_ttl_days=actions_log_ttl_days,
     )
 
 

@@ -58,6 +58,7 @@ def _build_settings(tmp_path: Path) -> Settings:
         caldav_username=None,
         caldav_password=None,
         caldav_calendar_name=None,
+        actions_log_ttl_days=30,
     )
 
 
