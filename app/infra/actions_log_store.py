@@ -68,7 +68,6 @@ class ActionsLogStore:
         )
         self._connection.commit()
         entry_id = cursor.lastrowid if cursor.lastrowid else 0
-        self._cleanup_old_lazy()
         return ActionLogEntry(
             id=entry_id,
             user_id=user_id,
