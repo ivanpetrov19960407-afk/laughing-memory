@@ -54,5 +54,5 @@ def select_relevant_chunks(
 
 
 def _tokenize(text: str) -> list[str]:
-    raw_tokens = re.findall(r"[\\w\\-]+", text.lower())
+    raw_tokens = re.findall(r"\w+", text.lower())
     return [token for token in raw_tokens if len(token) >= 3]

@@ -919,7 +919,7 @@ def _document_actions(doc_id: str) -> list[Action]:
     return [
         Action(
             id="document.summary",
-            label="📝 Сделать резюме",
+            label="📌 Сделать резюме",
             payload={"op": "document.summary", "doc_id": doc_id},
         ),
         Action(
@@ -991,6 +991,20 @@ def _trim_document_text(text: str, *, max_chars: int = 8000) -> str:
     return text[:max_chars].rsplit("\n", 1)[0].strip() or text[:max_chars]
 
 
+def _limit_document_text(text: str, *, max_chars: int = 300000) -> tuple[str, dict[str, Any]]:
+    """Ограничивает размер текста документа и возвращает обрезанный текст + метаданные."""
+    original_length = len(text)
+    if original_length <= max_chars:
+        return text, {"original_length": original_length, "truncated": False}
+    truncated_text = text[:max_chars].rsplit("\n", 1)[0].strip() or text[:max_chars]
+    return truncated_text, {
+        "original_length": original_length,
+        "truncated": True,
+        "truncated_length": len(truncated_text),
+        "max_chars": max_chars,
+    }
+
+
 async def _handle_document_summary(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -998,44 +1012,84 @@ async def _handle_document_summary(
     chat_id: int,
     doc_id: str,
 ) -> OrchestratorResult:
+    from app.core.document_qa import split_text
+
     document_store = _get_document_store(context)
     if document_store is None:
-        return error("Хранилище документов недоступно.", intent="document.summary", mode="local")
+        return error("Хранилище документов недоступно.", intent="file.summary", mode="local")
     session = document_store.get_session(doc_id) or document_store.get_active(user_id=user_id, chat_id=chat_id)
     if session is None:
-        return refused("Сначала пришлите файл.", intent="document.summary", mode="local")
+        return refused("Сначала пришлите файл.", intent="file.summary", mode="local")
     text = _load_document_text(session.text_path)
     if not text.strip():
-        return error("Текст документа не найден.", intent="document.summary", mode="local")
+        return error("Текст документа не найден.", intent="file.summary", mode="local")
     llm_client = _get_llm_client(context)
     model = _resolve_llm_model(context)
     if llm_client is None or model is None:
-        return error("LLM не настроен.", intent="document.summary", mode="local")
+        return error("LLM не настроен.", intent="file.summary", mode="local")
     orchestrator = _get_orchestrator(context)
     facts_only = orchestrator.is_facts_only(user_id)
+    # Используем чанки: первые N + 1-2 из конца
+    chunks = split_text(text, chunk_size=1000, overlap=200)
+    if not chunks:
+        return error("Не удалось разбить документ на части.", intent="file.summary", mode="local")
+    # Берём первые 6-8 чанков и последние 1-2
+    first_chunks = chunks[:8]
+    last_chunks = chunks[-2:] if len(chunks) > 2 else []
+    # Убираем дубликаты
+    selected_chunks = list(dict.fromkeys(first_chunks + last_chunks))
+    # Ограничиваем общий размер контекста
+    context_parts: list[str] = []
+    total_chars = 0
+    max_context_chars = 12000
+    for chunk in selected_chunks:
+        if total_chars + len(chunk) > max_context_chars:
+            break
+        context_parts.append(chunk)
+        total_chars += len(chunk)
+    if not context_parts:
+        context_parts = [text[:max_context_chars]]
+    context_text = "\n\n---\n\n".join(context_parts)
     system_prompt = (
-        "Ты помощник. Сделай краткое тезисное резюме по документу. "
+        "Ты помощник. Сделай краткое структурированное резюме по документу (5-12 пунктов). "
+        "Отдельно выдели блок 'Задачи/дедлайны', если они обнаружены. "
         "Используй только текст документа."
     )
     if facts_only:
         system_prompt += " Не добавляй домыслы. Если данных нет, так и скажи."
-    trimmed_text = _trim_document_text(text)
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Текст документа:\n{trimmed_text}\n\nСделай резюме."},
+        {"role": "user", "content": f"Текст документа:\n{context_text}\n\nСделай резюме."},
     ]
     try:
         response = await llm_client.generate_text(model=model, messages=messages)
         response = ensure_plain_text(response)
     except Exception:
-        return error("Не удалось получить резюме.", intent="document.summary", mode="local")
+        return error("Не удалось получить резюме.", intent="file.summary", mode="local")
     if not response.strip():
-        return error("Не удалось получить резюме.", intent="document.summary", mode="local")
+        return error("Не удалось получить резюме.", intent="file.summary", mode="local")
     return ok(
         response.strip(),
-        intent="document.summary",
-        mode="local",
-        actions=_document_actions(session.doc_id),
+        intent="file.summary",
+        mode="llm",
+        actions=[
+            Action(
+                id="document.qa",
+                label="❓ Вопрос по документу",
+                payload={"op": "document.qa", "doc_id": session.doc_id},
+            ),
+            Action(
+                id="document.close",
+                label="🗑 Закрыть документ",
+                payload={"op": "document.close", "doc_id": session.doc_id},
+            ),
+        ],
+        debug={
+            "doc_id": session.doc_id,
+            "chunks_used": len(context_parts),
+            "chars_in_context": total_chars,
+            "total_chunks": len(chunks),
+        },
     )
 
 
@@ -1048,29 +1102,30 @@ async def _handle_document_question(
 ) -> OrchestratorResult:
     document_store = _get_document_store(context)
     if document_store is None:
-        return error("Хранилище документов недоступно.", intent="document.qa", mode="local")
+        return error("Хранилище документов недоступно.", intent="file.qa", mode="local")
     session = document_store.get_active(user_id=user_id, chat_id=chat_id)
     if session is None or session.state != "qa_mode":
-        return refused("Сначала пришлите файл.", intent="document.qa", mode="local")
+        return refused("Сначала пришлите файл.", intent="file.qa", mode="local")
     text = _load_document_text(session.text_path)
     if not text.strip():
-        return error("Текст документа не найден.", intent="document.qa", mode="local")
+        return error("Текст документа не найден.", intent="file.qa", mode="local")
     llm_client = _get_llm_client(context)
     model = _resolve_llm_model(context)
     if llm_client is None or model is None:
-        return error("LLM не настроен.", intent="document.qa", mode="local")
+        return error("LLM не настроен.", intent="file.qa", mode="local")
     orchestrator = _get_orchestrator(context)
     facts_only = orchestrator.is_facts_only(user_id)
-    chunks = select_relevant_chunks(text, question, top_k=4)
+    chunks = select_relevant_chunks(text, question, top_k=6, chunk_size=1000, overlap=200)
     if not chunks:
-        return refused("В документе нет ответа.", intent="document.qa", mode="local")
+        return refused("В документе нет ответа.", intent="file.qa", mode="local")
     system_prompt = (
-        "Отвечай только на основе предоставленных фрагментов документа. "
-        "Если ответа нет во фрагментах, скажи: \"В документе нет ответа\"."
+        "Отвечай строго по контексту из документа. "
+        "Если ответа нет в предоставленных фрагментах, скажи: \"В документе нет ответа\"."
     )
     if facts_only:
         system_prompt += " Никаких домыслов, только факты из текста."
-    context_text = "\n\n".join(f"Фрагмент {idx + 1}:\n{chunk}" for idx, chunk in enumerate(chunks))
+    context_text = "\n\n".join(f"[Chunk {idx + 1}]\n{chunk}" for idx, chunk in enumerate(chunks))
+    chars_in_context = sum(len(chunk) for chunk in chunks)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"Вопрос: {question}\n\n{context_text}"},
@@ -1079,14 +1134,19 @@ async def _handle_document_question(
         response = await llm_client.generate_text(model=model, messages=messages)
         response = ensure_plain_text(response)
     except Exception:
-        return error("Не удалось получить ответ.", intent="document.qa", mode="local")
+        return error("Не удалось получить ответ.", intent="file.qa", mode="local")
     if not response.strip():
-        return error("Не удалось получить ответ.", intent="document.qa", mode="local")
+        return error("Не удалось получить ответ.", intent="file.qa", mode="local")
     return ok(
         response.strip(),
-        intent="document.qa",
-        mode="local",
+        intent="file.qa",
+        mode="llm",
         actions=_document_qa_actions(session.doc_id),
+        debug={
+            "doc_id": session.doc_id,
+            "chunks_used": len(chunks),
+            "chars_in_context": chars_in_context,
+        },
     )
 
 
@@ -2997,6 +3057,26 @@ async def _handle_menu_section(
                 menu.menu_action(),
             ],
         )
+    if section == "documents":
+        document_store = _get_document_store(context)
+        actions_list = []
+        if document_store is not None:
+            active_session = document_store.get_active(user_id=user_id, chat_id=chat_id)
+            if active_session:
+                actions_list.append(
+                    Action(
+                        id="document.close",
+                        label="🗑 Закрыть документ",
+                        payload={"op": "document.close", "doc_id": active_session.doc_id},
+                    )
+                )
+        actions_list.append(menu.menu_action())
+        return ok(
+            "Отправь PDF, DOCX или фото с текстом — извлеку текст и предложу действия: резюме, вопросы по документу.",
+            intent="menu.documents",
+            mode="local",
+            actions=actions_list,
+        )
     if section == "settings":
         caldav_status = "подключён" if _caldav_configured(context) else "не подключён"
         return ok(
@@ -3480,21 +3560,21 @@ async def _dispatch_action_payload(
     if op_value == "document.summary":
         doc_id = payload.get("doc_id")
         if not isinstance(doc_id, str) or not doc_id:
-            return error("Некорректные данные действия.", intent="document.summary", mode="local")
+            return error("Некорректные данные действия.", intent="file.summary", mode="local")
         return await _handle_document_summary(context, user_id=user_id, chat_id=chat_id, doc_id=doc_id)
     if op_value == "document.qa":
         doc_id = payload.get("doc_id")
         if not isinstance(doc_id, str) or not doc_id:
-            return error("Некорректные данные действия.", intent="document.qa", mode="local")
+            return error("Некорректные данные действия.", intent="file.qa", mode="local")
         document_store = _get_document_store(context)
         if document_store is None:
-            return error("Хранилище документов недоступно.", intent="document.qa", mode="local")
+            return error("Хранилище документов недоступно.", intent="file.qa", mode="local")
         session = document_store.set_state(doc_id=doc_id, state="qa_mode")
         if session is None:
-            return refused("Сначала пришлите файл.", intent="document.qa", mode="local")
+            return refused("Сначала пришлите файл.", intent="file.qa", mode="local")
         return ok(
             "Задайте вопрос по документу.",
-            intent="document.qa.start",
+            intent="file.qa.start",
             mode="local",
             actions=_document_qa_actions(doc_id),
         )
@@ -5419,10 +5499,12 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             refused("Не удалось извлечь текст.", intent="document.extract.empty", mode="local"),
         )
         return
+    # Ограничиваем размер текста (200-400k символов)
+    limited_text, text_meta = _limit_document_text(extracted.text, max_chars=300000)
     text_dir = settings.document_texts_path / str(user_id)
     text_dir.mkdir(parents=True, exist_ok=True)
     text_path = text_dir / f"{file_id}.txt"
-    text_path.write_text(extracted.text, encoding="utf-8")
+    text_path.write_text(limited_text, encoding="utf-8")
     session = document_store.create_session(
         user_id=user_id,
         chat_id=chat_id,
@@ -5430,11 +5512,27 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         file_type=file_type,
         text_path=str(text_path),
     )
+    # Формируем сообщение с метриками
+    chars_count = len(limited_text)
+    pages_count = extracted.metadata.get("pages", 0)
+    if pages_count > 0:
+        metrics_text = f"Текст извлечён: {chars_count:,} символов, {pages_count} страниц"
+    else:
+        metrics_text = f"Текст извлечён: {chars_count:,} символов"
+    if text_meta.get("truncated"):
+        metrics_text += f"\n(текст обрезан с {text_meta['original_length']:,} символов)"
     result = ok(
-        "Документ обработан. Что сделать?",
-        intent="document.processed",
+        metrics_text,
+        intent="file.processed",
         mode="local",
         actions=_document_actions(session.doc_id),
+        debug={
+            "doc_id": session.doc_id,
+            "file_type": file_type,
+            "chars": chars_count,
+            "pages": pages_count,
+            "text_meta": text_meta,
+        },
     )
     await send_result(update, context, result)
 
