@@ -9,6 +9,9 @@ from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 
+_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+DEFAULT_LOG_LEVEL = logging.INFO
+
 DEFAULT_CONFIG_PATH = Path("config/orchestrator.json")
 DEFAULT_DB_PATH = Path("data/bot.db")
 DEFAULT_ALLOWLIST_PATH = Path("data/allowlist.json")
@@ -75,6 +78,23 @@ class StartupFeatures:
 
 
 _DEV_ENVS = {"dev", "development", "local"}
+
+
+def get_log_level(
+    raw_env: dict[str, str] | None = None,
+    logger: logging.Logger | None = None,
+) -> int:
+    """Resolve logging level from LOG_LEVEL env. Default INFO; invalid values fallback with optional warning."""
+    source = raw_env if raw_env is not None else os.environ
+    value = source.get("LOG_LEVEL")
+    if not value or not value.strip():
+        return DEFAULT_LOG_LEVEL
+    name = value.strip().upper()
+    if name not in _VALID_LOG_LEVELS:
+        log = logger or LOGGER
+        log.warning("Invalid LOG_LEVEL=%r, using default INFO", value)
+        return DEFAULT_LOG_LEVEL
+    return getattr(logging, name)
 
 
 def resolve_env_label(raw_env: dict[str, str] | None = None) -> str:

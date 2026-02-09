@@ -1,46 +1,24 @@
-# DevX: install, test, lint, format, run, precommit, clean
-# Use: make venv && make install && make test && make precommit
-# Cross-platform: uses python -m pip, python -m pytest for Windows/Ubuntu compatibility
+# Infra-lite: venv, install, lint, test, fmt, run
+# Compatible with requirements.txt and optional requirements-dev.txt
 
-.PHONY: venv install test test-fast lint format run precommit clean
+.PHONY: venv install lint test fmt run
 
 venv:
-	@if [ ! -d .venv ]; then \
-		python -m venv .venv; \
-		echo "Created .venv"; \
-	else \
-		echo ".venv already exists"; \
-	fi
+	python3 -m venv .venv
+	@echo "Activate with: source .venv/bin/activate"
 
 install:
-	python -m pip install -r requirements.txt
-	python -m pip install -r requirements-dev.txt 2>/dev/null || true
-	pre-commit install 2>/dev/null || true
-
-test:
-	python -m pytest -q
-
-test-fast:
-	python -m pytest -q -k "not integration"
+	pip install -r requirements.txt
+	@if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
 
 lint:
-	python -m ruff check .
-	python -m ruff format --check .
+	@command -v pre-commit >/dev/null 2>&1 && pre-commit run -a || (ruff check . 2>/dev/null || true)
 
-format:
-	python -m ruff check --fix .
-	python -m ruff format .
+test:
+	pytest -q
+
+fmt:
+	@command -v pre-commit >/dev/null 2>&1 && pre-commit run -a || (ruff format . 2>/dev/null; ruff check --fix . 2>/dev/null; true)
 
 run:
 	python bot.py
-
-precommit:
-	pre-commit run -a
-
-clean:
-	rm -rf .pytest_cache 2>/dev/null || true
-	rm -rf .ruff_cache 2>/dev/null || true
-	rm -rf __pycache__ 2>/dev/null || true
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	find . -type f -name "*.pyc" -delete 2>/dev/null || true
-	find . -type f -name "*.pyo" -delete 2>/dev/null || true

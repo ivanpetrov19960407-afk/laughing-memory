@@ -1,9 +1,3 @@
-"""Telegram bot entry: build Application, register handlers, run polling.
-
-Handlers are thin: they call Orchestrator and render OrchestratorResult
-(text, actions, attachments). Logging is configured via app.infra.logging_config.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -26,8 +20,13 @@ from app.core.memory_manager import MemoryManager, UserActionsLog, UserProfileMe
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.actions_log_store import ActionsLogStore
-from app.infra.config import StartupFeatures, load_settings, resolve_env_label, validate_startup_env
-from app.infra.logging_config import configure_logging, log_exception
+from app.infra.config import (
+    StartupFeatures,
+    get_log_level,
+    load_settings,
+    resolve_env_label,
+    validate_startup_env,
+)
 from app.infra.user_profile_store import UserProfileStore
 from app.infra.request_context import RequestContext, log_event
 from app.infra.version import resolve_app_version
@@ -50,7 +49,6 @@ from app.storage.wizard_store import WizardStore
 
 
 def _register_handlers(application: Application) -> None:
-    """Register all command, callback, and message handlers on the PTB Application."""
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("help", handlers.help_command))
     application.add_handler(CommandHandler("ping", handlers.ping))
@@ -69,11 +67,7 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("context_status", handlers.context_status))
     application.add_handler(CommandHandler("memory_status", handlers.memory_status))
     application.add_handler(CommandHandler("memory_clear", handlers.memory_clear))
-    application.add_handler(CommandHandler("memory_actions_on", handlers.memory_actions_on))
-    application.add_handler(CommandHandler("memory_actions_off", handlers.memory_actions_off))
     application.add_handler(CommandHandler("memory", handlers.memory_command))
-    application.add_handler(CommandHandler("prefs", handlers.prefs_command))
-    application.add_handler(CommandHandler("actions", handlers.actions_command))
     application.add_handler(CommandHandler("profile", handlers.profile_command))
     application.add_handler(CommandHandler("profile_set", handlers.profile_set_command))
     application.add_handler(CommandHandler("remember", handlers.remember_command))
@@ -113,13 +107,30 @@ def _build_startup_integrations(features: StartupFeatures) -> dict[str, bool]:
     return {key: value for key, value in base.items() if value}
 
 
-def build_ptb_application():  # noqa: C901
-    """Build PTB Application with all integrations and bot_data; do not run polling."""
+def main() -> None:
+    log_level = get_log_level()
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+    logging.getLogger("httpx").disabled = True
+    logging.getLogger("httpcore").disabled = True
+    logging.getLogger("httpx").propagate = False
+    logging.getLogger("httpcore").propagate = False
+
+
+
+
+
     env_label = resolve_env_label()
     try:
         settings = load_settings()
     except RuntimeError as exc:
-        log_exception(logging.getLogger(__name__), "Startup failed: %s", exc)
+        logging.getLogger(__name__).exception("Startup failed: %s", exc)
         raise SystemExit(str(exc)) from exc
     startup_features = validate_startup_env(
         settings,
@@ -199,13 +210,10 @@ def build_ptb_application():  # noqa: C901
     asyncio.run(dialog_memory.load())
     settings.uploads_path.mkdir(parents=True, exist_ok=True)
     settings.document_texts_path.mkdir(parents=True, exist_ok=True)
-    document_store = DocumentSessionStore(settings.document_sessions_path, ttl_hours=24)
+    document_store = DocumentSessionStore(settings.document_sessions_path)
     document_store.load()
     profile_store = UserProfileStore(settings.db_path)
-    actions_log_store = ActionsLogStore(
-        settings.db_path,
-        ttl_days=settings.actions_log_ttl_days,
-    )
+    actions_log_store = ActionsLogStore(settings.db_path)
     memory_manager = MemoryManager(
         dialog=dialog_memory,
         profile=UserProfileMemory(profile_store),
@@ -293,15 +301,10 @@ def build_ptb_application():  # noqa: C901
         await reminder_scheduler.restore_all()
 
     application.post_init = _restore_reminders
-    return application, settings
 
-
-def main() -> None:
-    """Load config, build Orchestrator and Application, register handlers, run polling."""
-    configure_logging()
-    application, _ = build_ptb_application()
     _register_handlers(application)
     application.add_error_handler(handlers.error_handler)
+
     logging.getLogger(__name__).info("Bot started")
     try:
         asyncio.get_event_loop()
