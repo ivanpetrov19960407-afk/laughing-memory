@@ -1,135 +1,116 @@
-"""Prometheus metrics collection."""
+"""
+Simple metrics collector for Prometheus-style /metrics. Created only when OBS is enabled.
+API: enabled, record_update, record_error, record_request_duration, update_uptime,
+     update_active_wizards, get_metrics_text. All methods no-op when disabled; no global registry.
+"""
 
 from __future__ import annotations
 
-import logging
+import threading
 import time
-from typing import Any
+from collections import defaultdict
+from typing import DefaultDict
 
-try:
-    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
-except ImportError:
-    CollectorRegistry = None
-    Counter = None
-    Gauge = None
-    Histogram = None
-    generate_latest = None
 
-LOGGER = logging.getLogger(__name__)
+def _sanitize_label(v: str) -> str:
+    return "".join(c if c.isalnum() or c in "._-" else "_" for c in v) or "unknown"
 
 
 class MetricsCollector:
-    """Centralized metrics collector using prometheus_client."""
+    """In-memory counters; safe to use from async and sync. No secrets stored. Per-instance only."""
 
-    def __init__(self, registry: Any = None) -> None:
-        """Initialize metrics if prometheus_client is available.
-        Uses a dedicated registry by default so multiple instances (e.g. in tests) do not conflict.
-        """
-        if Counter is None or CollectorRegistry is None:
-            LOGGER.warning("prometheus_client not installed; metrics disabled")
-            self._enabled = False
-            self._registry = None
-            return
-
-        self._registry = registry if registry is not None else CollectorRegistry()
-        self._enabled = True
+    def __init__(self, enabled: bool = True) -> None:
+        self.enabled = bool(enabled)
+        self._lock = threading.Lock()
+        self._counters: DefaultDict[str, int] = defaultdict(int)
+        self._duration_sum: DefaultDict[str, float] = defaultdict(float)
+        self._duration_count: DefaultDict[str, int] = defaultdict(int)
         self._start_time = time.monotonic()
-
-        # Counter: bot_updates_total{type}
-        self._updates_counter = Counter(
-            "bot_updates_total",
-            "Total number of bot updates",
-            ["type"],
-            registry=self._registry,
-        )
-
-        # Counter: bot_errors_total{component}
-        self._errors_counter = Counter(
-            "bot_errors_total",
-            "Total number of errors",
-            ["component"],
-            registry=self._registry,
-        )
-
-        # Histogram: bot_request_duration_seconds{intent}
-        self._request_duration = Histogram(
-            "bot_request_duration_seconds",
-            "Request duration in seconds",
-            ["intent"],
-            buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0),
-            registry=self._registry,
-        )
-
-        # Gauge: bot_uptime_seconds
-        self._uptime_gauge = Gauge(
-            "bot_uptime_seconds",
-            "Bot uptime in seconds",
-            registry=self._registry,
-        )
-
-        # Gauge: bot_active_wizards
-        self._active_wizards_gauge = Gauge(
-            "bot_active_wizards",
-            "Number of active wizards",
-            registry=self._registry,
-        )
-
-        LOGGER.info("Metrics collector initialized")
-
-    @property
-    def enabled(self) -> bool:
-        """Check if metrics are enabled."""
-        return self._enabled
+        self._uptime_seconds: float = 0.0
+        self._active_wizards: int = 0
 
     def record_update(self, update_type: str) -> None:
-        """Record a bot update."""
-        if not self._enabled:
+        if not self.enabled:
             return
-        self._updates_counter.labels(type=update_type).inc()
+        key = "updates." + _sanitize_label(update_type)
+        with self._lock:
+            self._counters[key] += 1
 
-    def record_error(self, component: str) -> None:
-        """Record an error."""
-        if not self._enabled:
+    def record_error(self, update_type: str) -> None:
+        if not self.enabled:
             return
-        self._errors_counter.labels(component=component).inc()
+        key = "errors." + _sanitize_label(update_type)
+        with self._lock:
+            self._counters[key] += 1
 
-    def record_request_duration(self, intent: str, duration_seconds: float) -> None:
-        """Record request duration."""
-        if not self._enabled:
+    def record_request_duration(self, update_type: str, duration_seconds: float) -> None:
+        if not self.enabled:
             return
-        self._request_duration.labels(intent=intent).observe(duration_seconds)
+        key = _sanitize_label(update_type)
+        with self._lock:
+            self._duration_sum[key] += duration_seconds
+            self._duration_count[key] += 1
 
     def update_uptime(self) -> None:
-        """Update uptime gauge."""
-        if not self._enabled:
+        if not self.enabled:
             return
-        uptime = time.monotonic() - self._start_time
-        self._uptime_gauge.set(uptime)
+        with self._lock:
+            self._uptime_seconds = time.monotonic() - self._start_time
 
     def update_active_wizards(self, count: int) -> None:
-        """Update active wizards count."""
-        if not self._enabled:
+        if not self.enabled:
             return
-        self._active_wizards_gauge.set(max(0, count))
-
-    def get_metrics_text(self) -> str:
-        """Get metrics in Prometheus exposition format."""
-        if not self._enabled or generate_latest is None or self._registry is None:
-            return "# Metrics disabled\n"
-        try:
-            return generate_latest(self._registry).decode("utf-8")
-        except Exception as exc:
-            LOGGER.exception("Failed to generate metrics: %s", exc)
-            return f"# Error generating metrics: {exc}\n"
+        with self._lock:
+            self._active_wizards = max(0, count)
 
     def get_metrics_count(self) -> int:
-        """Get approximate number of metrics."""
-        if not self._enabled or self._registry is None:
-            return 0
-        try:
-            count = 0
-            for collector in self._registry._collector_to_names:
-                count += len(self._registry._collector_to_names[collector])
-            return count
-        except Exception:
-            return 0
+        """Total number of recorded events (for admin/metrics_status)."""
+        with self._lock:
+            return sum(self._counters.values()) + sum(self._duration_count.values())
+
+    def get_metrics_text(self) -> str:
+        if not self.enabled:
+            return ""
+        with self._lock:
+            lines: list[str] = []
+            # Counters
+            for key in sorted(self._counters.keys()):
+                val = self._counters[key]
+                name = "msb_" + key.replace(".", "_")
+                lines.append(f"# HELP {name} Counter")
+                lines.append(f"# TYPE {name} counter")
+                lines.append(f"{name} {val}")
+            # Duration (sum/count per type)
+            for key in sorted(self._duration_count.keys()):
+                s = self._duration_sum[key]
+                c = self._duration_count[key]
+                base = "msb_request_duration_seconds_" + key
+                lines.append(f"# HELP {base}_sum Request duration sum")
+                lines.append(f"# TYPE {base}_sum counter")
+                lines.append(f"{base}_sum {s}")
+                lines.append(f"# HELP {base}_count Request duration count")
+                lines.append(f"# TYPE {base}_count counter")
+                lines.append(f"{base}_count {c}")
+            # Uptime
+            lines.append("# HELP msb_uptime_seconds Process uptime")
+            lines.append("# TYPE msb_uptime_seconds gauge")
+            lines.append(f"msb_uptime_seconds {self._uptime_seconds}")
+            # Active wizards
+            lines.append("# HELP msb_active_wizards Active wizards count")
+            lines.append("# TYPE msb_active_wizards gauge")
+            lines.append(f"msb_active_wizards {self._active_wizards}")
+            return "\n".join(lines) + "\n" if lines else ""
+
+    def inc(self, name: str, value: int = 1) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self._counters[name] += value
+
+    def get_counters(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._counters)
+
+    def format_prometheus(self) -> str:
+        """Prometheus text format; backward compatible."""
+        return self.get_metrics_text() if self.enabled else ""

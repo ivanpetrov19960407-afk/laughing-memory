@@ -20,13 +20,11 @@ from app.core.memory_manager import MemoryManager, UserActionsLog, UserProfileMe
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.actions_log_store import ActionsLogStore
-from app.infra.config import (
-    StartupFeatures,
-    get_log_level,
-    load_settings,
-    resolve_env_label,
-    validate_startup_env,
-)
+from app.infra.config import StartupFeatures, load_settings, resolve_env_label, validate_startup_env
+from app.infra.observability import load_observability_config
+from app.infra.observability.http_server import start_observability_http
+from app.infra.observability.metrics import MetricsCollector
+from app.infra.observability.watchdog import run_watchdog_loop
 from app.infra.user_profile_store import UserProfileStore
 from app.infra.request_context import RequestContext, log_event
 from app.infra.version import resolve_app_version
@@ -44,9 +42,6 @@ from app.infra.storage import TaskStorage
 from app.infra.last_state_store import LastStateStore
 from app.infra.trace_store import TraceStore
 from app.infra.draft_store import DraftStore
-from app.infra.observability import HealthChecker, MetricsCollector, ObservabilityHTTPServer
-from app.infra.observability.otel import initialize_otel
-from app.infra.observability.watchdog import initialize_watchdog, notify_watchdog
 from app.tools import NullSearchClient, PerplexityWebSearchClient
 from app.storage.wizard_store import WizardStore
 
@@ -94,7 +89,6 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("reminder_on", handlers.reminder_on))
     application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
     application.add_handler(CommandHandler("health", handlers.health))
-    application.add_handler(CommandHandler("metrics_status", handlers.metrics_status))
     application.add_handler(CommandHandler("config", handlers.config_command))
     application.add_handler(CallbackQueryHandler(handlers.static_callback, pattern="^cb:"))
     application.add_handler(CallbackQueryHandler(handlers.action_callback))
@@ -112,10 +106,10 @@ def _build_startup_integrations(features: StartupFeatures) -> dict[str, bool]:
 
 
 def main() -> None:
-    log_level = get_log_level()
     logging.basicConfig(
-        level=log_level,
+        level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
+
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("telegram").setLevel(logging.WARNING)
@@ -265,6 +259,21 @@ def main() -> None:
     )
     application.bot_data["draft_store"] = DraftStore(max_items=50, ttl_seconds=24 * 3600)
     application.bot_data["trace_store"] = TraceStore(max_items=20, ttl_seconds=86400)
+    obs_config = load_observability_config()
+    metrics_collector = MetricsCollector() if obs_config.obs_http_enabled else None
+    obs_state = None
+    if obs_config.obs_http_enabled:
+        obs_state = {
+            "init_complete": False,
+            "start_time": time.monotonic(),
+            "version": resolve_app_version(config.get("system_metadata", {})),
+            "last_error_count": 0,
+            "critical_error_count_last_n_minutes": 0,
+            "metrics_collector": metrics_collector,
+        }
+    application.bot_data["obs_config"] = obs_config
+    application.bot_data["obs_state"] = obs_state
+    application.bot_data["obs_runner"] = None
     wizard_store = WizardStore(
         settings.wizard_store_path,
         timeout_seconds=settings.wizard_timeout_seconds,
@@ -275,84 +284,6 @@ def main() -> None:
         settings=settings,
         profile_store=profile_store,
     )
-
-    # Initialize observability
-    start_time = application.bot_data["start_time"]
-    metrics_collector = MetricsCollector()
-    health_checker = HealthChecker(start_time, config)
-
-    # Initialize OpenTelemetry if enabled
-    if settings.otel_enabled:
-        initialize_otel(
-            enabled=True,
-            exporter=settings.otel_exporter,
-            otlp_endpoint=settings.otel_otlp_endpoint,
-        )
-
-    # Initialize systemd watchdog if enabled
-    if settings.systemd_watchdog_enabled:
-        initialize_watchdog(enabled=True)
-
-    # Store observability components in bot_data
-    application.bot_data["metrics_collector"] = metrics_collector
-    application.bot_data["health_checker"] = health_checker
-
-    # Helper function to get app state for HTTP server
-    def _get_app_state() -> dict[str, Any]:
-        scheduler_ok = bool(application.job_queue) and settings.reminders_enabled
-        scheduler_active = bool(application.job_queue)
-        calendar_backend = settings.calendar_backend
-        llm_client_configured = bool(llm_client)
-        search_client_configured = bool(search_client) and not isinstance(search_client, NullSearchClient)
-        critical_dependencies_ok = True  # Can be enhanced with actual checks
-        initialized = True  # Set after post_init completes
-        return {
-            "scheduler_ok": scheduler_ok,
-            "scheduler_active": scheduler_active,
-            "calendar_backend": calendar_backend,
-            "llm_client_configured": llm_client_configured,
-            "search_client_configured": search_client_configured,
-            "critical_dependencies_ok": critical_dependencies_ok,
-            "initialized": initialized,
-        }
-
-    # Start HTTP server if enabled (will be started in post_init)
-    http_server: ObservabilityHTTPServer | None = None
-    if settings.obs_http_enabled:
-        try:
-            http_server = ObservabilityHTTPServer(
-                host=settings.obs_http_host,
-                port=settings.obs_http_port,
-                health_checker=health_checker,
-                metrics_collector=metrics_collector,
-                get_app_state=_get_app_state,
-            )
-            application.bot_data["obs_http_server"] = http_server
-        except Exception as exc:
-            logging.getLogger(__name__).warning("Failed to create observability HTTP server: %s", exc)
-
-    # Periodic task for metrics and watchdog
-    async def _update_observability(context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Periodic task to update metrics and notify watchdog."""
-        metrics_collector.update_uptime()
-        # Update active wizards count
-        wizard_manager = application.bot_data.get("wizard_manager")
-        if wizard_manager and hasattr(wizard_store, "_store"):
-            try:
-                active_count = len(wizard_store._store)
-                metrics_collector.update_active_wizards(active_count)
-            except Exception:
-                pass
-        notify_watchdog()
-
-    # Start periodic task
-    if application.job_queue:
-        application.job_queue.run_repeating(
-            _update_observability,
-            interval=30,
-            first=30,
-        )
-
     startup_context = RequestContext(
         correlation_id="startup",
         user_id=0,
@@ -379,18 +310,20 @@ def main() -> None:
     async def _restore_reminders(app: Application) -> None:
         if not settings.reminders_enabled:
             logging.getLogger(__name__).info("Reminders disabled by config")
-            return
-        await reminder_scheduler.restore_all()
-        # Mark as initialized for readiness checks
-        app.bot_data["initialized"] = True
-        
-        # Start HTTP server if enabled
-        http_server = app.bot_data.get("obs_http_server")
-        if http_server:
-            try:
-                await http_server.start()
-            except Exception as exc:
-                logging.getLogger(__name__).warning("Failed to start observability HTTP server: %s", exc)
+        else:
+            await reminder_scheduler.restore_all()
+        obs_cfg = app.bot_data.get("obs_config")
+        obs_state = app.bot_data.get("obs_state")
+        if obs_cfg and obs_cfg.obs_http_enabled and obs_state is not None:
+            runner, _site = await start_observability_http(
+                obs_cfg.obs_http_host,
+                obs_cfg.obs_http_port,
+                obs_state,
+            )
+            app.bot_data["obs_runner"] = runner
+            obs_state["init_complete"] = True
+            if obs_cfg.systemd_watchdog_enabled:
+                asyncio.create_task(run_watchdog_loop(enabled=True, env=None))
 
     application.post_init = _restore_reminders
 
