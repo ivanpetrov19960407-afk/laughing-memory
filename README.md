@@ -110,6 +110,47 @@ python bot.py
 2. Запустите бота и создайте событие через `/calendar add ...`.
 3. Откройте Nextcloud Calendar и убедитесь, что событие появилось.
 
+## Observability (Stage 7, OFF по умолчанию)
+Эндпоинты `/healthz`, `/readyz`, `/metrics` и `/health` доступны только при **явном включении** через переменные окружения. По умолчанию HTTP-сервер observability **не запускается** и не открывает порт.
+
+- **Слушает только localhost** — не для доступа из интернета.
+- **Секреты не отдаются** — в ответах нет env, токенов, паролей, correlation_id.
+- **Google Calendar не используется** — календарь только Local или CalDAV.
+
+### Включение
+В `.env` или systemd unit:
+```bash
+OBS_HTTP_ENABLED=1
+OBS_HTTP_HOST=127.0.0.1
+OBS_HTTP_PORT=8081
+```
+
+### Примеры проверки (после запуска бота с OBS_HTTP_ENABLED=1)
+```bash
+curl -s http://127.0.0.1:8081/healthz
+curl -s -o - http://127.0.0.1:8081/metrics
+curl -s http://127.0.0.1:8081/readyz
+```
+
+### OTEL (опционально)
+При необходимости трассировки:
+```bash
+OTEL_ENABLED=1
+# OTEL_EXPORTER_OTLP_ENDPOINT=...  # при экспорте в OTLP
+```
+Если пакетов OpenTelemetry нет — функция отключится без падения приложения.
+
+### systemd watchdog
+Для работы с `WatchdogSec` и `NotifyAccess=main`:
+```ini
+[Service]
+WatchdogSec=30
+NotifyAccess=main
+Environment=SYSTEMD_WATCHDOG=1
+Environment=OBS_HTTP_ENABLED=1
+```
+При `SYSTEMD_WATCHDOG=1` и наличии `NOTIFY_SOCKET` процесс периодически отправляет `WATCHDOG=1`. Если сокет отсутствует — тихий no-op.
+
 ## Тесты
 ```bash
 pytest
