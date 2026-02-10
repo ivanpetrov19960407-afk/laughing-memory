@@ -31,7 +31,7 @@ from app.core.calendar_nlp_ru import (
 )
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMessage
-from app.core.document_qa import select_relevant_chunks
+from app.core.document_qa import select_relevant_chunks, select_relevant_chunks_with_scores
 from app.core.last_state_resolver import ResolutionResult, resolve_short_message
 from app.core.memory_layers import build_memory_layers_context
 from app.core.memory_manager import MemoryManager
@@ -932,7 +932,7 @@ def _document_actions(doc_id: str) -> list[Action]:
         ),
         Action(
             id="document.close",
-            label="🗑 Закрыть документ",
+            label="🧹 Закрыть документ",
             payload={"op": "document.close", "doc_id": doc_id},
         ),
     ]
@@ -947,7 +947,7 @@ def _document_qa_actions(doc_id: str) -> list[Action]:
         ),
         Action(
             id="document.close",
-            label="🗑 Закрыть документ",
+            label="🧹 Закрыть документ",
             payload={"op": "document.close", "doc_id": doc_id},
         ),
     ]
@@ -994,6 +994,22 @@ def _trim_document_text(text: str, *, max_chars: int = 8000) -> str:
     return text[:max_chars].rsplit("\n", 1)[0].strip() or text[:max_chars]
 
 
+def _summary_fallback_no_llm(text: str, *, max_paragraphs: int = 5, max_len: int = 1500) -> str:
+    """Эвристическое резюме без LLM: первые абзацы + частотные слова (без PII)."""
+    from collections import Counter
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    head = "\n".join(lines[:max_paragraphs])
+    if len(head) > max_len:
+        head = head[:max_len].rsplit(" ", 1)[0].strip() + "…"
+    words = re.findall(r"[а-яёa-z]{4,}", text.lower())
+    stop = {"этот", "этого", "который", "которая", "которые", "также", "после", "перед", "только", "когда", "если", "что", "как", "для", "или", "при", "из", "на", "по", "за", "не", "но", "как", "that", "this", "with", "from", "have", "were", "been", "will", "would"}
+    freq = [w for w, _ in Counter(words).most_common(12) if w not in stop]
+    keywords = ", ".join(freq[:8]) if freq else ""
+    if keywords:
+        return f"Ключевые пункты (фрагмент):\n{head}\n\nЧастотные слова: {keywords}."
+    return f"Ключевые пункты (фрагмент):\n{head}"
+
+
 async def _handle_document_summary(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -1004,7 +1020,15 @@ async def _handle_document_summary(
     document_store = _get_document_store(context)
     if document_store is None:
         return error("Хранилище документов недоступно.", intent="document.summary", mode="local")
-    session = document_store.get_session(doc_id) or document_store.get_active(user_id=user_id, chat_id=chat_id)
+    session, status = document_store.get_session_with_status(doc_id)
+    if session is None and status == "expired":
+        return refused(
+            "Сессия документа истекла. Пришлите документ заново.",
+            intent="document.summary",
+            mode="local",
+        )
+    if session is None:
+        session = document_store.get_active(user_id=user_id, chat_id=chat_id)
     if session is None:
         return refused("Сначала пришлите файл.", intent="document.summary", mode="local")
     text = _load_document_text(session.text_path)
@@ -1013,7 +1037,13 @@ async def _handle_document_summary(
     llm_client = _get_llm_client(context)
     model = _resolve_llm_model(context)
     if llm_client is None or model is None:
-        return error("LLM не настроен.", intent="document.summary", mode="local")
+        response = _summary_fallback_no_llm(text)
+        return ok(
+            response,
+            intent="document.summary",
+            mode="local",
+            actions=_document_actions(session.doc_id),
+        )
     orchestrator = _get_orchestrator(context)
     facts_only = orchestrator.is_facts_only(user_id)
     system_prompt = (
@@ -1022,7 +1052,7 @@ async def _handle_document_summary(
     )
     if facts_only:
         system_prompt += " Не добавляй домыслы. Если данных нет, так и скажи."
-    trimmed_text = _trim_document_text(text)
+    trimmed_text = _trim_document_text(text, max_chars=8000)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"Текст документа:\n{trimmed_text}\n\nСделай резюме."},
@@ -1052,28 +1082,57 @@ async def _handle_document_question(
     document_store = _get_document_store(context)
     if document_store is None:
         return error("Хранилище документов недоступно.", intent="document.qa", mode="local")
-    session = document_store.get_active(user_id=user_id, chat_id=chat_id)
+    session, status = document_store.get_active_with_status(user_id=user_id, chat_id=chat_id)
+    if status == "expired":
+        return refused(
+            "Сессия документа истекла. Пришлите документ заново.",
+            intent="document.qa",
+            mode="local",
+        )
     if session is None or session.state != "qa_mode":
         return refused("Сначала пришлите файл.", intent="document.qa", mode="local")
     text = _load_document_text(session.text_path)
     if not text.strip():
         return error("Текст документа не найден.", intent="document.qa", mode="local")
+    scored = select_relevant_chunks_with_scores(text, question, top_k=4)
+    relevant_chunks = [c.text for c in scored if c.score > 0]
+    log_event(
+        LOGGER,
+        get_request_context(context),
+        component="document",
+        event="qa_query",
+        status="ok",
+        matched_chunks_count=len(relevant_chunks),
+    )
+    if not relevant_chunks:
+        return refused(
+            "В документе не нашёл ответа на этот вопрос.",
+            intent="document.qa",
+            mode="local",
+            actions=_document_qa_actions(session.doc_id),
+        )
     llm_client = _get_llm_client(context)
     model = _resolve_llm_model(context)
     if llm_client is None or model is None:
-        return error("LLM не настроен.", intent="document.qa", mode="local")
+        def _quote(c: str, i: int) -> str:
+            snippet = c[:600] + ("…" if len(c) > 600 else "")
+            return f"Фрагмент документа ({i + 1}):\n{snippet}"
+        quotes = "\n\n".join(_quote(chunk, i) for i, chunk in enumerate(relevant_chunks[:3]))
+        return ok(
+            f"По документу найдено:\n\n{quotes}",
+            intent="document.qa",
+            mode="local",
+            actions=_document_qa_actions(session.doc_id),
+        )
     orchestrator = _get_orchestrator(context)
     facts_only = orchestrator.is_facts_only(user_id)
-    chunks = select_relevant_chunks(text, question, top_k=4)
-    if not chunks:
-        return refused("В документе нет ответа.", intent="document.qa", mode="local")
     system_prompt = (
         "Отвечай только на основе предоставленных фрагментов документа. "
-        "Если ответа нет во фрагментах, скажи: \"В документе нет ответа\"."
+        "Если ответа нет во фрагментах, скажи: «В документе нет ответа»."
     )
     if facts_only:
         system_prompt += " Никаких домыслов, только факты из текста."
-    context_text = "\n\n".join(f"Фрагмент {idx + 1}:\n{chunk}" for idx, chunk in enumerate(chunks))
+    context_text = "\n\n".join(f"Фрагмент {idx + 1}:\n{chunk}" for idx, chunk in enumerate(relevant_chunks))
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"Вопрос: {question}\n\n{context_text}"},
@@ -3515,6 +3574,15 @@ async def _dispatch_action_payload(
         document_store = _get_document_store(context)
         if document_store is None:
             return error("Хранилище документов недоступно.", intent="document.qa", mode="local")
+        session, status = document_store.get_session_with_status(doc_id)
+        if status == "expired":
+            return refused(
+                "Сессия документа истекла. Пришлите документ заново.",
+                intent="document.qa",
+                mode="local",
+            )
+        if session is None:
+            return refused("Сначала пришлите файл.", intent="document.qa", mode="local")
         session = document_store.set_state(doc_id=doc_id, state="qa_mode")
         if session is None:
             return refused("Сначала пришлите файл.", intent="document.qa", mode="local")
@@ -5474,6 +5542,7 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     file_id = ""
     file_type = ""
     extension = ""
+    file_size: int | None = None
     if message.document is not None:
         detected = _detect_document_type(message.document)
         if detected is None:
@@ -5489,21 +5558,84 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         file_type, extension = detected
         file_id = message.document.file_id
+        file_size = getattr(message.document, "file_size", None)
     elif message.photo:
         photo = message.photo[-1]
         file_id = photo.file_id
         file_type = "image"
         extension = ".jpg"
+        file_size = getattr(photo, "file_size", None)
     else:
         return
-    user_dir = settings.uploads_path / str(user_id)
+    max_bytes = (
+        settings.file_max_bytes_img
+        if file_type == "image"
+        else settings.file_max_bytes_pdf_docx
+    )
+    if file_size is not None and file_size > max_bytes:
+        log_event(
+            LOGGER,
+            get_request_context(context),
+            component="document",
+            event="file_rejected",
+            status="refused",
+            file_type=file_type,
+            file_size=file_size,
+            max_bytes=max_bytes,
+        )
+        await send_result(
+            update,
+            context,
+            refused(
+                f"Файл слишком большой (лимит {max_bytes // 1_000_000} МБ).",
+                intent="document.upload",
+                mode="local",
+            ),
+        )
+        return
+    log_event(
+        LOGGER,
+        get_request_context(context),
+        component="document",
+        event="file_received",
+        status="ok",
+        file_type=file_type,
+        file_size=file_size,
+    )
+    user_dir = (settings.uploads_path / str(user_id)).resolve()
+    base_dir = settings.uploads_path.resolve()
+    if not str(user_dir).startswith(str(base_dir)):
+        await send_result(
+            update,
+            context,
+            error("Некорректный путь.", intent="document.upload", mode="local"),
+        )
+        return
     user_dir.mkdir(parents=True, exist_ok=True)
-    file_path = user_dir / f"{file_id}{extension}"
+    safe_name = "".join(c for c in f"{file_id}{extension}" if c.isalnum() or c in "._-") or "file"
+    file_path = (user_dir / safe_name).resolve()
+    if not str(file_path).startswith(str(user_dir)):
+        await send_result(
+            update,
+            context,
+            error("Некорректный путь.", intent="document.upload", mode="local"),
+        )
+        return
     file_obj = await context.bot.get_file(file_id)
     await file_obj.download_to_drive(custom_path=str(file_path))
-    extractor = FileTextExtractor(ocr_enabled=settings.ocr_enabled)
+    extractor = FileTextExtractor(
+        ocr_enabled=settings.ocr_enabled,
+        tesseract_lang=settings.tesseract_lang,
+        max_chars=settings.doc_max_chars,
+        max_pages=settings.doc_max_pages,
+    )
     try:
-        extracted = extractor.extract(path=file_path, file_type=file_type)
+        extracted = extractor.extract(
+            path=Path(file_path),
+            file_type=file_type,
+            max_chars=settings.doc_max_chars,
+            max_pages=settings.doc_max_pages,
+        )
     except OCRNotAvailableError:
         await send_result(
             update,
@@ -5529,7 +5661,16 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             refused("Не удалось извлечь текст.", intent="document.extract.empty", mode="local"),
         )
         return
-    text_dir = settings.document_texts_path / str(user_id)
+    log_event(
+        LOGGER,
+        get_request_context(context),
+        component="document",
+        event="text_extracted",
+        status="ok",
+        chars=extracted.metadata.get("characters", 0),
+        pages=extracted.metadata.get("pages", 0),
+    )
+    text_dir = (settings.document_texts_path / str(user_id)).resolve()
     text_dir.mkdir(parents=True, exist_ok=True)
     text_path = text_dir / f"{file_id}.txt"
     text_path.write_text(extracted.text, encoding="utf-8")
@@ -5541,12 +5682,78 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         text_path=str(text_path),
     )
     result = ok(
-        "Документ обработан. Что сделать?",
+        "Документ принят. Что сделать?",
         intent="document.processed",
         mode="local",
         actions=_document_actions(session.doc_id),
     )
     await send_result(update, context, result)
+
+
+@_with_error_handling
+async def doc_close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    document_store = _get_document_store(context)
+    if document_store is None:
+        await send_result(
+            update,
+            context,
+            error("Хранилище документов недоступно.", intent="document.close", mode="local"),
+        )
+        return
+    closed = document_store.close_active(user_id=user_id, chat_id=chat_id)
+    if closed is None:
+        await send_result(
+            update,
+            context,
+            ok("Нет активного документа.", intent="document.close", mode="local"),
+        )
+        return
+    await send_result(
+        update,
+        context,
+        ok("Документ закрыт.", intent="document.close", mode="local"),
+    )
+
+
+@_with_error_handling
+async def doc_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    document_store = _get_document_store(context)
+    if document_store is None:
+        await send_result(
+            update,
+            context,
+            error("Хранилище документов недоступно.", intent="document.status", mode="local"),
+        )
+        return
+    session, status = document_store.get_active_with_status(user_id=user_id, chat_id=chat_id)
+    if status == "expired" or session is None:
+        await send_result(
+            update,
+            context,
+            ok("Активного документа нет. Пришлите PDF, DOCX или фото с текстом.", intent="document.status", mode="local"),
+        )
+        return
+    now = datetime.now(timezone.utc)
+    remaining = (session.expires_at - now).total_seconds()
+    mins = max(0, int(remaining // 60))
+    mode_label = "вопросы по документу" if session.state == "qa_mode" else "выбор действия"
+    await send_result(
+        update,
+        context,
+        ok(
+            f"Документ активен. Режим: {mode_label}. Осталось до истечения: {mins} мин.",
+            intent="document.status",
+            mode="local",
+        ),
+    )
 
 
 @_with_error_handling
@@ -5570,7 +5777,17 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     document_store = _get_document_store(context)
     if document_store is not None:
-        active_session = document_store.get_active(user_id=user_id, chat_id=chat_id)
+        active_session, doc_status = document_store.get_active_with_status(
+            user_id=user_id, chat_id=chat_id
+        )
+        if doc_status == "expired":
+            result = refused(
+                "Сессия документа истекла. Пришлите документ заново.",
+                intent="document.expired",
+                mode="local",
+            )
+            await send_result(update, context, result)
+            return
         if active_session and active_session.state == "qa_mode":
             result = await _handle_document_question(
                 context,

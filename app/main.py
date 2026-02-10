@@ -87,6 +87,8 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
     application.add_handler(CommandHandler("health", handlers.health))
     application.add_handler(CommandHandler("config", handlers.config_command))
+    application.add_handler(CommandHandler("doc_close", handlers.doc_close_command))
+    application.add_handler(CommandHandler("doc_status", handlers.doc_status_command))
     application.add_handler(CallbackQueryHandler(handlers.static_callback, pattern="^cb:"))
     application.add_handler(CallbackQueryHandler(handlers.action_callback))
     application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handlers.document_upload))
@@ -206,7 +208,10 @@ def main() -> None:
     asyncio.run(dialog_memory.load())
     settings.uploads_path.mkdir(parents=True, exist_ok=True)
     settings.document_texts_path.mkdir(parents=True, exist_ok=True)
-    document_store = DocumentSessionStore(settings.document_sessions_path)
+    document_store = DocumentSessionStore(
+        settings.document_sessions_path,
+        ttl_seconds=settings.doc_session_ttl_seconds,
+    )
     document_store.load()
     profile_store = UserProfileStore(settings.db_path)
     actions_log_store = ActionsLogStore(settings.db_path, ttl_days=settings.actions_log_ttl_days)
@@ -217,7 +222,8 @@ def main() -> None:
     )
 
     warnings.filterwarnings("ignore", message="No JobQueue set up", category=PTBUserWarning)
-    application = Application.builder().token(settings.bot_token).build()
+    token_for_builder = settings.bot_token or (dry_run and "0:DRY_RUN") or ""
+    application = Application.builder().token(token_for_builder).build()
     reminder_scheduler = ReminderScheduler(
         application=application,
         max_future_days=settings.reminder_max_future_days,
