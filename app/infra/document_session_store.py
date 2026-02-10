@@ -180,6 +180,38 @@ class DocumentSessionStore:
             self.save()
         return session
 
+    def cleanup_expired(
+        self,
+        ttl_seconds: int,
+        *,
+        delete_text_files: bool = True,
+        delete_upload_files: bool = True,
+    ) -> None:
+        """Remove sessions older than ttl_seconds; best-effort delete text/upload files."""
+        if ttl_seconds <= 0:
+            return
+        now = self._now_provider()
+        cutoff = now - timedelta(seconds=ttl_seconds)
+        to_remove: list[str] = []
+        for doc_id, session in list(self._sessions.items()):
+            if session.updated_at < cutoff:
+                to_remove.append(doc_id)
+        for key, doc_id in list(self._active_by_key.items()):
+            if doc_id in to_remove:
+                del self._active_by_key[key]
+        for doc_id in to_remove:
+            session = self._sessions.pop(doc_id, None)
+            if session and (delete_text_files or delete_upload_files):
+                try:
+                    if delete_text_files and session.text_path:
+                        Path(session.text_path).unlink(missing_ok=True)
+                    if delete_upload_files and session.file_path:
+                        Path(session.file_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        if to_remove:
+            self.save()
+
 
 def _active_key(user_id: int, chat_id: int) -> str:
     return f"{user_id}:{chat_id}"

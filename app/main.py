@@ -87,8 +87,6 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
     application.add_handler(CommandHandler("health", handlers.health))
     application.add_handler(CommandHandler("config", handlers.config_command))
-    application.add_handler(CommandHandler("doc_close", handlers.doc_close_command))
-    application.add_handler(CommandHandler("doc_status", handlers.doc_status_command))
     application.add_handler(CallbackQueryHandler(handlers.static_callback, pattern="^cb:"))
     application.add_handler(CallbackQueryHandler(handlers.action_callback))
     application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handlers.document_upload))
@@ -124,7 +122,6 @@ def main() -> None:
 
 
     env_label = resolve_env_label()
-    dry_run = os.getenv("DRY_RUN") in {"1", "true", "True", "yes", "on"}
     try:
         settings = load_settings()
     except RuntimeError as exc:
@@ -206,15 +203,25 @@ def main() -> None:
         max_turns=settings.context_max_turns,
     )
     asyncio.run(dialog_memory.load())
-    settings.uploads_path.mkdir(parents=True, exist_ok=True)
-    settings.document_texts_path.mkdir(parents=True, exist_ok=True)
-    document_store = DocumentSessionStore(
-        settings.document_sessions_path,
-        ttl_seconds=settings.doc_session_ttl_seconds,
-    )
+    _startup_log = logging.getLogger(__name__)
+    for name, path in (
+        ("uploads", settings.uploads_path),
+        ("document_texts", settings.document_texts_path),
+        ("document_sessions", settings.document_sessions_path.parent),
+    ):
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            _startup_log.warning("File storage mkdir skipped for %s (%s): %s", name, path, e)
+    document_store = DocumentSessionStore(settings.document_sessions_path)
     document_store.load()
+    document_store.cleanup_expired(
+        settings.doc_session_ttl_seconds,
+        delete_text_files=True,
+        delete_upload_files=True,
+    )
     profile_store = UserProfileStore(settings.db_path)
-    actions_log_store = ActionsLogStore(settings.db_path, ttl_days=settings.actions_log_ttl_days)
+    actions_log_store = ActionsLogStore(settings.db_path)
     memory_manager = MemoryManager(
         dialog=dialog_memory,
         profile=UserProfileMemory(profile_store),
@@ -222,8 +229,7 @@ def main() -> None:
     )
 
     warnings.filterwarnings("ignore", message="No JobQueue set up", category=PTBUserWarning)
-    token_for_builder = settings.bot_token or (dry_run and "0:DRY_RUN") or ""
-    application = Application.builder().token(token_for_builder).build()
+    application = Application.builder().token(settings.bot_token).build()
     reminder_scheduler = ReminderScheduler(
         application=application,
         max_future_days=settings.reminder_max_future_days,
@@ -307,17 +313,11 @@ def main() -> None:
     _register_handlers(application)
     application.add_error_handler(handlers.error_handler)
 
-    logging.getLogger(__name__).info(
-        "Bot started%s",
-        " (DRY_RUN enabled: skipping Telegram polling)" if dry_run else "",
-    )
-
+    logging.getLogger(__name__).info("Bot started")
+    dry_run = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on")
     if dry_run:
-        # Smoke mode for Docker/CI: all dependencies and schedulers are initialised,
-        # startup.check is logged, but we do not connect to Telegram.
-        time.sleep(2)
+        logging.getLogger(__name__).info("DRY_RUN mode, skipping Telegram polling")
         return
-
     try:
         asyncio.get_event_loop()
     except RuntimeError:
