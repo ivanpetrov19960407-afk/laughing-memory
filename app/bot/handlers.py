@@ -3185,13 +3185,20 @@ async def static_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     op, payload, intent = parsed
     set_input_text(context, f"<callback:{intent}>")
-    result = await _dispatch_action_payload(
-        update,
-        context,
-        op=op,
-        payload=payload,
-        intent=intent,
-    )
+    ud = getattr(context, "user_data", None)
+    if ud is not None:
+        ud["_from_static_callback"] = True
+    try:
+        result = await _dispatch_action_payload(
+            update,
+            context,
+            op=op,
+            payload=payload,
+            intent=intent,
+        )
+    finally:
+        if ud is not None:
+            ud.pop("_from_static_callback", None)
     await send_result(update, context, result)
 
 
@@ -3306,6 +3313,8 @@ async def _dispatch_action_payload(
     payload: dict[str, object],
     intent: str,
 ) -> OrchestratorResult:
+    ud = getattr(context, "user_data", None)
+    from_static_callback = (ud.pop("_from_static_callback", False) if ud is not None else False)
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else None
     if chat_id is None:
@@ -4022,6 +4031,7 @@ async def _dispatch_action_payload(
             reminder_id=reminder_id,
             minutes=minutes,
             base_trigger_at=None,
+            use_now=not from_static_callback,
         )
     if op_value == "reminder_snooze_tomorrow":
         reminder_id = payload.get("reminder_id") or payload.get("id")
@@ -4259,6 +4269,7 @@ async def _handle_reminder_snooze(
     reminder_id: str,
     minutes: int,
     base_trigger_at: str | None = None,
+    use_now: bool = False,
 ) -> OrchestratorResult:
     reminder = await calendar_store.get_reminder(reminder_id)
     if reminder is None:
@@ -4268,10 +4279,19 @@ async def _handle_reminder_snooze(
             mode="local",
         )
     offset = max(1, minutes)
-    base_dt = _parse_base_trigger_at(base_trigger_at) if base_trigger_at else reminder.trigger_at
-    if base_dt.tzinfo is None:
-        base_dt = base_dt.replace(tzinfo=calendar_store.BOT_TZ)
-    updated = await calendar_store.apply_snooze(reminder_id, minutes=offset, now=datetime.now(tz=calendar_store.BOT_TZ), base_trigger_at=base_dt)
+    tz = reminder.trigger_at.tzinfo if reminder.trigger_at.tzinfo else calendar_store.BOT_TZ
+    now = datetime.now(tz=tz)
+    if use_now:
+        updated = await calendar_store.apply_snooze(
+            reminder_id, minutes=offset, now=now, base_trigger_at=None, use_now=True
+        )
+    else:
+        base_dt = _parse_base_trigger_at(base_trigger_at) if base_trigger_at else reminder.trigger_at
+        if base_dt.tzinfo is None:
+            base_dt = base_dt.replace(tzinfo=calendar_store.BOT_TZ)
+        updated = await calendar_store.apply_snooze(
+            reminder_id, minutes=offset, now=now, base_trigger_at=base_dt, use_now=False
+        )
     if updated is None:
         return error(
             "Не удалось отложить напоминание (возможно, уже отключено).",
