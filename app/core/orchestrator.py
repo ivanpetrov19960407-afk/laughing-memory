@@ -56,6 +56,7 @@ from app.infra.request_context import (
 )
 from app.infra.storage import TaskStorage
 from app.tools.web_search import NullSearchClient, SearchClient
+from app.core.search_sources import get_enabled_sources, parse_sources_from_config
 
 
 LOGGER = logging.getLogger(__name__)
@@ -148,6 +149,7 @@ class Orchestrator:
         timeouts: TimeoutConfig | None = None,
         retry_policy: RetryPolicy | None = None,
         circuit_breakers: CircuitBreakerRegistry | None = None,
+        search_sources_store: Any = None,
     ) -> None:
         self._config = config
         self._storage = storage
@@ -159,6 +161,7 @@ class Orchestrator:
         self._llm_model = llm_model
         self._search_client = search_client or NullSearchClient()
         self._feature_web_search = feature_web_search
+        self._search_sources_store = search_sources_store
         self._facts_only_default = _coerce_bool(config.get("facts_only_default", False))
         self._facts_only_by_user: dict[int, bool] = {}
         self._timeouts = timeouts or load_timeouts(config)
@@ -1037,6 +1040,25 @@ class Orchestrator:
                     debug={"reason": "missing_payload"},
                 )
             )
+        # IMPORTANT: check enabled search sources before ambiguous-query validation.
+        # Edge-case: when all sources are disabled we must refuse with no_enabled_sources.
+        user_disabled: set[str] = set()
+        if self._search_sources_store is not None and hasattr(self._search_sources_store, "get_disabled"):
+            try:
+                user_disabled = await self._search_sources_store.get_disabled(user_id)
+            except Exception:
+                user_disabled = set()
+        sources_list = parse_sources_from_config(self._config)
+        enabled_sources = get_enabled_sources(sources_list, user_disabled)
+        if not enabled_sources:
+            return ensure_valid(
+                refused(
+                    "Нет включённых источников поиска. Используй /search_sources list и /search_sources enable <name>.",
+                    intent="command.search",
+                    mode="local",
+                    debug={"reason": "no_enabled_sources"},
+                )
+            )
         if is_search_query_ambiguous(trimmed_query):
             return ensure_valid(
                 refused(
@@ -1083,6 +1105,24 @@ class Orchestrator:
                     debug={"reason": "circuit_open"},
                 )
             )
+        user_disabled: set[str] = set()
+        if self._search_sources_store is not None and hasattr(self._search_sources_store, "get_disabled"):
+            try:
+                user_disabled = await self._search_sources_store.get_disabled(user_id)
+            except Exception:
+                user_disabled = set()
+        sources_list = parse_sources_from_config(self._config)
+        enabled_sources = get_enabled_sources(sources_list, user_disabled)
+        if not enabled_sources:
+            return ensure_valid(
+                refused(
+                    "Нет включённых источников поиска. Используй /search_sources list и /search_sources enable <источник>.",
+                    intent=intent,
+                    mode="local",
+                    debug={"reason": "no_search_sources_enabled"},
+                )
+            )
+
         log_event(
             LOGGER,
             request_context,
@@ -1101,78 +1141,77 @@ class Orchestrator:
         )
         status = "success"
         search_failed = False
-        try:
-            sources = await retry_async(
-                lambda: self._search_client.search(trimmed_query, max_results=5),
-                policy=self._retry_policy,
-                timeout_seconds=self._timeouts.web_tool_call_seconds,
-                logger=LOGGER,
-                request_context=request_context,
-                component="web",
-                name="web_search",
-                is_retryable=self._is_retryable_exception,
-            )
-            circuit_event = breaker.record_success()
-            if circuit_event:
-                log_event(
+        sources: list[Source] = []
+        last_exc: Exception | None = None
+        for _ in enabled_sources:
+            try:
+                sources = await retry_async(
+                    lambda: self._search_client.search(trimmed_query, max_results=5),
+                    policy=self._retry_policy,
+                    timeout_seconds=self._timeouts.web_tool_call_seconds,
+                    logger=LOGGER,
+                    request_context=request_context,
+                    component="web",
+                    name="web_search",
+                    is_retryable=self._is_retryable_exception,
+                )
+                if sources:
+                    circuit_event = breaker.record_success()
+                    if circuit_event:
+                        log_event(
+                            LOGGER,
+                            request_context,
+                            component="web",
+                            event=circuit_event,
+                            status="ok",
+                            name="web_search",
+                        )
+                    break
+            except asyncio.TimeoutError as exc:
+                last_exc = exc
+                search_failed = True
+                circuit_event = breaker.record_failure()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="web",
+                        event=circuit_event,
+                        status="error",
+                        name="web_search",
+                    )
+                log_error(
                     LOGGER,
                     request_context,
                     component="web",
-                    event=circuit_event,
-                    status="ok",
-                    name="web_search",
+                    where="web.search.timeout",
+                    exc=exc,
                 )
-        except asyncio.TimeoutError as exc:
+                continue
+            except Exception as exc:
+                last_exc = exc
+                search_failed = True
+                circuit_event = breaker.record_failure()
+                if circuit_event:
+                    log_event(
+                        LOGGER,
+                        request_context,
+                        component="web",
+                        event=circuit_event,
+                        status="error",
+                        name="web_search",
+                    )
+                log_error(
+                    LOGGER,
+                    request_context,
+                    component="web",
+                    where="web.search",
+                    exc=exc,
+                )
+                LOGGER.warning("Web search failed (fallback): %s", exc, exc_info=True)
+                continue
+        if not sources and last_exc is not None and isinstance(last_exc, asyncio.TimeoutError):
             status = "error"
-            circuit_event = breaker.record_failure()
-            if circuit_event:
-                log_event(
-                    LOGGER,
-                    request_context,
-                    component="web",
-                    event=circuit_event,
-                    status="error",
-                    name="web_search",
-                )
-            log_error(
-                LOGGER,
-                request_context,
-                component="web",
-                where="web.search.timeout",
-                exc=exc,
-            )
-            sources = []
-            return ensure_valid(
-                error(
-                    map_error_text("timeout"),
-                    intent=intent,
-                    mode="tool",
-                    debug={"reason": "timeout"},
-                )
-            )
-        except Exception as exc:
-            status = "error"
-            search_failed = True
-            circuit_event = breaker.record_failure()
-            if circuit_event:
-                log_event(
-                    LOGGER,
-                    request_context,
-                    component="web",
-                    event=circuit_event,
-                    status="error",
-                    name="web_search",
-                )
-            log_error(
-                LOGGER,
-                request_context,
-                component="web",
-                where="web.search",
-                exc=exc,
-            )
-            LOGGER.warning("Web search failed: %s", exc, exc_info=True)
-            sources = []
-        finally:
             duration_ms = elapsed_ms(started_at)
             log_event(
                 LOGGER,
@@ -1190,6 +1229,31 @@ class Orchestrator:
                 status=status,
                 duration_ms=duration_ms,
             )
+            return ensure_valid(
+                error(
+                    map_error_text("timeout"),
+                    intent=intent,
+                    mode="tool",
+                    debug={"reason": "timeout"},
+                )
+            )
+        duration_ms = elapsed_ms(started_at)
+        log_event(
+            LOGGER,
+            request_context,
+            component="web",
+            event="web.search.end",
+            status=status,
+            duration_ms=duration_ms,
+        )
+        add_trace(
+            request_context,
+            step="web.search",
+            component="web",
+            name="web_search",
+            status=status,
+            duration_ms=duration_ms,
+        )
 
         if not sources and search_failed:
             return ensure_valid(

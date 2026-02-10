@@ -56,6 +56,7 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("ask", handlers.ask))
     application.add_handler(CommandHandler("summary", handlers.summary))
     application.add_handler(CommandHandler("search", handlers.search))
+    application.add_handler(CommandHandler("search_sources", handlers.search_sources))
     application.add_handler(CommandHandler("trace", handlers.trace_command))
     application.add_handler(CommandHandler("facts_on", handlers.facts_on))
     application.add_handler(CommandHandler("facts_off", handlers.facts_off))
@@ -187,6 +188,7 @@ def main() -> None:
         per_day = rate_limits.get("per_day")
     rate_limiter = LLMRateLimiter(per_minute=per_minute, per_day=per_day)
 
+    import app.infra.search_sources_store as search_sources_store
     orchestrator = Orchestrator(
         config=config,
         storage=storage,
@@ -200,6 +202,7 @@ def main() -> None:
         timeouts=timeouts,
         retry_policy=retry_policy,
         circuit_breakers=circuit_breakers,
+        search_sources_store=search_sources_store,
     )
     dialog_memory = DialogMemory(
         settings.dialog_memory_path,
@@ -283,7 +286,9 @@ def main() -> None:
         reminder_scheduler=reminder_scheduler,
         settings=settings,
         profile_store=profile_store,
+        memory_manager=memory_manager,
     )
+    application.bot_data["search_sources_store"] = search_sources_store
     startup_context = RequestContext(
         correlation_id="startup",
         user_id=0,

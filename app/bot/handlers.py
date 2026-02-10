@@ -36,6 +36,7 @@ from app.core.last_state_resolver import ResolutionResult, resolve_short_message
 from app.core.memory_layers import build_memory_layers_context
 from app.core.memory_manager import MemoryManager
 from app.core.orchestrator import Orchestrator
+from app.core.search_sources import parse_sources_from_config
 from app.core.file_text_extractor import FileTextExtractor, OCRNotAvailableError
 from app.core.user_profile import UserProfile
 from app.core.result import (
@@ -2137,6 +2138,93 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         set_status(context, "error")
         await _handle_exception(update, context, exc)
         return
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def search_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    args = [a.strip() for a in (context.args or []) if a.strip()]
+    sub = (args[0].lower() if args else "") or "list"
+    orchestrator = _get_orchestrator(context)
+    store = context.application.bot_data.get("search_sources_store")
+    sources = parse_sources_from_config(orchestrator.config)
+    if sub == "list":
+        if store:
+            user_disabled = await store.get_disabled(user_id)
+        else:
+            user_disabled = set()
+        lines = [
+            f"• {s.name} ({s.id}): {'выкл' if s.id in user_disabled else 'вкл'}"
+            for s in sources
+        ]
+        text = "Источники поиска:\n" + "\n".join(lines) if lines else "Нет источников в конфиге."
+        result = ok(text, intent="command.search_sources.list", mode="local")
+        await send_result(update, context, result)
+        return
+    if sub == "enable":
+        source_id = " ".join(args[1:]).strip() if len(args) > 1 else ""
+        if not source_id:
+            result = refused(
+                "Укажи источник: /search_sources enable <источник>",
+                intent="command.search_sources.enable",
+                mode="local",
+            )
+            await send_result(update, context, result)
+            return
+        valid_ids = {s.id for s in sources}
+        if source_id not in valid_ids:
+            result = refused(
+                f"Неизвестный источник: {source_id}. Доступны: {', '.join(sorted(valid_ids))}",
+                intent="command.search_sources.enable",
+                mode="local",
+            )
+            await send_result(update, context, result)
+            return
+        if not store:
+            result = error("Хранилище источников не настроено.", intent="command.search_sources.enable", mode="local")
+            await send_result(update, context, result)
+            return
+        changed = await store.set_enabled(user_id, source_id)
+        text = f"Источник «{source_id}» включён." if changed else f"Источник «{source_id}» уже был включён."
+        result = ok(text, intent="command.search_sources.enable", mode="local")
+        await send_result(update, context, result)
+        return
+    if sub == "disable":
+        source_id = " ".join(args[1:]).strip() if len(args) > 1 else ""
+        if not source_id:
+            result = refused(
+                "Укажи источник: /search_sources disable <источник>",
+                intent="command.search_sources.disable",
+                mode="local",
+            )
+            await send_result(update, context, result)
+            return
+        valid_ids = {s.id for s in sources}
+        if source_id not in valid_ids:
+            result = refused(
+                f"Неизвестный источник: {source_id}. Доступны: {', '.join(sorted(valid_ids))}",
+                intent="command.search_sources.disable",
+                mode="local",
+            )
+            await send_result(update, context, result)
+            return
+        if not store:
+            result = error("Хранилище источников не настроено.", intent="command.search_sources.disable", mode="local")
+            await send_result(update, context, result)
+            return
+        changed = await store.set_disabled(user_id, source_id)
+        text = f"Источник «{source_id}» отключён." if changed else f"Источник «{source_id}» уже был отключён."
+        result = ok(text, intent="command.search_sources.disable", mode="local")
+        await send_result(update, context, result)
+        return
+    result = refused(
+        "Использование: /search_sources list | enable <источник> | disable <источник>",
+        intent="command.search_sources",
+        mode="local",
+    )
     await send_result(update, context, result)
 
 

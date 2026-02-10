@@ -9,10 +9,16 @@ from telegram.ext import Application, ContextTypes
 
 from app.bot.actions import ActionStore, build_inline_keyboard
 from app.core.result import Action
+from app.infra.llm import ensure_plain_text
 
 from app.core import calendar_store
 
 LOGGER = logging.getLogger(__name__)
+
+_REMINDER_LLM_SYSTEM = (
+    "Ты помогаешь сформировать короткое напоминание для пользователя. "
+    "Учитывай контекст диалога. Ответь только текстом напоминания, 1-3 предложения, без лишнего."
+)
 
 
 def _get_default_offset_minutes() -> int:
@@ -173,7 +179,8 @@ class ReminderScheduler:
         event = await self._store.get_event(reminder.event_id)
         event_dt = event.dt if event else reminder.trigger_at
         event_label = event_dt.astimezone(self._timezone).strftime("%Y-%m-%d %H:%M")
-        text = f"⏰ Напоминание: {reminder.text}\nКогда: {event_label} (МСК)"
+        message_body = await _build_reminder_message(reminder, self._application)
+        text = f"⏰ Напоминание: {message_body}\nКогда: {event_label} (МСК)"
         actions = _build_reminder_actions(reminder)
         action_store = self._application.bot_data.get("action_store")
         reply_markup = None
@@ -242,6 +249,44 @@ def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Actio
             payload={"op": "reminder.delete_confirm", "reminder_id": reminder.id},
         ),
     ]
+
+
+async def _build_reminder_message(
+    reminder: calendar_store.ReminderItem,
+    application: Application,
+) -> str:
+    """Build reminder text, optionally enhanced by LLM when llm_context is present."""
+    if not getattr(reminder, "llm_context", None) or not reminder.llm_context:
+        return reminder.text
+    llm_client = application.bot_data.get("llm_client")
+    if not llm_client or not getattr(llm_client, "api_key", None):
+        return reminder.text
+    model = "sonar"
+    orchestrator = application.bot_data.get("orchestrator")
+    if isinstance(orchestrator, object) and hasattr(orchestrator, "config"):
+        cfg = getattr(orchestrator, "config", {}) or {}
+        model = cfg.get("llm", {}).get("model", model) if isinstance(cfg.get("llm"), dict) else model
+    user_content = (
+        f"Контекст диалога:\n{reminder.llm_context}\n\n"
+        f"Текст напоминания: {reminder.text}\n\n"
+        "Сформируй короткое дружелюбное сообщение для пользователя (1-3 предложения), сохраняя смысл."
+    )
+    messages = [
+        {"role": "system", "content": _REMINDER_LLM_SYSTEM},
+        {"role": "user", "content": user_content},
+    ]
+    try:
+        response = await llm_client.generate_text(model=model, messages=messages, web_search_options=None)
+        out = ensure_plain_text(response).strip()
+        if out:
+            return out
+    except Exception:
+        LOGGER.warning(
+            "Reminder LLM enhancement failed, using plain text: reminder_id=%s",
+            reminder.id,
+            exc_info=True,
+        )
+    return reminder.text
 
 
 def get_default_offset_minutes() -> int:
