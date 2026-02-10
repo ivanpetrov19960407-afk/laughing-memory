@@ -93,7 +93,6 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("reminders", handlers.reminders))
     application.add_handler(CommandHandler("reminder_off", handlers.reminder_off))
     application.add_handler(CommandHandler("reminder_on", handlers.reminder_on))
-    application.add_handler(CommandHandler("set_timezone", handlers.set_timezone))
     application.add_handler(CommandHandler("selfcheck", handlers.selfcheck))
     application.add_handler(CommandHandler("health", handlers.health))
     application.add_handler(CommandHandler("config", handlers.config_command))

@@ -82,23 +82,64 @@ class ReminderScheduler:
             )
             return None
 
-        if self._app_scheduler is None:
-            LOGGER.warning("Reminder scheduling skipped: no app_scheduler (reminder_id=%s)", reminder.id)
+        if self._app_scheduler is not None:
+            if self._app_scheduler.add_reminder_job(reminder.id, trigger_at):
+                LOGGER.info(
+                    "Reminder scheduled: reminder_id=%s event_id=%s trigger_at=%s",
+                    reminder.id,
+                    reminder.event_id,
+                    reminder.trigger_at.isoformat(),
+                )
+                return self._job_name(reminder.id)
             return None
-        if self._app_scheduler.add_reminder_job(reminder.id, trigger_at):
+        job_queue = getattr(self._application, "job_queue", None)
+        if job_queue is not None:
+            job_name = self._job_name(reminder.id)
+            for job in job_queue.get_jobs_by_name(job_name):
+                job.schedule_removal()
+            when_value = 0 if trigger_at <= current else trigger_at
+            job_queue.run_once(
+                self._job_callback,
+                when=when_value,
+                name=job_name,
+                data={"reminder_id": reminder.id},
+            )
             LOGGER.info(
-                "Reminder scheduled: reminder_id=%s event_id=%s trigger_at=%s",
+                "Reminder scheduled (job_queue): reminder_id=%s trigger_at=%s",
                 reminder.id,
-                reminder.event_id,
                 reminder.trigger_at.isoformat(),
             )
-            return self._job_name(reminder.id)
+            return job_name
+        LOGGER.warning("Reminder scheduling skipped: no app_scheduler and no job_queue (reminder_id=%s)", reminder.id)
         return None
+
+    async def _job_callback(self, context: Any) -> None:
+        """Used when scheduling via job_queue fallback (e.g. in tests)."""
+        reminder_id = None
+        if context and getattr(context, "job", None) and isinstance(getattr(context.job, "data", None), dict):
+            reminder_id = context.job.data.get("reminder_id")
+        if not reminder_id or not isinstance(reminder_id, str):
+            LOGGER.warning("Reminder job missing reminder_id")
+            return
+        from app.core.app_scheduler import _run_reminder_job
+        application = getattr(context, "application", None) or self._application
+        await _run_reminder_job(
+            reminder_id=reminder_id,
+            application=application,
+            calendar_store_module=self._store,
+            profile_store=getattr(application, "bot_data", {}).get("profile_store"),
+        )
 
     async def cancel_reminder(self, reminder_id: str) -> bool:
         removed = False
         if self._app_scheduler is not None:
             removed = self._app_scheduler.remove_reminder_job(reminder_id)
+        else:
+            job_queue = getattr(self._application, "job_queue", None)
+            if job_queue is not None:
+                for job in job_queue.get_jobs_by_name(self._job_name(reminder_id)):
+                    job.schedule_removal()
+                    removed = True
         store_updated = await self._store.disable_reminder(reminder_id)
         LOGGER.info(
             "Reminder canceled: reminder_id=%s job_removed=%s store_updated=%s",
