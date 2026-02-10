@@ -1293,6 +1293,23 @@ class Orchestrator:
                 )
             )
 
+        # В режиме facts_only проверяем цитаты [N] в ответе LLM до добавления блока «Источники:»,
+        # иначе блок сам содержит [1], [2] и проверка всегда проходит.
+        if facts_only and sources:
+            result_for_citation_check = ok(
+                execution.result,
+                intent=intent,
+                mode="llm",
+                sources=sources,
+            )
+            strict_checked = ensure_safe_text_strict(
+                result_for_citation_check,
+                facts_enabled=True,
+                allow_sources_in_text=True,
+            )
+            if strict_checked.status == "refused" and (strict_checked.debug or {}).get("reason") == "facts_no_citations":
+                return ensure_valid(strict_checked)
+
         rendered = render_fact_response_with_sources(execution.result, sources)
         result = ok(
             rendered,
