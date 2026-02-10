@@ -267,3 +267,80 @@ def test_ensure_valid_normalizes_none_actions() -> None:
     )
     normalized = ensure_valid(result)
     assert normalized.actions == []
+
+
+def test_ensure_valid_empty_text_gets_fallback_stub() -> None:
+    result = ensure_valid({"status": "ok", "text": "", "intent": "test.example"})
+    assert result.text.strip() != ""
+    assert "меню" in result.text.lower() or "menu" in result.text.lower()
+    assert result.status == "refused"
+
+
+def test_ensure_valid_refused_preserves_message() -> None:
+    msg = "Доступ запрещён."
+    result = ensure_valid({"status": "refused", "text": msg, "intent": "auth.refused", "mode": "local"})
+    assert result.status == "refused"
+    assert result.text == msg
+    assert result.intent == "auth.refused"
+    assert result.mode == "local"
+
+
+def test_ensure_valid_actions_validated_and_kept() -> None:
+    result = ensure_valid({
+        "status": "ok",
+        "text": "Done",
+        "intent": "test.done",
+        "actions": [
+            {"id": "a1", "label": "Button", "payload": {"op": "open"}},
+        ],
+    })
+    assert len(result.actions) == 1
+    assert result.actions[0].id == "a1"
+    assert result.actions[0].label == "Button"
+    assert result.actions[0].payload == {"op": "open"}
+    result.validate()
+
+
+def test_ensure_valid_modes_no_conflict() -> None:
+    for mode in ("local", "llm", "tool"):
+        r = ensure_valid({"status": "ok", "text": "x", "intent": "test.x", "mode": mode})
+        assert r.mode == mode
+        assert r.status == "ok"
+
+
+def test_ensure_valid_intent_without_dot_gets_fallback() -> None:
+    result = ensure_valid({"status": "ok", "text": "x", "intent": "nodot"})
+    assert result.intent == "unknown.unknown"
+
+
+def test_ensure_valid_intent_with_dot_preserved() -> None:
+    result = ensure_valid({"status": "ok", "text": "x", "intent": "wizard.calendar.confirm"})
+    assert result.intent == "wizard.calendar.confirm"
+
+
+def test_ensure_valid_sources_validated_non_empty_url() -> None:
+    result = ensure_valid({
+        "status": "ok",
+        "text": "Answer",
+        "intent": "search.result",
+        "sources": [
+            {"title": "T", "url": "https://example.com", "snippet": "S"},
+            {"title": "X", "url": "", "snippet": ""},
+        ],
+    })
+    assert len(result.sources) == 1
+    assert result.sources[0].url == "https://example.com"
+    assert "invalid_sources" in result.debug or len(result.sources) == 1
+
+
+def test_ensure_valid_orchestrator_result_instance_preserves_fields() -> None:
+    from app.core.result import Source
+    src = Source(title="A", url="https://a.com", snippet="x")
+    orig = ok("Hello", intent="test.example", mode="tool", sources=[src])
+    out = ensure_valid(orig)
+    assert out.text == orig.text
+    assert out.status == orig.status
+    assert out.mode == orig.mode
+    assert out.intent == orig.intent
+    assert len(out.sources) == 1
+    assert out.sources[0].url == src.url

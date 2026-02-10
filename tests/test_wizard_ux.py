@@ -91,3 +91,91 @@ def test_invalid_input_in_wizard_shows_menu(tmp_path) -> None:
     assert state is not None
     assert expired is False
     assert state.step == wizard.STEP_AWAIT_TITLE
+
+
+def test_wizard_back_calendar_add_happy_path(tmp_path) -> None:
+    """Back from confirm -> await_title -> await_datetime; data preserved."""
+    store = WizardStore(tmp_path / "wizards")
+    manager = WizardManager(store)
+    asyncio_run(
+        manager.handle_action(
+            user_id=1,
+            chat_id=10,
+            op="wizard_start",
+            payload={"wizard_id": wizard.WIZARD_CALENDAR_ADD},
+        )
+    )
+    asyncio_run(manager.handle_text(user_id=1, chat_id=10, text="2026-02-05 18:30"))
+    asyncio_run(manager.handle_text(user_id=1, chat_id=10, text="Врач"))
+    state, _ = store.load_state(user_id=1, chat_id=10)
+    assert state is not None
+    assert state.step == wizard.STEP_CONFIRM
+
+    back1 = asyncio_run(
+        manager.handle_action(user_id=1, chat_id=10, op="wizard_back", payload={})
+    )
+    assert back1 is not None
+    assert back1.status == "ok"
+    state1, _ = store.load_state(user_id=1, chat_id=10)
+    assert state1 is not None
+    assert state1.step == wizard.STEP_AWAIT_TITLE
+    assert state1.data.get("dt")
+
+    back2 = asyncio_run(
+        manager.handle_action(user_id=1, chat_id=10, op="wizard_back", payload={})
+    )
+    assert back2 is not None
+    assert back2.status == "ok"
+    state2, _ = store.load_state(user_id=1, chat_id=10)
+    assert state2 is not None
+    assert state2.step == wizard.STEP_AWAIT_DATETIME
+    assert state2.data.get("dt")
+
+    back3 = asyncio_run(
+        manager.handle_action(user_id=1, chat_id=10, op="wizard_back", payload={})
+    )
+    assert back3 is not None
+    assert back3.status == "refused"
+    assert "первый шаг" in back3.text.lower() or "первый" in back3.text.lower()
+    state3, _ = store.load_state(user_id=1, chat_id=10)
+    assert state3 is not None
+    assert state3.step == wizard.STEP_AWAIT_DATETIME
+
+
+def test_wizard_back_reminder_create_happy_path(tmp_path) -> None:
+    """Back from recurrence -> await_datetime -> await_title."""
+    store = WizardStore(tmp_path / "wizards")
+    manager = WizardManager(store)
+    asyncio_run(
+        manager.handle_action(
+            user_id=1,
+            chat_id=10,
+            op="wizard_start",
+            payload={"wizard_id": wizard.WIZARD_REMINDER_CREATE},
+        )
+    )
+    asyncio_run(manager.handle_text(user_id=1, chat_id=10, text="Позвонить"))
+    asyncio_run(manager.handle_text(user_id=1, chat_id=10, text="2026-02-06 09:00"))
+    state, _ = store.load_state(user_id=1, chat_id=10)
+    assert state is not None
+    assert state.step == wizard.STEP_AWAIT_RECURRENCE
+
+    back1 = asyncio_run(
+        manager.handle_action(user_id=1, chat_id=10, op="wizard_back", payload={})
+    )
+    assert back1 is not None
+    assert back1.status == "ok"
+    state1, _ = store.load_state(user_id=1, chat_id=10)
+    assert state1 is not None
+    assert state1.step == wizard.STEP_AWAIT_DATETIME
+    assert state1.data.get("title") == "Позвонить"
+
+    back2 = asyncio_run(
+        manager.handle_action(user_id=1, chat_id=10, op="wizard_back", payload={})
+    )
+    assert back2 is not None
+    assert back2.status == "ok"
+    state2, _ = store.load_state(user_id=1, chat_id=10)
+    assert state2 is not None
+    assert state2.step == wizard.STEP_AWAIT_TITLE
+    assert state2.data.get("title") == "Позвонить"

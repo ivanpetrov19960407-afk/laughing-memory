@@ -78,6 +78,21 @@ def test_delete_series_future_trims_overrides() -> None:
     assert updated.rrule is not None and "UNTIL=" in updated.rrule
 
 
+def test_delete_instance_this_adds_exdate_keeps_series() -> None:
+    """Удаление одного экземпляра добавляет exdate; серия и rrule остаются."""
+    tz = ZoneInfo("Europe/Moscow")
+    series = _series(tz)
+    instance_dt = series.start_dt + timedelta(days=2)
+    updated = delete_instance_this(series, instance_dt)
+    assert updated.rrule == series.rrule
+    assert updated.series_id == series.series_id
+    assert len(updated.exdates) == len(series.exdates) + 1
+    assert any(
+        ex.date() == instance_dt.date() and ex.hour == instance_dt.hour
+        for ex in updated.exdates
+    )
+
+
 def test_delete_instance_this_dst_keeps_timezone() -> None:
     tz = ZoneInfo("Europe/Amsterdam")
     series = RecurrenceSeries(

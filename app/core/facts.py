@@ -10,11 +10,27 @@ def render_fact_response_with_sources(text: str, sources: list[Source]) -> str:
     return "\n".join([text.rstrip(), "", block]).strip()
 
 
+def _dedupe_sources_by_url(sources: list[Source]) -> list[Source]:
+    """Keep first occurrence per URL; preserves order."""
+    seen: set[str] = set()
+    out: list[Source] = []
+    for s in sources:
+        url = (s.url or "").strip()
+        key = url.lower() if url else f"no_url_{id(s)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
 def format_sources_block(sources: list[Source]) -> str:
+    """Единый формат блока «Источники:» с нумерацией [1], [2], …; дубликаты URL не выводятся."""
     if not sources:
         return "Источники:\n(нет)"
+    unique = _dedupe_sources_by_url(sources)
     lines = ["Источники:"]
-    for index, source in enumerate(sources, start=1):
+    for index, source in enumerate(unique, start=1):
         title = _trim(source.title or source.url, 140)
         url = (source.url or "").strip()
         if url:
@@ -25,8 +41,12 @@ def format_sources_block(sources: list[Source]) -> str:
 
 
 def build_sources_prompt(sources: list[Source]) -> str:
+    """Формирует блок источников для промпта LLM; дубликаты URL пропускаются."""
+    if not sources:
+        return "Источники:\n(нет)"
+    unique = _dedupe_sources_by_url(sources)
     lines = ["Источники:"]
-    for index, source in enumerate(sources, start=1):
+    for index, source in enumerate(unique, start=1):
         title = _trim(source.title or source.url, 140)
         snippet = _trim(source.snippet, 400)
         lines.append(f"[{index}] {title} — {source.url}")

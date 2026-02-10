@@ -47,6 +47,7 @@ def test_unknown_command_fallback(monkeypatch) -> None:
     result = captured["result"]
     assert result.status == "refused"
     assert result.text.strip()
+    assert any(a.payload.get("op") == "menu_open" for a in result.actions)
 
 
 def test_refused_text_is_sent(monkeypatch) -> None:

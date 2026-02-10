@@ -69,6 +69,34 @@ async def check_connection(config: CalDAVConfig) -> tuple[bool, str | None]:
     return await asyncio.to_thread(_check_connection_sync, config)
 
 
+def _run_with_retry(
+    fn,
+    *,
+    max_attempts: int = 3,
+    correlation_id: str | None = None,
+):
+    """Выполняет fn(); при сетевых ошибках повторяет до max_attempts раз. Логирует с correlation_id."""
+    err: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except (ConnectionError, TimeoutError, OSError) as e:
+            err = e
+            cid = correlation_id or "-"
+            LOGGER.warning(
+                "CalDAV transient error correlation_id=%s attempt=%s/%s error=%s",
+                cid,
+                attempt + 1,
+                max_attempts,
+                e,
+            )
+            if attempt == max_attempts - 1:
+                raise
+    if err is not None:
+        raise err
+    return None
+
+
 async def create_event(
     config: CalDAVConfig,
     *,
@@ -82,6 +110,7 @@ async def create_event(
     rrule: str | None = None,
     exdates: list[datetime] | None = None,
 ) -> CreatedEvent:
+    correlation_id = uuid.uuid4().hex[:12]
     return await asyncio.to_thread(
         _create_event_sync,
         config,
@@ -94,6 +123,7 @@ async def create_event(
         uid,
         rrule,
         exdates,
+        correlation_id,
     )
 
 
@@ -153,8 +183,13 @@ def _create_event_sync(
     uid: str | None,
     rrule: str | None,
     exdates: list[datetime] | None,
+    correlation_id: str | None = None,
 ) -> CreatedEvent:
-    calendar, calendar_name = _resolve_calendar(config)
+    calendar, calendar_name = _run_with_retry(
+        lambda: _resolve_calendar(config),
+        max_attempts=3,
+        correlation_id=correlation_id,
+    )
     start_utc = _to_utc(_ensure_aware(start_at, tz))
     end_value = end_at if isinstance(end_at, datetime) else start_at + timedelta(hours=1)
     end_utc = _to_utc(_ensure_aware(end_value, tz))
@@ -171,7 +206,11 @@ def _create_event_sync(
     )
     calendar_url = _calendar_url(calendar)
     href = _build_event_url(calendar_url, uid)
-    _put_event(href, ical, config)
+    _run_with_retry(
+        lambda: _put_event(href, ical, config),
+        max_attempts=3,
+        correlation_id=correlation_id,
+    )
     return CreatedEvent(
         uid=uid,
         href=href,

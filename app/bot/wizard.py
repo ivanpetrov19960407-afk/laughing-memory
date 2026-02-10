@@ -384,6 +384,22 @@ class WizardManager:
         op: str,
         payload: dict[str, object],
     ) -> OrchestratorResult:
+        if op == "wizard_back":
+            if state.step == STEP_CONFIRM:
+                updated = _touch_state(state, step=STEP_AWAIT_TITLE, data={k: v for k, v in state.data.items() if k == "dt"})
+                self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+                return _render_prompt(updated)
+            if state.step == STEP_AWAIT_TITLE:
+                updated = _touch_state(state, step=STEP_AWAIT_DATETIME, data={k: v for k, v in state.data.items() if k == "dt"})
+                self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+                return _render_prompt(updated)
+            if state.step == STEP_AWAIT_DATETIME:
+                return refused(
+                    "Уже первый шаг. Введи дату или отмени сценарий.",
+                    intent="wizard.calendar.back",
+                    mode="local",
+                    actions=_step_actions(),
+                )
         if op == "wizard_edit":
             updated = _touch_state(state, step=STEP_AWAIT_DATETIME, data={})
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
@@ -536,6 +552,26 @@ class WizardManager:
         op: str,
         payload: dict[str, object],
     ) -> OrchestratorResult:
+        if op == "wizard_back":
+            if state.step == STEP_CONFIRM:
+                updated = _touch_state(state, step=STEP_AWAIT_RECURRENCE, data={k: v for k, v in state.data.items() if k in ("title", "trigger_at")})
+                self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+                return _render_prompt(updated)
+            if state.step == STEP_AWAIT_RECURRENCE:
+                updated = _touch_state(state, step=STEP_AWAIT_DATETIME, data={k: v for k, v in state.data.items() if k == "title"})
+                self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+                return _render_prompt(updated)
+            if state.step == STEP_AWAIT_DATETIME:
+                updated = _touch_state(state, step=STEP_AWAIT_TITLE, data={})
+                self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+                return _render_prompt(updated)
+            if state.step == STEP_AWAIT_TITLE:
+                return refused(
+                    "Уже первый шаг. Напиши текст напоминания или отмени сценарий.",
+                    intent="wizard.reminder_create.back",
+                    mode="local",
+                    actions=_step_actions(),
+                )
         if op == "wizard_edit":
             updated = _touch_state(state, step=STEP_AWAIT_TITLE, data={})
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
@@ -682,6 +718,18 @@ class WizardManager:
         op: str,
         payload: dict[str, object],
     ) -> OrchestratorResult:
+        if op == "wizard_back":
+            if state.step == STEP_CONFIRM:
+                updated = _touch_state(state, step=STEP_AWAIT_DATETIME, data={k: v for k, v in state.data.items() if k != "new_trigger_at"})
+                self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
+                return _render_prompt(updated)
+            if state.step == STEP_AWAIT_DATETIME:
+                return refused(
+                    "Уже первый шаг. Введи дату или отмени сценарий.",
+                    intent="wizard.reminder.back",
+                    mode="local",
+                    actions=_step_actions(),
+                )
         if op == "wizard_edit":
             updated = _touch_state(state, step=STEP_AWAIT_DATETIME, data={"new_trigger_at": None})
             self._store.save_state(user_id=user_id, chat_id=chat_id, state=updated)
@@ -1033,7 +1081,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
             "Можно: сегодня 18:30, 07.02 12:00 или через 10 минут.",
             intent="wizard.reminder_create.datetime",
             mode="local",
-            actions=_step_actions(),
+            actions=[_back_action(), *_step_actions()],
         )
     if state.wizard_id == WIZARD_REMINDER_CREATE and state.step == STEP_AWAIT_RECURRENCE:
         return ok(
@@ -1041,7 +1089,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
             "Поддерживается интервал: daily/2, weekdays/2, weekly:1,3/2, monthly:15/2.",
             intent="wizard.reminder_create.recurrence",
             mode="local",
-            actions=_reminder_recurrence_actions(),
+            actions=[_back_action(), *_reminder_recurrence_actions()],
         )
     if state.wizard_id == WIZARD_REMINDER_CREATE and state.step == STEP_CONFIRM:
         title = state.data.get("title") if isinstance(state.data.get("title"), str) else "без текста"
@@ -1054,7 +1102,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
             f"Создать напоминание: {title}\nКогда: {display_dt} (МСК)\nПовтор: {_recurrence_label(recurrence)}?",
             intent="wizard.reminder_create.confirm",
             mode="local",
-            actions=_confirm_actions(),
+            actions=[_back_action(), *_confirm_actions()],
         )
     if state.wizard_id == WIZARD_REMINDER_RESCHEDULE and state.step == STEP_AWAIT_DATETIME:
         return ok(
@@ -1082,7 +1130,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
             f"Перенести напоминание на {display_dt}?",
             intent="wizard.reminder.confirm",
             mode="local",
-            actions=_confirm_actions(),
+            actions=[_back_action(), *_confirm_actions()],
         )
     if state.step == STEP_AWAIT_DATETIME:
         return ok(
@@ -1097,7 +1145,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
             "Как назвать событие? Например: Врач.",
             intent="wizard.calendar.title",
             mode="local",
-            actions=_step_actions(),
+            actions=[_back_action(), *_step_actions()],
         )
     if state.step == STEP_CONFIRM:
         dt_value = state.data.get("dt")
@@ -1119,7 +1167,7 @@ def _render_prompt(state: WizardState) -> OrchestratorResult:
             f"Верно понял: {display_dt} — {title_text}. Создать?",
             intent="wizard.calendar.confirm",
             mode="local",
-            actions=_confirm_actions(),
+            actions=[_back_action(), *_confirm_actions()],
         )
     return refused("Неизвестный шаг.", intent="wizard.calendar.step", mode="local", actions=_menu_actions())
 
@@ -1310,6 +1358,10 @@ def _expired_result() -> OrchestratorResult:
 
 def _menu_actions() -> list[Action]:
     return [menu.menu_action()]
+
+
+def _back_action() -> Action:
+    return Action(id="wizard.back", label="⬅️ Назад", payload={"op": "wizard_back"})
 
 
 def _step_actions() -> list[Action]:
