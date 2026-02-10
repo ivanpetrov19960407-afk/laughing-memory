@@ -233,7 +233,6 @@ def main() -> None:
         calendar_store_module=calendar_store,
         profile_store=profile_store,
     )
-    app_scheduler.start()
     application.bot_data["app_scheduler"] = app_scheduler
     reminder_scheduler = ReminderScheduler(
         application=application,
@@ -325,6 +324,9 @@ def main() -> None:
     # Напоминания и дайджест планируются через APScheduler (app_scheduler).
 
     async def _restore_reminders(app: Application) -> None:
+        app_scheduler = app.bot_data.get("app_scheduler")
+        if app_scheduler is not None:
+            app_scheduler.start()
         if not settings.reminders_enabled:
             logging.getLogger(__name__).info("Reminders disabled by config")
         else:
@@ -348,6 +350,9 @@ def main() -> None:
             app.bot_data["digest_scheduler"] = start_digest_scheduler(app)
 
     async def _post_shutdown(app: Application) -> None:
+        app_scheduler = app.bot_data.pop("app_scheduler", None)
+        if app_scheduler is not None:
+            app_scheduler.shutdown(wait=True)
         scheduler = app.bot_data.pop("digest_scheduler", None)
         stop_digest_scheduler(scheduler)
 
@@ -358,10 +363,6 @@ def main() -> None:
     application.add_error_handler(handlers.error_handler)
 
     logging.getLogger(__name__).info("Bot started")
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
     application.run_polling()
 
 
