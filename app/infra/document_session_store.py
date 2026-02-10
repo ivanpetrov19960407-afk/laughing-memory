@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 from uuid import uuid4
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -19,6 +22,7 @@ class DocumentSession:
     state: str
     created_at: datetime
     updated_at: datetime
+    expires_at: datetime
 
 
 class DocumentSessionStore:
@@ -26,12 +30,12 @@ class DocumentSessionStore:
         self,
         path: Path,
         *,
+        ttl_seconds: int = 7200,
         now_provider: Callable[[], datetime] | None = None,
-        ttl_hours: int = 24,
     ) -> None:
         self._path = path
+        self._ttl_seconds = max(60, ttl_seconds)
         self._now_provider = now_provider or (lambda: datetime.now(timezone.utc))
-        self._ttl_hours = ttl_hours
         self._sessions: dict[str, DocumentSession] = {}
         self._active_by_key: dict[str, str] = {}
 
@@ -43,24 +47,12 @@ class DocumentSessionStore:
         active = payload.get("active_by_key", {})
         if isinstance(active, dict):
             self._active_by_key = {str(key): str(value) for key, value in active.items()}
-        now = self._now_provider()
-        ttl_delta = timedelta(hours=self._ttl_hours)
         for item in sessions:
             if not isinstance(item, dict):
                 continue
-            session = _deserialize_session(item)
+            session = _deserialize_session(item, ttl_seconds=self._ttl_seconds)
             if session:
-                # Проверяем TTL при загрузке
-                if now - session.updated_at > ttl_delta:
-                    continue  # Пропускаем истёкшие сессии
                 self._sessions[session.doc_id] = session
-        # Очищаем активные сессии, если они истекли
-        expired_keys = []
-        for key, doc_id in self._active_by_key.items():
-            if doc_id not in self._sessions:
-                expired_keys.append(key)
-        for key in expired_keys:
-            self._active_by_key.pop(key, None)
 
     def save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,6 +73,7 @@ class DocumentSessionStore:
         state: str = "action_select",
     ) -> DocumentSession:
         now = self._now_provider()
+        expires_at = now + timedelta(seconds=self._ttl_seconds)
         session = DocumentSession(
             doc_id=str(uuid4()),
             user_id=user_id,
@@ -91,32 +84,76 @@ class DocumentSessionStore:
             state=state,
             created_at=now,
             updated_at=now,
+            expires_at=expires_at,
         )
         self._sessions[session.doc_id] = session
         self._active_by_key[_active_key(user_id, chat_id)] = session.doc_id
         self.save()
+        LOGGER.info(
+            "doc_session_started user_id=%s chat_id=%s doc_id=%s",
+            user_id,
+            chat_id,
+            session.doc_id,
+        )
         return session
+
+    def _is_expired(self, session: DocumentSession) -> bool:
+        return self._now_provider() >= session.expires_at
 
     def get_session(self, doc_id: str) -> DocumentSession | None:
-        return self._sessions.get(doc_id)
+        session, _ = self.get_session_with_status(doc_id)
+        return session
 
-    def get_active(self, *, user_id: int, chat_id: int) -> DocumentSession | None:
-        doc_id = self._active_by_key.get(_active_key(user_id, chat_id))
-        if not doc_id:
-            return None
+    def get_session_with_status(
+        self, doc_id: str
+    ) -> tuple[DocumentSession | None, Literal["ok", "expired", "none"]]:
         session = self._sessions.get(doc_id)
         if session is None:
-            return None
-        # Проверяем TTL
-        now = self._now_provider()
-        ttl_delta = timedelta(hours=self._ttl_hours)
-        if now - session.updated_at > ttl_delta:
-            # Сессия истекла, удаляем
-            self._sessions.pop(doc_id, None)
-            self._active_by_key.pop(_active_key(user_id, chat_id), None)
-            self.save()
-            return None
+            return None, "none"
+        if self._is_expired(session):
+            LOGGER.info(
+                "doc_session_expired doc_id=%s user_id=%s chat_id=%s",
+                doc_id,
+                session.user_id,
+                session.chat_id,
+            )
+            self._drop_session(session)
+            return None, "expired"
+        return session, "ok"
+
+    def get_active(self, *, user_id: int, chat_id: int) -> DocumentSession | None:
+        session, _ = self.get_active_with_status(user_id=user_id, chat_id=chat_id)
         return session
+
+    def get_active_with_status(
+        self, *, user_id: int, chat_id: int
+    ) -> tuple[DocumentSession | None, Literal["ok", "expired", "none"]]:
+        """Returns (session, status). status is 'expired' when TTL exceeded."""
+        key = _active_key(user_id, chat_id)
+        doc_id = self._active_by_key.get(key)
+        if not doc_id:
+            return None, "none"
+        session = self._sessions.get(doc_id)
+        if session is None:
+            self._active_by_key.pop(key, None)
+            return None, "none"
+        if self._is_expired(session):
+            LOGGER.info(
+                "doc_session_expired user_id=%s chat_id=%s doc_id=%s",
+                user_id,
+                chat_id,
+                doc_id,
+            )
+            self._drop_session(session)
+            self._active_by_key.pop(key, None)
+            return None, "expired"
+        return session, "ok"
+
+    def _drop_session(self, session: DocumentSession) -> None:
+        key = _active_key(session.user_id, session.chat_id)
+        self._active_by_key.pop(key, None)
+        self._sessions.pop(session.doc_id, None)
+        self.save()
 
     def set_state(self, *, doc_id: str, state: str) -> DocumentSession | None:
         session = self._sessions.get(doc_id)
@@ -132,10 +169,14 @@ class DocumentSessionStore:
         doc_id = self._active_by_key.pop(key, None)
         if not doc_id:
             return None
-        session = self._sessions.get(doc_id)
+        session = self._sessions.pop(doc_id, None)
         if session:
-            session.state = "idle"
-            session.updated_at = self._now_provider()
+            LOGGER.info(
+                "doc_session_stopped user_id=%s chat_id=%s doc_id=%s",
+                user_id,
+                chat_id,
+                doc_id,
+            )
             self.save()
         return session
 
@@ -148,15 +189,26 @@ def _serialize_session(session: DocumentSession) -> dict[str, object]:
     data = asdict(session)
     data["created_at"] = session.created_at.isoformat()
     data["updated_at"] = session.updated_at.isoformat()
+    data["expires_at"] = session.expires_at.isoformat()
     return data
 
 
-def _deserialize_session(raw: dict[str, object]) -> DocumentSession | None:
+def _deserialize_session(
+    raw: dict[str, object], *, ttl_seconds: int = 7200
+) -> DocumentSession | None:
     try:
         created_at = datetime.fromisoformat(str(raw.get("created_at")))
         updated_at = datetime.fromisoformat(str(raw.get("updated_at")))
     except ValueError:
         return None
+    raw_expires = raw.get("expires_at")
+    if isinstance(raw_expires, str) and raw_expires:
+        try:
+            expires_at = datetime.fromisoformat(raw_expires)
+        except ValueError:
+            expires_at = created_at + timedelta(seconds=ttl_seconds)
+    else:
+        expires_at = created_at + timedelta(seconds=ttl_seconds)
     return DocumentSession(
         doc_id=str(raw.get("doc_id", "")),
         user_id=int(raw.get("user_id", 0)),
@@ -167,4 +219,5 @@ def _deserialize_session(raw: dict[str, object]) -> DocumentSession | None:
         state=str(raw.get("state", "idle")),
         created_at=created_at,
         updated_at=updated_at,
+        expires_at=expires_at,
     )

@@ -8,7 +8,8 @@ from PIL import Image, ImageDraw, ImageFont
 from pytesseract import TesseractNotFoundError, get_tesseract_version
 
 from app.bot import handlers
-from app.core.file_text_extractor import FileTextExtractor, OCRNotAvailableError
+from app.core.document_qa import select_relevant_chunks, select_relevant_chunks_with_scores, split_text
+from app.core.file_text_extractor import ExtractedText, FileTextExtractor, OCRNotAvailableError
 from app.infra.document_session_store import DocumentSessionStore
 
 
@@ -144,7 +145,8 @@ async def test_document_flow_summary_and_qa(tmp_path: Path) -> None:
                 "settings": settings,
                 "orchestrator": DummyOrchestrator(),
             }
-        )
+        ),
+        chat_data={},
     )
 
     summary_result = await handlers._handle_document_summary(
@@ -167,3 +169,88 @@ async def test_document_flow_summary_and_qa(tmp_path: Path) -> None:
 
     assert qa_result.text == "Answer output"
     assert any(action.id == "document.qa_exit" for action in qa_result.actions)
+
+
+def test_select_relevant_chunks_no_match_returns_empty() -> None:
+    text = "The quick brown fox jumps. Weather is sunny."
+    chunks = select_relevant_chunks(text, "nonexistentwordxyz", top_k=2)
+    assert chunks == []
+
+
+def test_select_relevant_chunks_match_returns_chunks() -> None:
+    text = "The contract states that payment is due in 30 days. Late fee applies."
+    chunks = select_relevant_chunks(text, "payment 30 days", top_k=2)
+    assert len(chunks) >= 1
+    combined = " ".join(chunks).lower()
+    assert "payment" in combined or "30" in combined
+
+
+def test_split_text_chunk_size_overlap() -> None:
+    text = "a" * 2000
+    chunks = split_text(text, chunk_size=500, overlap=100)
+    assert len(chunks) >= 2
+    assert sum(len(c) for c in chunks) >= len(text) - 500
+
+
+def test_extract_pdf_from_bytes() -> None:
+    pytest.importorskip("pypdf")
+    pdf_bytes = _build_simple_pdf("Bytes PDF")
+    extractor = FileTextExtractor()
+    extracted = extractor.extract_from_bytes(pdf_bytes, "pdf")
+    assert isinstance(extracted, ExtractedText)
+    assert "Bytes PDF" in extracted.text
+    assert extracted.metadata.get("pages") == 1
+    assert extracted.metadata.get("characters", 0) > 0
+
+
+def test_extracted_text_has_warnings_field() -> None:
+    from io import BytesIO
+    docx_module = pytest.importorskip("docx")
+    doc = docx_module.Document()
+    doc.add_paragraph("Short.")
+    buf = BytesIO()
+    doc.save(buf)
+    extractor = FileTextExtractor(max_chars=50, max_pages=10)
+    extracted = extractor.extract_from_bytes(buf.getvalue(), "docx", max_chars=50)
+    assert hasattr(extracted, "warnings")
+    assert isinstance(extracted.warnings, tuple)
+
+
+def test_document_session_store_ttl_expires(tmp_path: Path) -> None:
+    from datetime import datetime, timezone, timedelta
+    store_path = tmp_path / "sessions.json"
+    now = datetime.now(timezone.utc)
+    # Store uses max(60, ttl_seconds), so effective TTL is 60s
+    store = DocumentSessionStore(store_path, ttl_seconds=60, now_provider=lambda: now)
+    session = store.create_session(
+        user_id=1,
+        chat_id=1,
+        file_path=str(tmp_path / "f"),
+        file_type="pdf",
+        text_path=str(tmp_path / "t.txt"),
+    )
+    assert session.expires_at > now
+    # Simulate time passing: session expires (after 61s)
+    def later() -> datetime:
+        return now + timedelta(seconds=61)
+    store_later = DocumentSessionStore(store_path, ttl_seconds=60, now_provider=later)
+    store_later.load()
+    active, status = store_later.get_active_with_status(user_id=1, chat_id=1)
+    assert active is None
+    assert status == "expired"
+
+
+def test_document_session_store_close_clears_active(tmp_path: Path) -> None:
+    store_path = tmp_path / "sessions.json"
+    store = DocumentSessionStore(store_path, ttl_seconds=7200)
+    session = store.create_session(
+        user_id=2,
+        chat_id=2,
+        file_path=str(tmp_path / "f"),
+        file_type="docx",
+        text_path=str(tmp_path / "t.txt"),
+    )
+    assert store.get_active(user_id=2, chat_id=2) is not None
+    closed = store.close_active(user_id=2, chat_id=2)
+    assert closed is not None
+    assert store.get_active(user_id=2, chat_id=2) is None
