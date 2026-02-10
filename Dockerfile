@@ -1,41 +1,58 @@
-# Stage 1: install dependencies
-FROM python:3.11-slim AS builder
-WORKDIR /build
-ENV PYTHONDONTWRITEBYTECODE=1
-RUN pip install --no-cache-dir --upgrade pip
-COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+ARG PYTHON_VERSION=3.12
 
-# Stage 2: production image
-FROM python:3.11-slim AS production
+FROM python:${PYTHON_VERSION}-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 WORKDIR /app
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
 
-# Create non-root user and data dir
-RUN groupadd --gid 1000 app && useradd --uid 1000 --gid app --shell /bin/bash --create-home app \
-    && mkdir -p /app/data && chown -R app:app /app
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential \
+      libxml2-dev \
+      libxslt1-dev \
+      zlib1g-dev && \
+    rm -rf /var/lib/apt/lists/*
 
-# Copy installed packages from builder
-COPY --from=builder /root/.local /home/app/.local
-ENV PATH=/home/app/.local/bin:$PATH
+COPY requirements.txt .
 
-# Copy application (no secrets; config via ENV at runtime)
-COPY --chown=app:app app/ ./app/
-COPY --chown=app:app config/ ./config/
-COPY --chown=app:app bot.py perplexity_client.py ./
-COPY --chown=app:app requirements.txt ./
+RUN pip install --upgrade pip && \
+    pip wheel --no-cache-dir --no-deps -r requirements.txt -w /wheels
+
+COPY . .
+
+
+FROM python:${PYTHON_VERSION}-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    APP_ENV=prod
+
+WORKDIR /app
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libxml2 \
+      libxslt1.1 \
+      zlib1g && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN addgroup --system app && adduser --system --ingroup app app
+
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
+
+COPY . .
+
+RUN mkdir -p data && chown -R app:app /app
 
 USER app
-# Data paths default to /app/data so they are writable
-ENV BOT_DB_PATH=/app/data/bot.db \
-    ALLOWLIST_PATH=/app/data/allowlist.json \
-    DIALOG_MEMORY_PATH=/app/data/dialog_memory.json \
-    WIZARD_STORE_PATH=/app/data/wizards \
-    UPLOADS_PATH=/app/data/uploads \
-    DOCUMENT_TEXTS_PATH=/app/data/document_texts \
-    DOCUMENT_SESSIONS_PATH=/app/data/document_sessions.json \
-    CALENDAR_PATH=/app/data/calendar.json \
-    ORCHESTRATOR_CONFIG_PATH=/app/config/orchestrator.json
 
-ENTRYPOINT ["python", "-u", "bot.py"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python -c "from app.infra.config import load_settings; load_settings()" || exit 1
+
+CMD ["python", "bot.py"]
+

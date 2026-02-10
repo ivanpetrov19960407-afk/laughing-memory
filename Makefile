@@ -1,18 +1,22 @@
-.PHONY: ci docker-build docker-run install test
+PYTHON ?= python3
+VENV ?= .venv
 
-# Local CI: install deps and run tests (no interactive steps)
-ci: install test
+.PHONY: venv install test ci docker-build docker-run
 
-install:
-	pip install -r requirements.txt
+venv:
+	$(PYTHON) -m venv $(VENV)
+
+install: venv
+	. $(VENV)/bin/activate && pip install --upgrade pip && pip install -r requirements.txt
 
 test:
-	pytest
+	$(PYTHON) -m pytest
+
+ci: test
 
 docker-build:
-	docker build -t secretary-bot:latest .
+	docker build -t secretary-bot .
 
-# Run container; requires BOT_TOKEN and ALLOWED_USER_IDS via env or .env
-# Example: make docker-run (with .env) or BOT_TOKEN=xxx ALLOWED_USER_IDS=1 make docker-run
 docker-run:
-	docker run --rm -it --env-file .env secretary-bot:latest
+	docker run --rm --env-file .env --name secretary-bot secretary-bot
+
