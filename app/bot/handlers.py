@@ -4227,9 +4227,10 @@ async def _handle_reminder_snooze(
     offset = max(1, minutes)
     now = datetime.now(tz=calendar_store.BOT_TZ)
     base_dt = _parse_base_trigger_at(base_trigger_at)
-    use_now = base_dt is None
+    if base_dt is None:
+        base_dt = max(now, reminder.trigger_at.astimezone(calendar_store.BOT_TZ))
     updated = await calendar_store.apply_snooze(
-        reminder_id, minutes=offset, now=now, base_trigger_at=base_dt, use_now=use_now
+        reminder_id, minutes=offset, now=now, base_trigger_at=base_dt, use_now=False
     )
     if updated is None:
         return error(

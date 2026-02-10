@@ -59,7 +59,7 @@ def _build_settings(tmp_path: Path) -> Settings:
         doc_max_chars=200_000,
         doc_max_pages=50,
         tesseract_lang="rus+eng",
-        file_storage_dir=tmp_path / "file_storage",
+        file_storage_dir=tmp_path / "uploads",
         calendar_backend="local",
         caldav_url=None,
         caldav_username=None,
