@@ -66,7 +66,10 @@ def test_reminder_snooze_shifts_trigger(tmp_path, monkeypatch) -> None:
     assert result.status == "ok"
     updated = asyncio.run(calendar_store.get_reminder(reminder.id))
     assert updated is not None
-    assert updated.trigger_at == reminder.trigger_at + timedelta(minutes=30)
+    # Snooze от now (не от старого trigger_at): новый trigger = now + 30 мин
+    expected_min = now + timedelta(minutes=29)
+    expected_max = now + timedelta(minutes=31)
+    assert expected_min <= updated.trigger_at <= expected_max
 
 
 def test_reminder_delete_via_action(tmp_path, monkeypatch) -> None:

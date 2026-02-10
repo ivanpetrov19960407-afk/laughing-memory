@@ -2,4 +2,5 @@ from __future__ import annotations
 
 from zoneinfo import ZoneInfo
 
-TZ = ZoneInfo("Europe/Moscow")
+# По умолчанию Europe/Vilnius; user-level TZ в профиле.
+TZ = ZoneInfo("Europe/Vilnius")

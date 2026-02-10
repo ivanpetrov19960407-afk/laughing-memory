@@ -940,7 +940,8 @@ async def apply_snooze(
                 return None
             current_trigger = _parse_datetime(trigger_value, current_now)
             recurrence = _parse_recurrence(item.get("recurrence"))
-            base = max(current_now, base_trigger_at or current_trigger)
+            # Snooze from now (user TZ), not from old trigger_at; repeat press safely reschedules.
+            base = current_now
             new_trigger = base + timedelta(minutes=offset)
             item["trigger_at"] = new_trigger.astimezone(VIENNA_TZ).isoformat()
             item["enabled"] = True

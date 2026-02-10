@@ -224,14 +224,16 @@ def test_reminder_restore_after_reload(calendar_env) -> None:
             user_id=1,
         )
     )
-    job_queue = DummyJobQueue()
-    application = SimpleNamespace(job_queue=job_queue, bot=SimpleNamespace())
-    scheduler = ReminderScheduler(application=application)
+    from tests.conftest import DummyAppScheduler
+
+    app_scheduler = DummyAppScheduler()
+    application = SimpleNamespace(bot=SimpleNamespace(), bot_data={})
+    scheduler = ReminderScheduler(application=application, app_scheduler=app_scheduler)
 
     restored = asyncio_run(scheduler.restore_all(now))
 
     assert restored == 1
-    assert scheduler._job_name(reminder.id) in job_queue.jobs
+    assert scheduler._job_name(reminder.id) in app_scheduler.job_ids
 
 
 def test_calendar_create_explicit_date_ok(calendar_env) -> None:

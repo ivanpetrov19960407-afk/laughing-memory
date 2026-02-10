@@ -7,9 +7,8 @@ from datetime import datetime, timedelta
 
 from telegram.ext import Application, ContextTypes
 
-from app.core import calendar_store
+from app.core import calendar_store, reminders as reminders_module
 from app.bot.actions import ActionStore, build_inline_keyboard
-from app.core.result import Action
 from app.infra.messaging import safe_send_bot_text
 
 LOGGER = logging.getLogger(__name__)
@@ -60,7 +59,7 @@ async def _process_due_reminders(application: Application) -> None:
         event_dt = event.dt if event else item.trigger_at
         message_time = event_dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         text = f"⏰ Напоминание: {item.text}\nКогда: {message_time} (МСК)"
-        actions = _build_reminder_actions(item)
+        actions = reminders_module.build_reminder_followup_actions(item)
         action_store = application.bot_data.get("action_store")
         reply_markup = None
         if isinstance(action_store, ActionStore):
@@ -131,32 +130,3 @@ async def post_shutdown(application: Application) -> None:
         LOGGER.info("Reminder scheduler task shutdown complete")
 
 
-def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Action]:
-    return [
-        Action(
-            id=f"reminder_snooze_now:{reminder.id}:5",
-            label="⏸ +5 мин",
-            payload={"op": "reminder_snooze_now", "reminder_id": reminder.id, "minutes": 5},
-        ),
-        Action(
-            id=f"reminder_snooze_now:{reminder.id}:15",
-            label="⏸ +15 мин",
-            payload={"op": "reminder_snooze_now", "reminder_id": reminder.id, "minutes": 15},
-        ),
-        Action(
-            id=f"reminder_snooze_now:{reminder.id}:60",
-            label="⏸ +1 час",
-            payload={"op": "reminder_snooze_now", "reminder_id": reminder.id, "minutes": 60},
-        ),
-        Action(
-            id=f"reminder_reschedule:{reminder.id}",
-            label="✏ Перенести",
-            payload={"op": "reminder_reschedule", "reminder_id": reminder.id},
-        ),
-        Action(
-            id="utility_reminders.delete",
-            label="🗑 Удалить",
-            payload={"op": "reminder.delete_confirm", "reminder_id": reminder.id},
-        ),
-        Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}),
-    ]

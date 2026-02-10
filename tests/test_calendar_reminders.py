@@ -11,6 +11,7 @@ import pytest
 from app.core import calendar_store
 from app.core.reminders import ReminderScheduler
 from app.bot import handlers
+from tests.conftest import DummyAppScheduler
 from app.core import tools_calendar_caldav
 
 
@@ -99,13 +100,13 @@ def test_restore_schedules_only_future(calendar_path) -> None:
         "updated_at": now.isoformat(),
     }
     _write_store(store)
-    job_queue = DummyJobQueue()
-    application = _build_application(job_queue)
-    scheduler = ReminderScheduler(application=application)
+    app_scheduler = DummyAppScheduler()
+    application = SimpleNamespace(bot=SimpleNamespace(), bot_data={})
+    scheduler = ReminderScheduler(application=application, app_scheduler=app_scheduler)
     restored = asyncio_run(scheduler.restore_all(now))
     assert restored == 1
-    assert scheduler._job_name("rem2") in job_queue.jobs
-    assert scheduler._job_name("rem1") not in job_queue.jobs
+    assert scheduler._job_name("rem2") in app_scheduler.job_ids
+    assert scheduler._job_name("rem1") not in app_scheduler.job_ids
 
 
 def test_add_creates_reminder(calendar_path) -> None:
@@ -189,11 +190,12 @@ def test_reminder_persists_and_restores(calendar_path) -> None:
         )
     )
     assert reminder.trigger_at == future
-    job_queue = DummyJobQueue()
-    scheduler = ReminderScheduler(application=_build_application(job_queue))
+    app_scheduler = DummyAppScheduler()
+    application = SimpleNamespace(bot=SimpleNamespace(), bot_data={})
+    scheduler = ReminderScheduler(application=application, app_scheduler=app_scheduler)
     restored = asyncio_run(scheduler.restore_all(now))
     assert restored == 1
-    assert scheduler._job_name(reminder.id) in job_queue.jobs
+    assert scheduler._job_name(reminder.id) in app_scheduler.job_ids
 
 
 def test_del_cancels_reminder(calendar_path) -> None:
@@ -208,16 +210,17 @@ def test_del_cancels_reminder(calendar_path) -> None:
         )
     )
     reminder_id = result_item["reminder"]["reminder_id"]
-    job_queue = DummyJobQueue()
-    application = _build_application(job_queue)
-    scheduler = ReminderScheduler(application=application)
+    app_scheduler = DummyAppScheduler()
+    application = SimpleNamespace(bot=SimpleNamespace(), bot_data={})
+    scheduler = ReminderScheduler(application=application, app_scheduler=app_scheduler)
     reminder_item = asyncio_run(calendar_store.get_reminder(reminder_id))
     asyncio_run(scheduler.schedule_reminder(reminder_item))
+    assert scheduler._job_name(reminder_id) in app_scheduler.job_ids
     removed, reminder_to_cancel = asyncio_run(calendar_store.delete_item(result_item["event"]["event_id"]))
     assert removed is True
     assert reminder_to_cancel == reminder_id
     asyncio_run(scheduler.cancel_reminder(reminder_id))
-    assert job_queue.get_jobs_by_name(scheduler._job_name(reminder_id))[0].removed is True
+    assert scheduler._job_name(reminder_id) not in app_scheduler.job_ids
     store = calendar_store.load_store()
     assert all(rem.get("reminder_id") != reminder_id for rem in store.get("reminders") or [])
 
@@ -432,8 +435,9 @@ def test_scheduler_cancel_disables_reminder(calendar_path) -> None:
         )
     )
     reminder_id = item["reminder"]["reminder_id"]
-    job_queue = DummyJobQueue()
-    scheduler = ReminderScheduler(application=_build_application(job_queue))
+    app_scheduler = DummyAppScheduler()
+    application = SimpleNamespace(bot=SimpleNamespace(), bot_data={})
+    scheduler = ReminderScheduler(application=application, app_scheduler=app_scheduler)
     reminder = asyncio_run(calendar_store.get_reminder(reminder_id))
     asyncio_run(scheduler.schedule_reminder(reminder))
     asyncio_run(scheduler.cancel_reminder(reminder_id))

@@ -112,11 +112,16 @@ def test_create_wizard_confirm_without_recurrence_step(tmp_path, monkeypatch) ->
 
 
 def test_calendar_add_schedules_reminder(tmp_path, monkeypatch) -> None:
+    from tests.conftest import DummyAppScheduler
+
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
     store = WizardStore(tmp_path / "wizards")
-    job_queue = DummyJobQueue()
-    scheduler = ReminderScheduler(application=SimpleNamespace(job_queue=job_queue, bot=SimpleNamespace()))
+    app_scheduler = DummyAppScheduler()
+    scheduler = ReminderScheduler(
+        application=SimpleNamespace(bot=SimpleNamespace(), bot_data={}),
+        app_scheduler=app_scheduler,
+    )
     manager = WizardManager(store, reminder_scheduler=scheduler, settings=DummySettings())
 
     started = asyncio_run(
@@ -133,7 +138,7 @@ def test_calendar_add_schedules_reminder(tmp_path, monkeypatch) -> None:
     )
     assert len(reminders) == 1
     assert reminders[0].trigger_at == datetime(2026, 2, 5, 12, 30, tzinfo=calendar_store.MOSCOW_TZ)
-    assert scheduler._job_name(reminders[0].id) in job_queue.jobs
+    assert scheduler._job_name(reminders[0].id) in app_scheduler.job_ids
 
 
 def test_resume_prompt_contains_restart_target(tmp_path, monkeypatch) -> None:
