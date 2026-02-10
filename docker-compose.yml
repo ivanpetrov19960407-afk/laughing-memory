@@ -1,13 +1,16 @@
-# Local run without external DB. Config via .env (copy from .env.example).
-# Usage: cp .env.example .env && fill BOT_TOKEN, ALLOWED_USER_IDS; then: docker compose up
+# Optional: local run only (no external services).
+# Usage: BOT_TOKEN=... docker compose up
 services:
   bot:
     build: .
-    image: secretary-bot:latest
-    env_file: .env
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ALLOWED_USER_IDS=${ALLOWED_USER_IDS:-}
+    env_file:
+      - .env
     volumes:
-      - bot-data:/app/data
-    restart: unless-stopped
+      - botdata:/app/data
+    restart: "no"
 
 volumes:
-  bot-data:
+  botdata: {}

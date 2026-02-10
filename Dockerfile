@@ -1,58 +1,43 @@
+# Multi-stage build: dependencies separate from runtime.
+# Default Python 3.12; override with --build-arg PYTHON_VERSION=3.11
 ARG PYTHON_VERSION=3.12
-
 FROM python:${PYTHON_VERSION}-slim AS builder
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
-
-WORKDIR /app
-
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      build-essential \
-      libxml2-dev \
-      libxslt1-dev \
-      zlib1g-dev && \
-    rm -rf /var/lib/apt/lists/*
-
+WORKDIR /build
 COPY requirements.txt .
 
-RUN pip install --upgrade pip && \
-    pip wheel --no-cache-dir --no-deps -r requirements.txt -w /wheels
+# Install dependencies into a target directory for copy to runtime.
+RUN pip install --no-cache-dir --target /deps -r requirements.txt
 
-COPY . .
-
-
+# ---------------------------------------------------------------------------
 FROM python:${PYTHON_VERSION}-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    APP_ENV=prod
+    PYTHONUNBUFFERED=1
+
+# Non-root user for running the bot.
+RUN groupadd --gid 1000 bot && \
+    useradd --uid 1000 --gid bot --shell /bin/sh --create-home botuser
 
 WORKDIR /app
 
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      libxml2 \
-      libxslt1.1 \
-      zlib1g && \
-    rm -rf /var/lib/apt/lists/*
+# Copy installed packages from builder (exclude tests/dev from requirements).
+COPY --from=builder /deps /app/deps
+ENV PYTHONPATH=/app/deps
 
-RUN addgroup --system app && adduser --system --ingroup app app
+# Application code and config.
+COPY app /app/app
+COPY config /app/config
+COPY bot.py perplexity_client.py /app/
 
-COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
+# Optional: requirements for reference (no lock file in repo).
+COPY requirements.txt /app/
 
-COPY . .
+# Writable dirs used by the bot (paths from config).
+RUN mkdir -p /app/data /app/data/uploads /app/data/document_texts /app/data/wizards && \
+    chown -R botuser:bot /app
 
-RUN mkdir -p data && chown -R app:app /app
+USER botuser
 
-USER app
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "from app.infra.config import load_settings; load_settings()" || exit 1
-
+# SIGTERM is handled in app/main.py (reminder scheduler shutdown).
 CMD ["python", "bot.py"]
-
