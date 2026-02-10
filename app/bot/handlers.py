@@ -4428,13 +4428,25 @@ async def _handle_reminder_snooze(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     user_id: int,
-    chat_id: int,
     reminder_id: str,
     minutes: int,
     base_trigger_at: str | None = None,
+    chat_id: int | None = None,
 ) -> OrchestratorResult:
     reminder = await calendar_store.get_reminder(reminder_id)
-    if reminder is None or reminder.user_id != user_id or reminder.chat_id != chat_id:
+    if reminder is None:
+        return refused(
+            "Напоминание не найдено.",
+            intent="utility_reminders.snooze",
+            mode="local",
+        )
+    if reminder.user_id != user_id:
+        return refused(
+            "Напоминание не найдено.",
+            intent="utility_reminders.snooze",
+            mode="local",
+        )
+    if chat_id is not None and reminder.chat_id != chat_id:
         return refused(
             "Напоминание не найдено.",
             intent="utility_reminders.snooze",
