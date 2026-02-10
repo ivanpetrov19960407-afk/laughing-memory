@@ -1,24 +1,31 @@
+# Virtual env and caches
+.venv/
+.cache/
 __pycache__/
-*.py[cod]
+*.pyc
 *.pyo
 
-.git/
-.gitignore
-.github/
-
-.venv/
-venv/
-env/
-
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
+# Local runtime and secrets
+.env
+.env.*
+!.env.example
 data/
-tests/__pycache__/
 
+# Git and IDE
+.git/
+.github/
+.vscode/
+.specify/
+
+# Tests and docs (not needed in runtime image)
+tests/
+docs/
+*.md
+
+# Misc
 *.log
-*.tmp
-
-Dockerfile~
-
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.eggs/

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import sys
 import time
 import warnings
@@ -14,19 +15,14 @@ from telegram.warnings import PTBUserWarning
 from app.bot import actions, handlers, wizard
 from app.core import calendar_store
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
-from app.core.app_scheduler import AppScheduler
+from app.core.reminder_scheduler import post_shutdown as reminder_post_shutdown
 from app.core.reminders import ReminderScheduler
 from app.core.dialog_memory import DialogMemory
 from app.core.memory_manager import MemoryManager, UserActionsLog, UserProfileMemory
-from app.core.digest_scheduler import start_digest_scheduler, stop_digest_scheduler
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.actions_log_store import ActionsLogStore
 from app.infra.config import StartupFeatures, load_settings, resolve_env_label, validate_startup_env
-from app.infra.observability import load_observability_config
-from app.infra.observability.http_server import start_observability_http
-from app.infra.observability.metrics import MetricsCollector
-from app.infra.observability.watchdog import run_watchdog_loop
 from app.infra.user_profile_store import UserProfileStore
 from app.infra.request_context import RequestContext, log_event
 from app.infra.version import resolve_app_version
@@ -58,12 +54,9 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("ask", handlers.ask))
     application.add_handler(CommandHandler("summary", handlers.summary))
     application.add_handler(CommandHandler("search", handlers.search))
-    application.add_handler(CommandHandler("search_sources", handlers.search_sources))
     application.add_handler(CommandHandler("trace", handlers.trace_command))
     application.add_handler(CommandHandler("facts_on", handlers.facts_on))
     application.add_handler(CommandHandler("facts_off", handlers.facts_off))
-    application.add_handler(CommandHandler("digest_on", handlers.digest_on))
-    application.add_handler(CommandHandler("digest_off", handlers.digest_off))
     application.add_handler(CommandHandler("context_on", handlers.context_on))
     application.add_handler(CommandHandler("context_off", handlers.context_off))
     application.add_handler(CommandHandler("context_clear", handlers.context_clear))
@@ -73,7 +66,6 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("memory", handlers.memory_command))
     application.add_handler(CommandHandler("profile", handlers.profile_command))
     application.add_handler(CommandHandler("profile_set", handlers.profile_set_command))
-    application.add_handler(CommandHandler("set_timezone", handlers.set_timezone_command))
     application.add_handler(CommandHandler("remember", handlers.remember_command))
     application.add_handler(CommandHandler("forget", handlers.forget_command))
     application.add_handler(CommandHandler("history", handlers.history_command))
@@ -193,7 +185,6 @@ def main() -> None:
         per_day = rate_limits.get("per_day")
     rate_limiter = LLMRateLimiter(per_minute=per_minute, per_day=per_day)
 
-    import app.infra.search_sources_store as search_sources_store
     orchestrator = Orchestrator(
         config=config,
         storage=storage,
@@ -207,7 +198,6 @@ def main() -> None:
         timeouts=timeouts,
         retry_policy=retry_policy,
         circuit_breakers=circuit_breakers,
-        search_sources_store=search_sources_store,
     )
     dialog_memory = DialogMemory(
         settings.dialog_memory_path,
@@ -228,16 +218,9 @@ def main() -> None:
 
     warnings.filterwarnings("ignore", message="No JobQueue set up", category=PTBUserWarning)
     application = Application.builder().token(settings.bot_token).build()
-    app_scheduler = AppScheduler(
-        application=application,
-        calendar_store_module=calendar_store,
-        profile_store=profile_store,
-    )
-    application.bot_data["app_scheduler"] = app_scheduler
     reminder_scheduler = ReminderScheduler(
         application=application,
         max_future_days=settings.reminder_max_future_days,
-        app_scheduler=app_scheduler,
     )
     application.bot_data["reminder_scheduler"] = reminder_scheduler
     application.bot_data["orchestrator"] = orchestrator
@@ -274,21 +257,6 @@ def main() -> None:
     )
     application.bot_data["draft_store"] = DraftStore(max_items=50, ttl_seconds=24 * 3600)
     application.bot_data["trace_store"] = TraceStore(max_items=20, ttl_seconds=86400)
-    obs_config = load_observability_config()
-    metrics_collector = MetricsCollector() if obs_config.obs_http_enabled else None
-    obs_state = None
-    if obs_config.obs_http_enabled:
-        obs_state = {
-            "init_complete": False,
-            "start_time": time.monotonic(),
-            "version": resolve_app_version(config.get("system_metadata", {})),
-            "last_error_count": 0,
-            "critical_error_count_last_n_minutes": 0,
-            "metrics_collector": metrics_collector,
-        }
-    application.bot_data["obs_config"] = obs_config
-    application.bot_data["obs_state"] = obs_state
-    application.bot_data["obs_runner"] = None
     wizard_store = WizardStore(
         settings.wizard_store_path,
         timeout_seconds=settings.wizard_timeout_seconds,
@@ -298,9 +266,7 @@ def main() -> None:
         reminder_scheduler=reminder_scheduler,
         settings=settings,
         profile_store=profile_store,
-        memory_manager=memory_manager,
     )
-    application.bot_data["search_sources_store"] = search_sources_store
     startup_context = RequestContext(
         correlation_id="startup",
         user_id=0,
@@ -321,48 +287,32 @@ def main() -> None:
         timezone=calendar_store.BOT_TZ.key,
         integrations=_build_startup_integrations(startup_features),
     )
-    # Напоминания и дайджест планируются через APScheduler (app_scheduler).
+    if not application.job_queue:
+        logging.getLogger(__name__).warning("JobQueue not configured; reminders will run without it.")
 
     async def _restore_reminders(app: Application) -> None:
-        app_scheduler = app.bot_data.get("app_scheduler")
-        if app_scheduler is not None:
-            app_scheduler.start()
         if not settings.reminders_enabled:
             logging.getLogger(__name__).info("Reminders disabled by config")
-        else:
-            await reminder_scheduler.restore_all()
-        obs_cfg = app.bot_data.get("obs_config")
-        obs_state = app.bot_data.get("obs_state")
-        if obs_cfg and obs_cfg.obs_http_enabled and obs_state is not None:
-            runner, _site = await start_observability_http(
-                obs_cfg.obs_http_host,
-                obs_cfg.obs_http_port,
-                obs_state,
-            )
-            app.bot_data["obs_runner"] = runner
-            obs_state["init_complete"] = True
-            if obs_cfg.systemd_watchdog_enabled:
-                asyncio.create_task(run_watchdog_loop(enabled=True, env=None))
+            return
+        await reminder_scheduler.restore_all()
 
-    async def _post_init(app: Application) -> None:
-        await _restore_reminders(app)
-        if app.bot_data.get("digest_scheduler") is None:
-            app.bot_data["digest_scheduler"] = start_digest_scheduler(app)
-
-    async def _post_shutdown(app: Application) -> None:
-        app_scheduler = app.bot_data.pop("app_scheduler", None)
-        if app_scheduler is not None:
-            app_scheduler.shutdown(wait=True)
-        scheduler = app.bot_data.pop("digest_scheduler", None)
-        stop_digest_scheduler(scheduler)
-
-    application.post_init = _post_init
-    application.post_shutdown = _post_shutdown
+    application.post_init = _restore_reminders
+    application.post_shutdown = reminder_post_shutdown
 
     _register_handlers(application)
     application.add_error_handler(handlers.error_handler)
 
     logging.getLogger(__name__).info("Bot started")
+
+    def _sigterm_handler(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     application.run_polling()
 
 
