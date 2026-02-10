@@ -66,25 +66,26 @@ class Settings:
     document_texts_path: Path
     document_sessions_path: Path
     ocr_enabled: bool
-    doc_session_ttl_seconds: int
-    file_max_bytes_pdf_docx: int
-    file_max_bytes_img: int
-    doc_max_chars: int
-    doc_max_pages: int
-    tesseract_lang: str
-    file_storage_dir: Path
-    calendar_backend: str
-    caldav_url: str | None
-    caldav_username: str | None
-    caldav_password: str | None
-    caldav_calendar_name: str | None
-    obs_http_enabled: bool
-    obs_http_host: str
-    obs_http_port: int
-    otel_enabled: bool
-    otel_exporter: str
-    otel_otlp_endpoint: str | None
-    systemd_watchdog_enabled: bool
+    # Stage 6.5 FileReader — optional for backwards compat (tests/builders that construct Settings directly)
+    doc_session_ttl_seconds: int = 7200
+    file_max_bytes_pdf_docx: int = 10_000_000
+    file_max_bytes_img: int = 5_000_000
+    doc_max_chars: int = 200_000
+    doc_max_pages: int = 50
+    tesseract_lang: str = "rus+eng"
+    file_storage_dir: Path = DEFAULT_FILE_STORAGE_DIR
+    calendar_backend: str = "local"
+    caldav_url: str | None = None
+    caldav_username: str | None = None
+    caldav_password: str | None = None
+    caldav_calendar_name: str | None = None
+    obs_http_enabled: bool = False
+    obs_http_host: str = "127.0.0.1"
+    obs_http_port: int = 8080
+    otel_enabled: bool = False
+    otel_exporter: str = "console"
+    otel_otlp_endpoint: str | None = None
+    systemd_watchdog_enabled: bool = False
 
 
 @dataclass(frozen=True)
