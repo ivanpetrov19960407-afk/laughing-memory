@@ -45,12 +45,26 @@ class AppScheduler:
         self._profile_store = profile_store
 
     def start(self) -> None:
+        if self._scheduler.running:
+            LOGGER.info("AppScheduler already started, skipping")
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        self._scheduler._eventloop = loop
         self._scheduler.start()
         LOGGER.info("AppScheduler (APScheduler) started")
 
     def shutdown(self, wait: bool = True) -> None:
-        self._scheduler.shutdown(wait=wait)
-        LOGGER.info("AppScheduler shutdown")
+        if not self._scheduler.running:
+            return
+        try:
+            self._scheduler.shutdown(wait=wait)
+            LOGGER.info("AppScheduler shutdown")
+        except Exception:
+            LOGGER.exception("AppScheduler shutdown error")
 
     def add_reminder_job(
         self,

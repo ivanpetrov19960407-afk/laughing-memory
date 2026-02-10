@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -74,9 +73,8 @@ def _build_settings(tmp_path: Path):
     )
 
 
-@pytest.mark.skipif(sys.version_info < (3, 12), reason="Python 3.12+: get_event_loop() raises when no loop")
-def test_app_scheduler_start_from_sync_raises_py312() -> None:
-    """Вызов AppScheduler.start() из потока без event loop на 3.12 приводит к RuntimeError."""
+def test_app_scheduler_start_from_sync_no_loop_succeeds() -> None:
+    """Вызов AppScheduler.start() из потока без event loop не падает: создаётся loop (Python 3.12-safe)."""
     mock_app = MagicMock()
     mock_app.bot_data = {}
     scheduler = AppScheduler(application=mock_app)
@@ -86,15 +84,15 @@ def test_app_scheduler_start_from_sync_raises_py312() -> None:
         try:
             scheduler.start()
             result.append(None)
-        except RuntimeError as e:
+        except Exception as e:
             result.append(e)
 
     t = threading.Thread(target=run_in_thread_without_loop)
     t.start()
     t.join()
     assert len(result) == 1, f"Expected one result, got {result}"
-    assert isinstance(result[0], RuntimeError), f"Expected RuntimeError, got {result[0]}"
-    assert "no current event loop" in str(result[0]) or "event loop" in str(result[0]).lower()
+    assert result[0] is None, f"start() must not raise when no loop (create one): got {result[0]}"
+    assert scheduler._scheduler.running
 
 
 def test_app_scheduler_start_inside_async_succeeds() -> None:
@@ -109,6 +107,34 @@ def test_app_scheduler_start_inside_async_succeeds() -> None:
         scheduler.shutdown(wait=True)
 
     asyncio.run(run())
+
+
+def test_app_scheduler_start_twice_is_noop(caplog: pytest.LogCaptureFixture) -> None:
+    """Повторный вызов start() — no-op, лог «already started»."""
+    import logging
+
+    caplog.set_level(logging.INFO)
+    mock_app = MagicMock()
+    mock_app.bot_data = {}
+    scheduler = AppScheduler(application=mock_app)
+
+    async def run() -> None:
+        scheduler.start()
+        assert scheduler._scheduler.running
+        scheduler.start()
+        scheduler.start()
+
+    asyncio.run(run())
+    assert any("already started" in rec.message for rec in caplog.records)
+
+
+def test_app_scheduler_shutdown_when_not_running_noop() -> None:
+    """shutdown() когда планировщик не запущен — no-op, без исключений."""
+    mock_app = MagicMock()
+    mock_app.bot_data = {}
+    scheduler = AppScheduler(application=mock_app)
+    scheduler.shutdown(wait=True)
+    scheduler.shutdown(wait=False)
 
 
 def test_main_scheduler_started_inside_event_loop(tmp_path: Path) -> None:
