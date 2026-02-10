@@ -1040,6 +1040,25 @@ class Orchestrator:
                     debug={"reason": "missing_payload"},
                 )
             )
+        # IMPORTANT: check enabled search sources before ambiguous-query validation.
+        # Edge-case: when all sources are disabled we must refuse with no_enabled_sources.
+        user_disabled: set[str] = set()
+        if self._search_sources_store is not None and hasattr(self._search_sources_store, "get_disabled"):
+            try:
+                user_disabled = await self._search_sources_store.get_disabled(user_id)
+            except Exception:
+                user_disabled = set()
+        sources_list = parse_sources_from_config(self._config)
+        enabled_sources = get_enabled_sources(sources_list, user_disabled)
+        if not enabled_sources:
+            return ensure_valid(
+                refused(
+                    "Нет включённых источников поиска. Используй /search_sources list и /search_sources enable <name>.",
+                    intent="command.search",
+                    mode="local",
+                    debug={"reason": "no_enabled_sources"},
+                )
+            )
         if is_search_query_ambiguous(trimmed_query):
             return ensure_valid(
                 refused(
