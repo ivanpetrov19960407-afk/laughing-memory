@@ -80,6 +80,15 @@ class StartupFeatures:
 _DEV_ENVS = {"dev", "development", "local"}
 
 
+def get_log_level(*, raw_env: dict[str, str] | None = None) -> int:
+    """Backwards compatibility for tests/legacy imports.
+    Reads LOG_LEVEL from env (case-insensitive, trimmed); valid: DEBUG/INFO/WARNING/ERROR/CRITICAL; default INFO.
+    """
+    source = raw_env if raw_env is not None else os.environ
+    raw = source.get("LOG_LEVEL", "INFO").strip().upper()
+    return getattr(logging, raw, logging.INFO)
+
+
 def resolve_env_label(raw_env: dict[str, str] | None = None) -> str:
     source = raw_env if raw_env is not None else os.environ
     env = source.get("APP_ENV", "prod").strip().lower()
