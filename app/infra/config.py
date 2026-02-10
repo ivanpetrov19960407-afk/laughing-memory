@@ -69,6 +69,15 @@ class Settings:
     doc_max_pages: int = 50
     tesseract_lang: str = "rus+eng"
     file_storage_dir: Path = DEFAULT_UPLOADS_PATH
+    # Backwards compat: actions log, observability, systemd (tests/legacy)
+    actions_log_ttl_days: int = 30
+    obs_http_enabled: bool = False
+    obs_http_host: str = "127.0.0.1"
+    obs_http_port: int = 8080
+    otel_enabled: bool = False
+    otel_exporter: str = "console"
+    otel_otlp_endpoint: str | None = None
+    systemd_watchdog_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -139,9 +148,12 @@ def validate_startup_env(
 def load_settings() -> Settings:
     _load_dotenv()
 
-    token = os.getenv("BOT_TOKEN")
-    if not token:
+    dry_run = os.getenv("DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on")
+    token = os.getenv("BOT_TOKEN", "").strip()
+    if not token and not dry_run:
         raise RuntimeError("BOT_TOKEN is not set")
+    if not token:
+        token = "DRY_RUN_PLACEHOLDER"
 
     config_path = Path(os.getenv("ORCHESTRATOR_CONFIG_PATH", DEFAULT_CONFIG_PATH))
     db_path = Path(os.getenv("BOT_DB_PATH", DEFAULT_DB_PATH))
@@ -280,6 +292,14 @@ def load_settings() -> Settings:
         doc_max_pages=doc_max_pages,
         tesseract_lang=tesseract_lang,
         file_storage_dir=file_storage_dir,
+        actions_log_ttl_days=_parse_int_with_default(os.getenv("ACTIONS_LOG_TTL_DAYS"), 30),
+        obs_http_enabled=_parse_optional_bool(os.getenv("OBS_HTTP_ENABLED")) or False,
+        obs_http_host=os.getenv("OBS_HTTP_HOST", "127.0.0.1").strip(),
+        obs_http_port=_parse_int_with_default(os.getenv("OBS_HTTP_PORT"), 8080),
+        otel_enabled=_parse_optional_bool(os.getenv("OTEL_ENABLED")) or False,
+        otel_exporter=os.getenv("OTEL_EXPORTER", "console").strip(),
+        otel_otlp_endpoint=os.getenv("OTEL_OTLP_ENDPOINT") or None,
+        systemd_watchdog_enabled=_parse_optional_bool(os.getenv("SYSTEMD_WATCHDOG_ENABLED")) or False,
     )
 
 

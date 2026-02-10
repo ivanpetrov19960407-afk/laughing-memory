@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 import time
 import warnings
@@ -313,6 +314,10 @@ def main() -> None:
     application.add_error_handler(handlers.error_handler)
 
     logging.getLogger(__name__).info("Bot started")
+    dry_run = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on")
+    if dry_run:
+        logging.getLogger(__name__).info("DRY_RUN mode, skipping Telegram polling")
+        return
     try:
         asyncio.get_event_loop()
     except RuntimeError:

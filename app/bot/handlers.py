@@ -1020,7 +1020,7 @@ async def _handle_document_summary(
     if facts_only:
         system_prompt += " Не добавляй домыслы. Если данных нет, так и скажи."
     settings = _get_settings(context)
-    max_chars = settings.doc_max_chars if settings else 200_000
+    max_chars = getattr(settings, "doc_max_chars", 200_000) if settings else 200_000
     trimmed_text = _trim_document_text(text, max_chars=max_chars)
     messages = [
         {"role": "system", "content": system_prompt},
@@ -2415,6 +2415,42 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 @_with_error_handling
+async def set_timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Backwards compat: /set_timezone shows current timezone and list to pick."""
+    if not await _guard_access(update, context):
+        return
+    memory_manager = _get_memory_manager(context)
+    user_id = update.effective_user.id if update.effective_user else 0
+    timezone_label = "Europe/Vilnius"
+    if memory_manager is not None and memory_manager.profile is not None:
+        profile = memory_manager.get_profile(user_id)
+        if profile is not None and profile.timezone:
+            timezone_label = profile.timezone
+    text = f"Текущий часовой пояс: {timezone_label}. Выбери новый:"
+    result = ok(
+        text,
+        intent="settings.timezone",
+        mode="local",
+        actions=_settings_timezone_actions(),
+    )
+    await send_result(update, context, result)
+
+
+async def _handle_timezone_set(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    timezone_value: str,
+) -> OrchestratorResult:
+    """Backwards compat: set timezone in profile from tests/legacy callers."""
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.profile is None:
+        return refused("Профиль не настроен.", intent="settings.timezone", mode="local")
+    memory_manager.update_profile(user_id, {"timezone": timezone_value})
+    return ok("Часовой пояс обновлён.", intent="settings.timezone", mode="local")
+
+
+@_with_error_handling
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
@@ -3053,6 +3089,24 @@ def _parse_static_callback(data: str) -> tuple[str, dict[str, object], str] | No
         elif rest and rest[0]:
             payload["wizard_id"] = rest[0]
         return op, payload, f"callback.wiz.{action}"
+    if domain == "REM":
+        if action == "SNOOZE" and len(rest) >= 2:
+            try:
+                minutes = int(rest[0])
+            except ValueError:
+                return None
+            rid = rest[1]
+            if not rid:
+                return None
+            return "reminder_snooze", {"reminder_id": rid, "minutes": minutes}, "callback.reminder_snooze"
+        if action == "SNOOZE" and rest and rest[0] == "M" and len(rest) >= 2:
+            return "reminder_snooze_menu", {"reminder_id": rest[1]}, "callback.reminder_snooze_menu"
+        if action == "SHOW" and rest:
+            return "reminder_show_details", {"reminder_id": rest[0]}, "callback.reminder_show"
+        if action == "REPEAT" and rest:
+            return "reminder_repeat_menu", {"reminder_id": rest[0]}, "callback.reminder_repeat"
+        if action == "DEL" and rest:
+            return "reminder_delete_confirm", {"reminder_id": rest[0]}, "callback.reminder_delete"
     return None
 
 
@@ -4112,6 +4166,49 @@ async def _handle_reminders_list(
     )
 
 
+async def _handle_reminder_snooze_now(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    reminder_id: str,
+    minutes: int,
+) -> OrchestratorResult:
+    """Backwards compat: snooze from 'now' (notification UI); new trigger = now + minutes."""
+    reminder = await calendar_store.get_reminder(reminder_id)
+    if reminder is None:
+        return refused(
+            f"Напоминание не найдено: {reminder_id}",
+            intent="utility_reminders.snooze",
+            mode="local",
+        )
+    offset = max(1, minutes)
+    now = datetime.now(tz=calendar_store.BOT_TZ)
+    updated = await calendar_store.apply_snooze(
+        reminder_id, minutes=offset, now=now, use_now=True
+    )
+    if updated is None:
+        return error(
+            "Не удалось отложить напоминание.",
+            intent="utility_reminders.snooze",
+            mode="local",
+        )
+    scheduler = _get_reminder_scheduler(context)
+    settings = _get_settings(context)
+    if scheduler and settings is not None and getattr(settings, "reminders_enabled", True):
+        try:
+            await scheduler.schedule_reminder(updated)
+        except Exception:
+            LOGGER.exception("Failed to reschedule reminder: reminder_id=%s", reminder_id)
+    when_label = updated.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+    return ok(
+        f"Ok. Напоминание отложено на {when_label}.",
+        intent="utility_reminders.snooze",
+        mode="local",
+        actions=_reminder_post_action_actions(),
+    )
+
+
 async def _handle_reminder_snooze(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -4128,8 +4225,12 @@ async def _handle_reminder_snooze(
             mode="local",
         )
     offset = max(1, minutes)
+    now = datetime.now(tz=calendar_store.BOT_TZ)
     base_dt = _parse_base_trigger_at(base_trigger_at)
-    updated = await calendar_store.apply_snooze(reminder_id, minutes=offset, now=datetime.now(tz=calendar_store.BOT_TZ), base_trigger_at=base_dt)
+    use_now = base_dt is None
+    updated = await calendar_store.apply_snooze(
+        reminder_id, minutes=offset, now=now, base_trigger_at=base_dt, use_now=use_now
+    )
     if updated is None:
         return error(
             "Не удалось отложить напоминание (возможно, уже отключено).",
