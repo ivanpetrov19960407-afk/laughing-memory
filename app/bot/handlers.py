@@ -1242,7 +1242,8 @@ async def _build_reminders_list_result(
     lines: list[str] = []
     for item in limited:
         when_label = item.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-        lines.append(f"• {item.text}\n  Когда: {when_label} (МСК)")
+        recurrence_marker = _reminder_recurrence_marker(item.recurrence)
+        lines.append(f"• {item.text}{recurrence_marker}\n  Когда: {when_label} (МСК)")
         actions.append(
             Action(
                 id=f"reminder_snooze_menu:{item.id}",
@@ -1300,6 +1301,27 @@ def _short_label(value: str, limit: int = 24) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _reminder_recurrence_marker(recurrence: dict[str, object] | None) -> str:
+    if not recurrence:
+        return ""
+    freq = recurrence.get("freq")
+    interval = recurrence.get("interval")
+    interval_value = interval if isinstance(interval, int) and interval > 1 else None
+    if freq == "daily":
+        label = f"каждые {interval_value} дней" if interval_value else "ежедневно"
+        return f" (🔁 {label})"
+    if freq == "weekly":
+        label = f"каждые {interval_value} недель" if interval_value else "еженедельно"
+        return f" (🔁 {label})"
+    if freq == "weekdays":
+        label = f"по будням (каждые {interval_value} недель)" if interval_value else "по будням"
+        return f" (🔁 {label})"
+    if freq == "monthly":
+        label = f"каждые {interval_value} месяцев" if interval_value else "ежемесячно"
+        return f" (🔁 {label})"
+    return " (🔁)"
 
 
 def _render_event_draft(draft: EventDraft) -> str:
@@ -2267,6 +2289,56 @@ async def facts_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @_with_error_handling
+async def digest_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    profile_store = context.application.bot_data.get("profile_store")
+    if profile_store is None:
+        result = _build_simple_result(
+            "Профиль не настроен.",
+            intent="command.digest_on",
+            status="error",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    profile_store.update(user_id, {"daily_digest_enabled": True})
+    result = _build_simple_result(
+        "🗞 Дайджест включён.",
+        intent="command.digest_on",
+        status="ok",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def digest_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    profile_store = context.application.bot_data.get("profile_store")
+    if profile_store is None:
+        result = _build_simple_result(
+            "Профиль не настроен.",
+            intent="command.digest_off",
+            status="error",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    profile_store.update(user_id, {"daily_digest_enabled": False})
+    result = _build_simple_result(
+        "🗞 Дайджест выключен.",
+        intent="command.digest_off",
+        status="ok",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
 async def context_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
@@ -3019,6 +3091,14 @@ async def _handle_menu_section(
         )
     if section == "settings":
         caldav_status = "подключён" if _caldav_configured(context) else "не подключён"
+        profile_store = context.application.bot_data.get("profile_store")
+        digest_enabled = False
+        if profile_store is not None:
+            try:
+                profile = profile_store.get(user_id)
+                digest_enabled = bool(getattr(profile, "daily_digest_enabled", False))
+            except Exception:
+                LOGGER.exception("Failed to load digest setting for settings menu: user_id=%s", user_id)
         return ok(
             f"Настройки режимов и поведения.\nCalDAV: {caldav_status}.",
             intent="menu.settings",
@@ -3028,6 +3108,11 @@ async def _handle_menu_section(
                     id="settings.caldav",
                     label="📅 CalDAV → Подключить",
                     payload={"op": "caldav_settings"},
+                ),
+                Action(
+                    id="settings.digest",
+                    label=f"🗞 Дайджест: {'Вкл' if digest_enabled else 'Выкл'}",
+                    payload={"op": "digest_toggle", "enabled": not digest_enabled},
                 ),
                 Action(
                     id="settings.context",
@@ -3117,6 +3202,15 @@ def _parse_static_callback(data: str) -> tuple[str, dict[str, object], str] | No
     if len(parts) < 3:
         return None
     _prefix, domain, action, *rest = parts
+    def _safe_id(value: str) -> str | None:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            return None
+        if len(cleaned) > 32:
+            return None
+        if not cleaned.isalnum():
+            return None
+        return cleaned
     if domain == "menu":
         if action == "open":
             return "menu_open", {}, "callback.menu.open"
@@ -3125,6 +3219,52 @@ def _parse_static_callback(data: str) -> tuple[str, dict[str, object], str] | No
         if action == "section" and rest:
             section = rest[0]
             return "menu_section", {"section": section}, f"callback.menu.section.{section}"
+        return None
+    if domain == "digest":
+        if action == "on":
+            return "digest_toggle", {"enabled": True}, "callback.digest.on"
+        if action == "off":
+            return "digest_toggle", {"enabled": False}, "callback.digest.off"
+        return None
+    if domain == "rem":
+        # Reminder callbacks must be strict: no user-provided text, only ids/ints.
+        if action in {"s", "sn"}:
+            # cb:rem:s:<minutes>:<reminder_id> (base = trigger)
+            # cb:rem:sn:<minutes>:<reminder_id> (base = now)
+            if len(rest) < 2:
+                return None
+            minutes_raw, reminder_raw = rest[0], rest[1]
+            if not minutes_raw.isdigit():
+                return None
+            minutes = int(minutes_raw)
+            if minutes < 1 or minutes > 7 * 24 * 60:
+                return None
+            reminder_id = _safe_id(reminder_raw)
+            if reminder_id is None:
+                return None
+            op = "reminder_snooze_now" if action == "sn" else "reminder_snooze"
+            return op, {"reminder_id": reminder_id, "minutes": minutes}, f"callback.reminder.{action}"
+        if action == "r":
+            if not rest:
+                return None
+            reminder_id = _safe_id(rest[0])
+            if reminder_id is None:
+                return None
+            return "reminder_reschedule", {"reminder_id": reminder_id}, "callback.reminder.reschedule"
+        if action == "dc":
+            if not rest:
+                return None
+            reminder_id = _safe_id(rest[0])
+            if reminder_id is None:
+                return None
+            return "reminder.delete_confirm", {"reminder_id": reminder_id}, "callback.reminder.delete_confirm"
+        if action == "dd":
+            if not rest:
+                return None
+            reminder_id = _safe_id(rest[0])
+            if reminder_id is None:
+                return None
+            return "reminder.delete_confirmed", {"reminder_id": reminder_id}, "callback.reminder.delete_confirmed"
         return None
     if domain == "wiz":
         wizard_ops = {
@@ -3959,6 +4099,24 @@ async def _dispatch_action_payload(
             reminder_id=reminder_id,
             base_trigger_at=base_trigger_at if isinstance(base_trigger_at, str) else None,
         )
+    if op_value == "reminder_snooze_now":
+        reminder_id = payload.get("reminder_id") or payload.get("id")
+        minutes = payload.get("minutes", 10)
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="ui.action",
+                mode="local",
+                debug={"reason": "invalid_reminder_id"},
+            )
+        minutes_value = minutes if isinstance(minutes, int) else 10
+        return await _handle_reminder_snooze_now(
+            context,
+            user_id=user_id,
+            chat_id=chat_id,
+            reminder_id=reminder_id,
+            minutes=minutes_value,
+        )
     if op_value == "reminder_snooze":
         reminder_id = payload.get("reminder_id") or payload.get("id")
         minutes = payload.get("minutes", 10)
@@ -3975,6 +4133,7 @@ async def _dispatch_action_payload(
         return await _handle_reminder_snooze(
             context,
             user_id=user_id,
+            chat_id=chat_id,
             reminder_id=reminder_id,
             minutes=minutes_value,
             base_trigger_at=base_value,
@@ -3992,6 +4151,7 @@ async def _dispatch_action_payload(
         return await _handle_reminder_snooze_tomorrow(
             context,
             user_id=user_id,
+            chat_id=chat_id,
             reminder_id=reminder_id,
             base_trigger_at=base_trigger_at if isinstance(base_trigger_at, str) else None,
         )
@@ -4010,6 +4170,16 @@ async def _dispatch_action_payload(
             chat_id=chat_id,
             reminder_id=reminder_id,
         )
+    if op_value == "digest_toggle":
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            return refused(
+                "Некорректные данные действия.",
+                intent="utility_digest.toggle",
+                mode="local",
+                debug={"reason": "invalid_enabled"},
+            )
+        return _handle_digest_toggle(context, user_id=user_id, enabled=enabled)
     if op_value in {"reminder_delete", "reminder_disable"}:
         reminder_id = payload.get("reminder_id") or payload.get("id")
         if not isinstance(reminder_id, str) or not reminder_id:
@@ -4258,14 +4428,15 @@ async def _handle_reminder_snooze(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     user_id: int,
+    chat_id: int,
     reminder_id: str,
     minutes: int,
     base_trigger_at: str | None = None,
 ) -> OrchestratorResult:
     reminder = await calendar_store.get_reminder(reminder_id)
-    if reminder is None:
+    if reminder is None or reminder.user_id != user_id or reminder.chat_id != chat_id:
         return refused(
-            f"Напоминание не найдено: {reminder_id}",
+            "Напоминание не найдено.",
             intent="utility_reminders.snooze",
             mode="local",
         )
@@ -4307,6 +4478,60 @@ async def _handle_reminder_snooze(
     )
 
 
+async def _handle_reminder_snooze_now(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    reminder_id: str,
+    minutes: int,
+) -> OrchestratorResult:
+    reminder = await calendar_store.get_reminder(reminder_id)
+    if reminder is None or reminder.user_id != user_id or reminder.chat_id != chat_id:
+        return refused("Напоминание не найдено.", intent="utility_reminders.snooze", mode="local")
+    offset = max(1, minutes)
+    now = datetime.now(tz=calendar_store.BOT_TZ)
+    updated = await calendar_store.apply_snooze(
+        reminder_id,
+        minutes=offset,
+        now=now,
+        base_trigger_at=now,
+    )
+    if updated is None:
+        return error(
+            "Не удалось отложить напоминание (возможно, уже отключено).",
+            intent="utility_reminders.snooze",
+            mode="local",
+        )
+    scheduler = _get_reminder_scheduler(context)
+    settings = _get_settings(context)
+    if scheduler and settings is not None and settings.reminders_enabled:
+        try:
+            await scheduler.schedule_reminder(updated)
+        except Exception:
+            LOGGER.exception("Failed to reschedule reminder: reminder_id=%s", reminder_id)
+            return error(
+                "Не удалось отложить напоминание.",
+                intent="utility_reminders.snooze",
+                mode="local",
+            )
+    LOGGER.info(
+        "Reminder snoozed (now): reminder_id=%s user_id=%s old_trigger_at=%s new_trigger_at=%s",
+        reminder_id,
+        user_id,
+        reminder.trigger_at.isoformat(),
+        updated.trigger_at.isoformat(),
+    )
+    when_label = updated.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
+    return ok(
+        f"Ок, отложил на {when_label}.",
+        intent="utility_reminders.snooze",
+        mode="local",
+        actions=_reminder_post_action_actions(),
+        debug={"refs": {"reminder_id": reminder_id}},
+    )
+
+
 async def _handle_reminder_snooze_menu(
     *,
     user_id: int,
@@ -4329,13 +4554,14 @@ async def _handle_reminder_snooze_tomorrow(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     user_id: int,
+    chat_id: int,
     reminder_id: str,
     base_trigger_at: str | None = None,
 ) -> OrchestratorResult:
     reminder = await calendar_store.get_reminder(reminder_id)
-    if reminder is None:
+    if reminder is None or reminder.user_id != user_id or reminder.chat_id != chat_id:
         return refused(
-            f"Напоминание не найдено: {reminder_id}",
+            "Напоминание не найдено.",
             intent="utility_reminders.snooze",
             mode="local",
         )
@@ -4394,6 +4620,13 @@ async def _handle_reminder_delete(
     user_id: int,
     chat_id: int,
 ) -> OrchestratorResult:
+    reminder = await calendar_store.get_reminder(reminder_id)
+    if reminder is None or reminder.user_id != user_id or reminder.chat_id != chat_id:
+        return refused(
+            "Напоминание не найдено.",
+            intent="utility_reminders.delete",
+            mode="local",
+        )
     scheduler = _get_reminder_scheduler(context)
     if scheduler:
         try:
@@ -4405,13 +4638,6 @@ async def _handle_reminder_delete(
                 intent="utility_reminders.delete",
                 mode="local",
             )
-    reminder = await calendar_store.get_reminder(reminder_id)
-    if reminder is None or reminder.user_id != user_id or reminder.chat_id != chat_id:
-        return refused(
-            "Напоминание не найдено.",
-            intent="utility_reminders.delete",
-            mode="local",
-        )
     deleted = await calendar_store.delete_reminder(reminder_id)
     if not deleted:
         return refused(
@@ -4427,6 +4653,20 @@ async def _handle_reminder_delete(
         actions=_reminder_post_action_actions(),
         debug={"refs": {"reminder_id": reminder_id}},
     )
+
+
+def _handle_digest_toggle(context: ContextTypes.DEFAULT_TYPE, *, user_id: int, enabled: bool) -> OrchestratorResult:
+    profile_store = context.application.bot_data.get("profile_store")
+    if profile_store is None:
+        return error("Профиль не настроен.", intent="utility_digest.toggle", mode="local")
+    try:
+        profile_store.update(user_id, {"daily_digest_enabled": enabled})
+    except Exception:
+        LOGGER.exception("Failed to update digest setting: user_id=%s enabled=%s", user_id, enabled)
+        return error("Не удалось обновить настройку дайджеста.", intent="utility_digest.toggle", mode="local")
+    text = "🗞 Дайджест включён." if enabled else "🗞 Дайджест выключен."
+    LOGGER.info("Digest toggled: user_id=%s enabled=%s", user_id, enabled)
+    return ok(text, intent="utility_digest.toggle", mode="local", actions=[menu.menu_action()])
 
 
 async def _handle_reminder_disable(

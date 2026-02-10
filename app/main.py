@@ -17,6 +17,7 @@ from app.core.orchestrator import Orchestrator, load_orchestrator_config
 from app.core.reminders import ReminderScheduler
 from app.core.dialog_memory import DialogMemory
 from app.core.memory_manager import MemoryManager, UserActionsLog, UserProfileMemory
+from app.core.digest_scheduler import start_digest_scheduler, stop_digest_scheduler
 from app.infra.access import AccessController
 from app.infra.allowlist import AllowlistStore, extract_allowed_user_ids
 from app.infra.actions_log_store import ActionsLogStore
@@ -60,6 +61,8 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("trace", handlers.trace_command))
     application.add_handler(CommandHandler("facts_on", handlers.facts_on))
     application.add_handler(CommandHandler("facts_off", handlers.facts_off))
+    application.add_handler(CommandHandler("digest_on", handlers.digest_on))
+    application.add_handler(CommandHandler("digest_off", handlers.digest_off))
     application.add_handler(CommandHandler("context_on", handlers.context_on))
     application.add_handler(CommandHandler("context_off", handlers.context_off))
     application.add_handler(CommandHandler("context_clear", handlers.context_clear))
@@ -330,7 +333,17 @@ def main() -> None:
             if obs_cfg.systemd_watchdog_enabled:
                 asyncio.create_task(run_watchdog_loop(enabled=True, env=None))
 
-    application.post_init = _restore_reminders
+    async def _post_init(app: Application) -> None:
+        await _restore_reminders(app)
+        if app.bot_data.get("digest_scheduler") is None:
+            app.bot_data["digest_scheduler"] = start_digest_scheduler(app)
+
+    async def _post_shutdown(app: Application) -> None:
+        scheduler = app.bot_data.pop("digest_scheduler", None)
+        stop_digest_scheduler(scheduler)
+
+    application.post_init = _post_init
+    application.post_shutdown = _post_shutdown
 
     _register_handlers(application)
     application.add_error_handler(handlers.error_handler)

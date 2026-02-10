@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from telegram.ext import Application, ContextTypes
 
-from app.core import calendar_store, reminders as reminders_module
+from app.core import calendar_store
 from app.bot.actions import ActionStore, build_inline_keyboard
 from app.core.result import Action
 from app.infra.messaging import safe_send_bot_text
@@ -59,8 +59,7 @@ async def _process_due_reminders(application: Application) -> None:
         event = await calendar_store.get_event(item.event_id)
         event_dt = event.dt if event else item.trigger_at
         message_time = event_dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-        message_body = await reminders_module._build_reminder_message(item, application)
-        text = f"⏰ Напоминание: {message_body}\nКогда: {message_time} (МСК)"
+        text = f"⏰ Напоминание: {item.text}\nКогда: {message_time} (МСК)"
         actions = _build_reminder_actions(item)
         action_store = application.bot_data.get("action_store")
         reply_markup = None
@@ -133,26 +132,31 @@ async def post_shutdown(application: Application) -> None:
 
 
 def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Action]:
-    base_trigger = reminder.trigger_at.isoformat()
     return [
         Action(
-            id=f"reminder_snooze:{reminder.id}:10",
-            label="⏸ Отложить 10 минут",
-            payload={"op": "reminder_snooze", "reminder_id": reminder.id, "minutes": 10, "base_trigger_at": base_trigger},
+            id=f"reminder_snooze_now:{reminder.id}:5",
+            label="⏸ +5 мин",
+            payload={"op": "reminder_snooze_now", "reminder_id": reminder.id, "minutes": 5},
         ),
         Action(
-            id=f"reminder_snooze:{reminder.id}:60",
-            label="⏸ Отложить 1 час",
-            payload={"op": "reminder_snooze", "reminder_id": reminder.id, "minutes": 60, "base_trigger_at": base_trigger},
+            id=f"reminder_snooze_now:{reminder.id}:15",
+            label="⏸ +15 мин",
+            payload={"op": "reminder_snooze_now", "reminder_id": reminder.id, "minutes": 15},
+        ),
+        Action(
+            id=f"reminder_snooze_now:{reminder.id}:60",
+            label="⏸ +1 час",
+            payload={"op": "reminder_snooze_now", "reminder_id": reminder.id, "minutes": 60},
         ),
         Action(
             id=f"reminder_reschedule:{reminder.id}",
             label="✏ Перенести",
-            payload={"op": "reminder_reschedule", "reminder_id": reminder.id, "base_trigger_at": base_trigger},
+            payload={"op": "reminder_reschedule", "reminder_id": reminder.id},
         ),
         Action(
             id="utility_reminders.delete",
             label="🗑 Удалить",
             payload={"op": "reminder.delete_confirm", "reminder_id": reminder.id},
         ),
+        Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}),
     ]

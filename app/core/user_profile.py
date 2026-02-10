@@ -16,6 +16,7 @@ DEFAULT_ACTIONS_LOG_ENABLED = True
 DEFAULT_REMINDER_OFFSET_MINUTES: int | None = None
 DEFAULT_REMINDERS_ENABLED = False
 DEFAULT_NOTES_LIMIT = 20
+DEFAULT_DAILY_DIGEST_ENABLED = False
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,8 @@ class UserProfile:
     date_format: str
     actions_log_enabled: bool
     default_reminders: ReminderDefaults
+    daily_digest_enabled: bool
+    daily_digest_last_sent_date: str | None
     style: str | None
     notes: tuple[UserNote, ...]
     created_at: str | None
@@ -93,6 +96,8 @@ class UserProfile:
             "date_format": self.date_format,
             "actions_log_enabled": self.actions_log_enabled,
             "default_reminders": self.default_reminders.to_dict(),
+            "daily_digest_enabled": self.daily_digest_enabled,
+            "daily_digest_last_sent_date": self.daily_digest_last_sent_date,
             "style": self.style,
             "notes": [note.to_dict() for note in self.notes],
             "created_at": self.created_at,
@@ -118,6 +123,8 @@ class UserProfile:
         date_format = payload.get("date_format")
         actions_log_enabled = payload.get("actions_log_enabled")
         style = payload.get("style")
+        digest_enabled = payload.get("daily_digest_enabled")
+        digest_last_sent = payload.get("daily_digest_last_sent_date")
         created_payload = payload.get("created_at")
         updated_payload = payload.get("updated_at")
         notes_payload = payload.get("notes")
@@ -147,6 +154,10 @@ class UserProfile:
             date_format=date_format if isinstance(date_format, str) and date_format else DEFAULT_DATE_FORMAT,
             actions_log_enabled=bool(DEFAULT_ACTIONS_LOG_ENABLED if actions_log_enabled is None else actions_log_enabled),
             default_reminders=ReminderDefaults.from_dict(payload.get("default_reminders")),
+            daily_digest_enabled=bool(DEFAULT_DAILY_DIGEST_ENABLED if digest_enabled is None else digest_enabled),
+            daily_digest_last_sent_date=digest_last_sent
+            if isinstance(digest_last_sent, str) and digest_last_sent.strip()
+            else None,
             style=style if isinstance(style, str) and style else None,
             notes=tuple(notes),
             created_at=created_value,
@@ -172,6 +183,8 @@ def default_profile(
         date_format=DEFAULT_DATE_FORMAT,
         actions_log_enabled=DEFAULT_ACTIONS_LOG_ENABLED,
         default_reminders=default_reminder_defaults(),
+        daily_digest_enabled=DEFAULT_DAILY_DIGEST_ENABLED,
+        daily_digest_last_sent_date=None,
         style=None,
         notes=tuple(),
         created_at=created_at or timestamp,
@@ -194,6 +207,8 @@ def apply_profile_patch(profile: UserProfile, patch: dict[str, Any]) -> UserProf
     date_format = patch.get("date_format")
     actions_log_enabled = patch.get("actions_log_enabled")
     style = patch.get("style")
+    digest_enabled = patch.get("daily_digest_enabled")
+    digest_last_sent = patch.get("daily_digest_last_sent_date")
     defaults_patch = patch.get("default_reminders")
     updated_defaults = profile.default_reminders
     if isinstance(defaults_patch, dict):
@@ -219,6 +234,10 @@ def apply_profile_patch(profile: UserProfile, patch: dict[str, Any]) -> UserProf
         date_format=date_format.strip() if isinstance(date_format, str) and date_format.strip() else profile.date_format,
         actions_log_enabled=bool(profile.actions_log_enabled if actions_log_enabled is None else actions_log_enabled),
         default_reminders=updated_defaults,
+        daily_digest_enabled=bool(profile.daily_digest_enabled if digest_enabled is None else digest_enabled),
+        daily_digest_last_sent_date=digest_last_sent.strip()
+        if isinstance(digest_last_sent, str) and digest_last_sent.strip()
+        else (None if digest_last_sent is None else profile.daily_digest_last_sent_date),
         style=style.strip() if isinstance(style, str) and style.strip() else profile.style,
     )
     return updated

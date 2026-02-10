@@ -169,6 +169,45 @@ def build_static_callback_data(action: Action) -> str | None:
         if isinstance(wizard_id, str) and wizard_id:
             return f"{callback}:{wizard_id}"
         return callback
+    # Reminder callbacks must be static, predictable and contain no user text.
+    # Format: cb:rem:<action>:... where all parts are strict tokens/ids.
+    if op == "reminder_snooze":
+        reminder_id = payload.get("reminder_id") or payload.get("id")
+        minutes = payload.get("minutes")
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return None
+        if not isinstance(minutes, int) or minutes < 1:
+            return None
+        return f"{STATIC_CALLBACK_PREFIX}rem:s:{minutes}:{reminder_id}"
+    if op == "reminder_snooze_now":
+        reminder_id = payload.get("reminder_id") or payload.get("id")
+        minutes = payload.get("minutes")
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return None
+        if not isinstance(minutes, int) or minutes < 1:
+            return None
+        return f"{STATIC_CALLBACK_PREFIX}rem:sn:{minutes}:{reminder_id}"
+    if op == "reminder_reschedule":
+        reminder_id = payload.get("reminder_id") or payload.get("id")
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return None
+        return f"{STATIC_CALLBACK_PREFIX}rem:r:{reminder_id}"
+    if op == "reminder.delete_confirm":
+        reminder_id = payload.get("reminder_id") or payload.get("id")
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return None
+        return f"{STATIC_CALLBACK_PREFIX}rem:dc:{reminder_id}"
+    if op == "reminder.delete_confirmed":
+        reminder_id = payload.get("reminder_id") or payload.get("id")
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return None
+        return f"{STATIC_CALLBACK_PREFIX}rem:dd:{reminder_id}"
+    # Daily digest toggle (per-user), stored in profile.
+    if op == "digest_toggle":
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            return None
+        return f"{STATIC_CALLBACK_PREFIX}digest:{'on' if enabled else 'off'}"
     return None
 
 
