@@ -113,6 +113,19 @@ class UserProfileStore:
     def exists(self, user_id: int) -> bool:
         return self._fetch_row(user_id) is not None
 
+    def list_user_ids(self) -> list[int]:
+        cursor = self._connection.execute("SELECT user_id FROM user_profiles")
+        rows = cursor.fetchall()
+        result: list[int] = []
+        for row in rows:
+            value = row["user_id"]
+            if isinstance(value, int):
+                result.append(value)
+            elif isinstance(value, str) and value.strip().isdigit():
+                result.append(int(value.strip()))
+        result.sort()
+        return result
+
     def _fetch_row(self, user_id: int) -> sqlite3.Row | None:
         cursor = self._connection.execute(
             """

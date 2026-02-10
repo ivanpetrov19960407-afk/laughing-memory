@@ -744,6 +744,53 @@ async def get_event(event_id: str) -> CalendarItem | None:
     return None
 
 
+async def resolve_user_chat_id(user_id: int) -> int | None:
+    """
+    Best-effort resolver for where to send user-facing notifications (e.g. daily digest).
+    We keep chat_id on events/reminders (local store), so we derive the latest known chat_id from there.
+    """
+    async with _STORE_LOCK:
+        store = load_store()
+        reminders = list(store.get("reminders") or [])
+        events = list(store.get("events") or [])
+    best_chat_id: int | None = None
+    best_ts: datetime | None = None
+    # Prefer reminders (more likely to be direct chat interactions).
+    for item in reminders:
+        if not isinstance(item, dict):
+            continue
+        if int(item.get("user_id") or 0) != int(user_id):
+            continue
+        chat_id = item.get("chat_id")
+        if not isinstance(chat_id, int) or chat_id == 0:
+            continue
+        trigger_at = item.get("trigger_at")
+        if not isinstance(trigger_at, str):
+            continue
+        ts = _parse_datetime(trigger_at, datetime.now(tz=VIENNA_TZ))
+        if best_ts is None or ts > best_ts:
+            best_ts = ts
+            best_chat_id = chat_id
+    if best_chat_id is not None:
+        return best_chat_id
+    for item in events:
+        if not isinstance(item, dict):
+            continue
+        if int(item.get("user_id") or 0) != int(user_id):
+            continue
+        chat_id = item.get("chat_id")
+        if not isinstance(chat_id, int) or chat_id == 0:
+            continue
+        dt_start = item.get("dt_start")
+        if not isinstance(dt_start, str):
+            continue
+        ts = _parse_datetime(dt_start, datetime.now(tz=VIENNA_TZ))
+        if best_ts is None or ts > best_ts:
+            best_ts = ts
+            best_chat_id = chat_id
+    return best_chat_id
+
+
 async def update_event_dt(event_id: str, new_dt: datetime) -> tuple[CalendarItem | None, str | None]:
     return await update_event_fields(event_id, new_dt=new_dt)
 

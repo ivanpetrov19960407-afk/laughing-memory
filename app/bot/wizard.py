@@ -265,6 +265,13 @@ class WizardManager:
                 mode="local",
                 actions=_menu_actions(),
             )
+        if reminder.user_id != user_id or reminder.chat_id != chat_id:
+            return refused(
+                "Напоминание не найдено.",
+                intent="wizard.reminder.missing",
+                mode="local",
+                actions=_menu_actions(),
+            )
         if reminder.status != "active":
             return refused(
                 "Напоминание отключено, перенос недоступен.",
@@ -717,6 +724,13 @@ class WizardManager:
         if reminder is None:
             return refused(
                 f"Напоминание не найдено: {reminder_id}",
+                intent="wizard.reminder.missing",
+                mode="local",
+                actions=_menu_actions(),
+            )
+        if reminder.user_id != user_id or reminder.chat_id != chat_id:
+            return refused(
+                "Напоминание не найдено.",
                 intent="wizard.reminder.missing",
                 mode="local",
                 actions=_menu_actions(),

@@ -57,6 +57,7 @@ def test_reminder_snooze_shifts_trigger(tmp_path, monkeypatch) -> None:
         handlers._handle_reminder_snooze(
             context,
             user_id=1,
+            chat_id=10,
             reminder_id=reminder.id,
             minutes=30,
             base_trigger_at=reminder.trigger_at.isoformat(),
