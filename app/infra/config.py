@@ -94,6 +94,25 @@ def resolve_env_label(raw_env: dict[str, str] | None = None) -> str:
     return "dev" if env in _DEV_ENVS else "prod"
 
 
+# Backwards compatibility: tests and callers import get_log_level from config.
+# LOG_LEVEL is also used by app.infra.logging_config; this API allows passing raw_env for tests.
+def get_log_level(*, raw_env: dict[str, str] | None = None) -> int:
+    """Return logging level from LOG_LEVEL env (DEBUG, INFO, WARNING, ERROR, CRITICAL). Default INFO."""
+    source = raw_env if raw_env is not None else os.environ
+    raw = source.get("LOG_LEVEL", "INFO")
+    if isinstance(raw, str):
+        raw = raw.strip().upper()
+    else:
+        raw = "INFO"
+    if not raw:
+        return logging.INFO
+    level = getattr(logging, raw, None)
+    if isinstance(level, int):
+        return level
+    LOGGER.debug("Invalid LOG_LEVEL=%r; using INFO", raw)
+    return logging.INFO
+
+
 def validate_startup_env(
     settings: Settings,
     *,
