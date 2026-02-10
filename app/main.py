@@ -14,6 +14,7 @@ from telegram.warnings import PTBUserWarning
 from app.bot import actions, handlers, wizard
 from app.core import calendar_store
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
+from app.core.app_scheduler import AppScheduler
 from app.core.reminders import ReminderScheduler
 from app.core.dialog_memory import DialogMemory
 from app.core.memory_manager import MemoryManager, UserActionsLog, UserProfileMemory
@@ -227,9 +228,17 @@ def main() -> None:
 
     warnings.filterwarnings("ignore", message="No JobQueue set up", category=PTBUserWarning)
     application = Application.builder().token(settings.bot_token).build()
+    app_scheduler = AppScheduler(
+        application=application,
+        calendar_store_module=calendar_store,
+        profile_store=profile_store,
+    )
+    app_scheduler.start()
+    application.bot_data["app_scheduler"] = app_scheduler
     reminder_scheduler = ReminderScheduler(
         application=application,
         max_future_days=settings.reminder_max_future_days,
+        app_scheduler=app_scheduler,
     )
     application.bot_data["reminder_scheduler"] = reminder_scheduler
     application.bot_data["orchestrator"] = orchestrator
@@ -313,8 +322,7 @@ def main() -> None:
         timezone=calendar_store.BOT_TZ.key,
         integrations=_build_startup_integrations(startup_features),
     )
-    if not application.job_queue:
-        logging.getLogger(__name__).warning("JobQueue not configured; reminders will run without it.")
+    # Напоминания и дайджест планируются через APScheduler (app_scheduler).
 
     async def _restore_reminders(app: Application) -> None:
         if not settings.reminders_enabled:

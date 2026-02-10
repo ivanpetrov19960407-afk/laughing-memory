@@ -355,8 +355,7 @@ def test_callback_reminder_snooze_updates_schedule(tmp_path, monkeypatch) -> Non
         payload={
             "op": "reminder_snooze",
             "reminder_id": reminder.id,
-            "minutes": 10,
-            "base_trigger_at": reminder.trigger_at.isoformat(),
+            "minutes": 15,
         },
     )
     action_id = store.store_action(action=action, user_id=1, chat_id=10)
@@ -372,7 +371,10 @@ def test_callback_reminder_snooze_updates_schedule(tmp_path, monkeypatch) -> Non
     assert result.intent == "utility_reminders.snooze"
     updated = asyncio.run(calendar_store.get_reminder(reminder.id))
     assert updated is not None
-    assert updated.trigger_at == reminder.trigger_at + timedelta(minutes=10)
+    # Snooze от now: новый trigger = now + 15 мин (пресет)
+    expected_min = now + timedelta(minutes=14)
+    expected_max = now + timedelta(minutes=16)
+    assert expected_min <= updated.trigger_at <= expected_max
     assert scheduled["reminder_id"] == reminder.id
 
 

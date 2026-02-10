@@ -921,6 +921,7 @@ async def apply_snooze(
     minutes: int,
     now: datetime | None = None,
     base_trigger_at: datetime | None = None,
+    use_now: bool = False,
 ) -> ReminderItem | None:
     offset = max(1, minutes)
     current_now = (now or datetime.now(tz=VIENNA_TZ)).astimezone(VIENNA_TZ)
@@ -940,7 +941,12 @@ async def apply_snooze(
                 return None
             current_trigger = _parse_datetime(trigger_value, current_now)
             recurrence = _parse_recurrence(item.get("recurrence"))
-            base = max(current_now, base_trigger_at or current_trigger)
+            # use_now: base = now (UI callback); else exact delta from trigger_at (or base_trigger_at). Preserve tzinfo and microseconds.
+            base = current_now if use_now else (base_trigger_at if base_trigger_at is not None else current_trigger)
+            if base.tzinfo is None:
+                base = base.replace(tzinfo=VIENNA_TZ)
+            else:
+                base = base.astimezone(VIENNA_TZ)
             new_trigger = base + timedelta(minutes=offset)
             item["trigger_at"] = new_trigger.astimezone(VIENNA_TZ).isoformat()
             item["enabled"] = True

@@ -159,7 +159,7 @@ def build_static_callback_data(action: Action) -> str | None:
     reminder_id = payload.get("reminder_id")
     if isinstance(reminder_id, str) and reminder_id.strip():
         rid = reminder_id.strip()
-        if op == "reminder_show_details":
+        if op in ("reminder_show_details", "reminder_details"):
             return f"{STATIC_CALLBACK_PREFIX}REM:SHOW:{rid}"
         if op == "reminder_repeat_menu":
             return f"{STATIC_CALLBACK_PREFIX}REM:REPEAT:{rid}"
@@ -168,6 +168,8 @@ def build_static_callback_data(action: Action) -> str | None:
         minutes = payload.get("minutes")
         if op == "reminder_snooze" and minutes in (5, 15, 30, 60):
             return f"{STATIC_CALLBACK_PREFIX}REM:SNOOZE:{minutes}:{rid}"
+        if op in ("reminder_delete_confirm", "reminder.delete_confirm"):
+            return f"{STATIC_CALLBACK_PREFIX}REM:DEL:{rid}"
     if op == "timezone_set":
         tz = payload.get("timezone")
         if isinstance(tz, str) and tz in TIMEZONE_OPTIONS:
