@@ -55,6 +55,7 @@ class Settings:
     reminder_max_future_days: int
     action_ttl_seconds: int
     action_max_size: int
+    actions_log_ttl_days: int  # backwards compatibility: TTL in days for actions log store
     enable_wizards: bool
     enable_menu: bool
     strict_no_pseudo_sources: bool
@@ -77,6 +78,13 @@ class Settings:
     caldav_username: str | None
     caldav_password: str | None
     caldav_calendar_name: str | None
+    obs_http_enabled: bool
+    obs_http_host: str
+    obs_http_port: int
+    otel_enabled: bool
+    otel_exporter: str
+    otel_otlp_endpoint: str | None
+    systemd_watchdog_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -122,14 +130,15 @@ def validate_startup_env(
 ) -> StartupFeatures:
     log = logger or LOGGER
     label = env_label or resolve_env_label(raw_env)
-    if not settings.bot_token:
+    env_source = raw_env if raw_env is not None else os.environ
+    dry_run = (env_source.get("DRY_RUN") or "").strip().lower() in ("1", "true", "yes", "on")
+    if not settings.bot_token and not dry_run:
         log.error("startup.env invalid: BOT_TOKEN missing")
         raise SystemExit("BOT_TOKEN is not set")
     if not settings.orchestrator_config_path.exists():
         log.error("startup.env invalid: config missing path=%s", settings.orchestrator_config_path)
         raise SystemExit("ORCHESTRATOR_CONFIG_PATH is invalid")
 
-    env_source = raw_env if raw_env is not None else os.environ
     dev_mode = _parse_optional_bool(env_source.get("DEV_MODE"))
     if label == "prod" and dev_mode is True:
         log.error("startup.env mismatch: prod env with DEV_MODE=true")
@@ -154,11 +163,17 @@ def validate_startup_env(
     )
 
 
+def _is_dry_run() -> bool:
+    raw = os.getenv("DRY_RUN", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def load_settings() -> Settings:
     _load_dotenv()
 
-    token = os.getenv("BOT_TOKEN")
-    if not token:
+    # In DRY_RUN mode BOT_TOKEN is optional (polling is skipped).
+    token = os.getenv("BOT_TOKEN") or ""
+    if not token and not _is_dry_run():
         raise RuntimeError("BOT_TOKEN is not set")
 
     config_path = Path(os.getenv("ORCHESTRATOR_CONFIG_PATH", DEFAULT_CONFIG_PATH))
@@ -199,6 +214,7 @@ def load_settings() -> Settings:
     )
     action_ttl_seconds = _parse_int_with_default(os.getenv("ACTION_TTL_SECONDS"), 900)
     action_max_size = _parse_int_with_default(os.getenv("ACTION_MAX_SIZE"), 2000)
+    actions_log_ttl_days = _parse_int_with_default(os.getenv("ACTIONS_LOG_TTL_DAYS"), 30)
     enable_wizards = _parse_optional_bool(os.getenv("ENABLE_WIZARDS"))
     if enable_wizards is None:
         enable_wizards = True
@@ -247,6 +263,15 @@ def load_settings() -> Settings:
     caldav_username = os.getenv("CALDAV_USERNAME") or None
     caldav_password = os.getenv("CALDAV_PASSWORD") or None
     caldav_calendar_name = os.getenv("CALDAV_CALENDAR_NAME") or None
+    obs_http_enabled = _parse_optional_bool(os.getenv("OBS_HTTP_ENABLED")) or False
+    obs_http_host = os.getenv("OBS_HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    obs_http_port = _parse_int_with_default(os.getenv("OBS_HTTP_PORT"), 8080)
+    otel_enabled = _parse_optional_bool(os.getenv("OTEL_ENABLED")) or False
+    otel_exporter = os.getenv("OTEL_EXPORTER", "console").strip() or "console"
+    otel_otlp_endpoint = os.getenv("OTEL_OTLP_ENDPOINT") or None
+    if otel_otlp_endpoint is not None:
+        otel_otlp_endpoint = otel_otlp_endpoint.strip() or None
+    systemd_watchdog_enabled = _parse_optional_bool(os.getenv("SYSTEMD_WATCHDOG")) or False
     return Settings(
         bot_token=token,
         orchestrator_config_path=config_path,
@@ -276,6 +301,7 @@ def load_settings() -> Settings:
         reminder_max_future_days=reminder_max_future_days,
         action_ttl_seconds=action_ttl_seconds,
         action_max_size=action_max_size,
+        actions_log_ttl_days=actions_log_ttl_days,
         enable_wizards=enable_wizards,
         enable_menu=enable_menu,
         strict_no_pseudo_sources=strict_no_pseudo_sources,
@@ -298,6 +324,13 @@ def load_settings() -> Settings:
         caldav_username=caldav_username,
         caldav_password=caldav_password,
         caldav_calendar_name=caldav_calendar_name,
+        obs_http_enabled=obs_http_enabled,
+        obs_http_host=obs_http_host,
+        obs_http_port=obs_http_port,
+        otel_enabled=otel_enabled,
+        otel_exporter=otel_exporter,
+        otel_otlp_endpoint=otel_otlp_endpoint,
+        systemd_watchdog_enabled=systemd_watchdog_enabled,
     )
 
 

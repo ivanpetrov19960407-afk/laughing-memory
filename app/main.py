@@ -222,7 +222,8 @@ def main() -> None:
     )
 
     warnings.filterwarnings("ignore", message="No JobQueue set up", category=PTBUserWarning)
-    application = Application.builder().token(settings.bot_token).build()
+    token_for_builder = settings.bot_token or (dry_run and "0:DRY_RUN") or ""
+    application = Application.builder().token(token_for_builder).build()
     reminder_scheduler = ReminderScheduler(
         application=application,
         max_future_days=settings.reminder_max_future_days,
