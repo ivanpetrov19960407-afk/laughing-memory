@@ -3222,13 +3222,16 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     normalized_intent = _normalize_callback_intent(stored.intent)
     LOGGER.info("Callback dispatch: action_id=%s intent=%s", action_id, normalized_intent)
     set_input_text(context, f"<callback:{normalized_intent}>")
+    op_val = stored.payload.get("op")
+    payload_out = dict(stored.payload)
+    if op_val == "reminder_snooze":
+        payload_out["snooze_base"] = "now"
     result = await _dispatch_action_payload(
         update,
         context,
-        op=stored.payload.get("op"),
-        payload=stored.payload,
+        op=op_val,
+        payload=payload_out,
         intent=normalized_intent,
-        snooze_from_now=True,
     )
     if (
         isinstance(result, OrchestratorResult)
@@ -3270,7 +3273,6 @@ async def _dispatch_action_payload(
     op: object,
     payload: dict[str, object],
     intent: str,
-    snooze_from_now: bool = False,
 ) -> OrchestratorResult:
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else None
@@ -3935,6 +3937,7 @@ async def _dispatch_action_payload(
             )
         minutes_value = minutes if isinstance(minutes, int) else 10
         base_value = base_trigger_at if isinstance(base_trigger_at, str) else None
+        snooze_from_now = payload.get("snooze_base") == "now"
         return await _handle_reminder_snooze(
             context,
             user_id=user_id,
