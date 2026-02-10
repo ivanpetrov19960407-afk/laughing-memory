@@ -2248,6 +2248,56 @@ async def facts_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @_with_error_handling
+async def digest_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.profile is None:
+        result = _build_simple_result(
+            "Профиль не настроен.",
+            intent="command.digest_on",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    memory_manager.update_profile(user_id, {"daily_digest_enabled": True})
+    result = _build_simple_result(
+        "Ежедневный дайджест включён.",
+        intent="command.digest_on",
+        status="ok",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
+async def digest_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context):
+        return
+    memory_manager = _get_memory_manager(context)
+    if memory_manager is None or memory_manager.profile is None:
+        result = _build_simple_result(
+            "Профиль не настроен.",
+            intent="command.digest_off",
+            status="refused",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    memory_manager.update_profile(user_id, {"daily_digest_enabled": False})
+    result = _build_simple_result(
+        "Ежедневный дайджест выключен.",
+        intent="command.digest_off",
+        status="ok",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
 async def context_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
