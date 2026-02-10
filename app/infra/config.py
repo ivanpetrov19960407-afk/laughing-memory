@@ -1,5 +1,3 @@
-"""Application settings from environment: paths, API keys, feature flags, limits."""
-
 from __future__ import annotations
 
 import logging
@@ -8,9 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
-
-_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-DEFAULT_LOG_LEVEL = logging.INFO
 
 DEFAULT_CONFIG_PATH = Path("config/orchestrator.json")
 DEFAULT_DB_PATH = Path("data/bot.db")
@@ -23,8 +18,6 @@ DEFAULT_DOCUMENT_SESSIONS_PATH = Path("data/document_sessions.json")
 
 @dataclass(frozen=True)
 class Settings:
-    """Immutable app settings loaded from env (BOT_TOKEN, paths, LLM, CalDAV, limits)."""
-
     bot_token: str
     orchestrator_config_path: Path
     db_path: Path
@@ -68,6 +61,9 @@ class Settings:
     caldav_username: str | None
     caldav_password: str | None
     caldav_calendar_name: str | None
+    # Actions log retention (days)
+    actions_log_ttl_days: int
+    # Observability / telemetry flags (mirrors ObservabilityConfig)
     obs_http_enabled: bool
     obs_http_host: str
     obs_http_port: int
@@ -75,7 +71,6 @@ class Settings:
     otel_exporter: str
     otel_otlp_endpoint: str | None
     systemd_watchdog_enabled: bool
-    actions_log_ttl_days: int = 30
 
 
 @dataclass(frozen=True)
@@ -87,27 +82,32 @@ class StartupFeatures:
 _DEV_ENVS = {"dev", "development", "local"}
 
 
-def get_log_level(
-    raw_env: dict[str, str] | None = None,
-    logger: logging.Logger | None = None,
-) -> int:
-    """Resolve logging level from LOG_LEVEL env. Default INFO; invalid values fallback with optional warning."""
-    source = raw_env if raw_env is not None else os.environ
-    value = source.get("LOG_LEVEL")
-    if not value or not value.strip():
-        return DEFAULT_LOG_LEVEL
-    name = value.strip().upper()
-    if name not in _VALID_LOG_LEVELS:
-        log = logger or LOGGER
-        log.warning("Invalid LOG_LEVEL=%r, using default INFO", value)
-        return DEFAULT_LOG_LEVEL
-    return getattr(logging, name)
-
-
 def resolve_env_label(raw_env: dict[str, str] | None = None) -> str:
     source = raw_env if raw_env is not None else os.environ
     env = source.get("APP_ENV", "prod").strip().lower()
     return "dev" if env in _DEV_ENVS else "prod"
+
+
+def get_log_level(raw_env: dict[str, str] | None = None) -> int:
+    """Resolve application log level from environment.
+
+    Public helper used by tests and startup code.
+    Falls back to INFO for missing or invalid values.
+    """
+    source = raw_env if raw_env is not None else os.environ
+    raw = source.get("LOG_LEVEL")
+    if not raw:
+        return logging.INFO
+
+    value = raw.strip().upper()
+    mapping = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+    return mapping.get(value, logging.INFO)
 
 
 def validate_startup_env(
@@ -118,15 +118,19 @@ def validate_startup_env(
     logger: logging.Logger | None = None,
 ) -> StartupFeatures:
     log = logger or LOGGER
+    env_source = raw_env if raw_env is not None else os.environ
     label = env_label or resolve_env_label(raw_env)
-    if not settings.bot_token:
+
+    # In DRY_RUN mode we allow missing BOT_TOKEN so Docker smoke tests
+    # can run without real Telegram credentials.
+    dry_run = _parse_optional_bool(env_source.get("DRY_RUN")) is True
+    if not dry_run and not settings.bot_token:
         log.error("startup.env invalid: BOT_TOKEN missing")
         raise SystemExit("BOT_TOKEN is not set")
     if not settings.orchestrator_config_path.exists():
         log.error("startup.env invalid: config missing path=%s", settings.orchestrator_config_path)
         raise SystemExit("ORCHESTRATOR_CONFIG_PATH is invalid")
 
-    env_source = raw_env if raw_env is not None else os.environ
     dev_mode = _parse_optional_bool(env_source.get("DEV_MODE"))
     if label == "prod" and dev_mode is True:
         log.error("startup.env mismatch: prod env with DEV_MODE=true")
@@ -152,89 +156,100 @@ def validate_startup_env(
 
 
 def load_settings() -> Settings:
-    """Load Settings from environment; raises RuntimeError if BOT_TOKEN missing."""
     _load_dotenv()
 
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        raise RuntimeError("BOT_TOKEN is not set")
+    env = os.environ
+    dry_run = _parse_optional_bool(env.get("DRY_RUN")) is True
 
-    config_path = Path(os.getenv("ORCHESTRATOR_CONFIG_PATH", DEFAULT_CONFIG_PATH))
-    db_path = Path(os.getenv("BOT_DB_PATH", DEFAULT_DB_PATH))
+    token = env.get("BOT_TOKEN")
+    if not token:
+        if dry_run:
+            # For DRY_RUN we don't need a real Telegram token; use a placeholder
+            # so downstream code that expects a non-empty string continues to work.
+            token = "000000:DRY_RUN_TOKEN"
+        else:
+            raise RuntimeError("BOT_TOKEN is not set")
+
+    config_path = Path(env.get("ORCHESTRATOR_CONFIG_PATH", DEFAULT_CONFIG_PATH))
+    db_path = Path(env.get("BOT_DB_PATH", DEFAULT_DB_PATH))
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    openai_api_key = os.getenv("OPENAI_API_KEY") or None
-    openai_model = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
-    openai_timeout_seconds = _parse_optional_float(os.getenv("OPENAI_TIMEOUT_SECONDS"), 30.0)
-    perplexity_api_key = os.getenv("PERPLEXITY_API_KEY") or None
-    perplexity_base_url = os.getenv("PERPLEXITY_BASE_URL", "https://api.perplexity.ai")
-    perplexity_model = os.getenv("PERPLEXITY_MODEL", "sonar")
-    perplexity_timeout_seconds = _parse_optional_float(os.getenv("PERPLEXITY_TIMEOUT_SECONDS"), 15.0)
-    allowed_user_ids_raw = os.getenv("ALLOWED_USER_IDS")
+    openai_api_key = env.get("OPENAI_API_KEY") or None
+    openai_model = env.get("OPENAI_MODEL", "gpt-3.5-turbo")
+    openai_timeout_seconds = _parse_optional_float(env.get("OPENAI_TIMEOUT_SECONDS"), 30.0)
+    perplexity_api_key = env.get("PERPLEXITY_API_KEY") or None
+    perplexity_base_url = env.get("PERPLEXITY_BASE_URL", "https://api.perplexity.ai")
+    perplexity_model = env.get("PERPLEXITY_MODEL", "sonar")
+    perplexity_timeout_seconds = _parse_optional_float(env.get("PERPLEXITY_TIMEOUT_SECONDS"), 15.0)
+    allowed_user_ids_raw = env.get("ALLOWED_USER_IDS")
     allowed_user_ids = _parse_int_set(allowed_user_ids_raw)
-    admin_user_ids_raw = os.getenv("ADMIN_USER_IDS")
+    admin_user_ids_raw = env.get("ADMIN_USER_IDS")
     admin_user_ids = _parse_int_set(admin_user_ids_raw)
-    allowlist_path = Path(os.getenv("ALLOWLIST_PATH", DEFAULT_ALLOWLIST_PATH))
-    llm_per_minute = _parse_optional_int(os.getenv("LLM_PER_MINUTE"))
-    llm_per_day = _parse_optional_int(os.getenv("LLM_PER_DAY"))
-    llm_history_turns = _parse_optional_int(os.getenv("LLM_HISTORY_TURNS"))
-    facts_only_default = _parse_optional_bool(os.getenv("FACTS_ONLY_DEFAULT"))
-    rate_limit_per_minute = _parse_int_with_default(os.getenv("RATE_LIMIT_PER_MINUTE"), 10)
-    rate_limit_per_day = _parse_int_with_default(os.getenv("RATE_LIMIT_PER_DAY"), 200)
-    history_size = _parse_int_with_default(os.getenv("HISTORY_SIZE"), 10)
-    telegram_message_limit = _parse_int_with_default(os.getenv("TELEGRAM_MESSAGE_LIMIT"), 4000)
-    dialog_memory_path = Path(os.getenv("DIALOG_MEMORY_PATH", DEFAULT_DIALOG_MEMORY_PATH))
-    context_max_turns = _parse_int_with_default(os.getenv("CONTEXT_MAX_TURNS"), 5)
-    reminders_enabled = _parse_optional_bool(os.getenv("REMINDERS_ENABLED"))
+    allowlist_path = Path(env.get("ALLOWLIST_PATH", DEFAULT_ALLOWLIST_PATH))
+    llm_per_minute = _parse_optional_int(env.get("LLM_PER_MINUTE"))
+    llm_per_day = _parse_optional_int(env.get("LLM_PER_DAY"))
+    llm_history_turns = _parse_optional_int(env.get("LLM_HISTORY_TURNS"))
+    facts_only_default = _parse_optional_bool(env.get("FACTS_ONLY_DEFAULT"))
+    rate_limit_per_minute = _parse_int_with_default(env.get("RATE_LIMIT_PER_MINUTE"), 10)
+    rate_limit_per_day = _parse_int_with_default(env.get("RATE_LIMIT_PER_DAY"), 200)
+    history_size = _parse_int_with_default(env.get("HISTORY_SIZE"), 10)
+    telegram_message_limit = _parse_int_with_default(env.get("TELEGRAM_MESSAGE_LIMIT"), 4000)
+    dialog_memory_path = Path(env.get("DIALOG_MEMORY_PATH", DEFAULT_DIALOG_MEMORY_PATH))
+    context_max_turns = _parse_int_with_default(env.get("CONTEXT_MAX_TURNS"), 5)
+    reminders_enabled = _parse_optional_bool(env.get("REMINDERS_ENABLED"))
     if reminders_enabled is None:
         reminders_enabled = True
     reminder_default_offset_minutes = _parse_int_with_default(
-        os.getenv("REMINDER_DEFAULT_OFFSET_MINUTES"),
+        env.get("REMINDER_DEFAULT_OFFSET_MINUTES"),
         10,
     )
     reminder_max_future_days = _parse_int_with_default(
-        os.getenv("REMINDER_MAX_FUTURE_DAYS"),
+        env.get("REMINDER_MAX_FUTURE_DAYS"),
         365,
     )
-    action_ttl_seconds = _parse_int_with_default(os.getenv("ACTION_TTL_SECONDS"), 900)
-    action_max_size = _parse_int_with_default(os.getenv("ACTION_MAX_SIZE"), 2000)
-    actions_log_ttl_days = _parse_int_with_default(os.getenv("ACTIONS_LOG_TTL_DAYS"), 30)
-    enable_wizards = _parse_optional_bool(os.getenv("ENABLE_WIZARDS"))
+    action_ttl_seconds = _parse_int_with_default(env.get("ACTION_TTL_SECONDS"), 900)
+    action_max_size = _parse_int_with_default(env.get("ACTION_MAX_SIZE"), 2000)
+    enable_wizards = _parse_optional_bool(env.get("ENABLE_WIZARDS"))
     if enable_wizards is None:
         enable_wizards = True
-    enable_menu = _parse_optional_bool(os.getenv("ENABLE_MENU"))
+    enable_menu = _parse_optional_bool(env.get("ENABLE_MENU"))
     if enable_menu is None:
         enable_menu = True
-    strict_no_pseudo_sources = _parse_optional_bool(os.getenv("STRICT_NO_PSEUDO_SOURCES"))
+    strict_no_pseudo_sources = _parse_optional_bool(env.get("STRICT_NO_PSEUDO_SOURCES"))
     if strict_no_pseudo_sources is None:
         strict_no_pseudo_sources = True
-    wizard_store_path = Path(os.getenv("WIZARD_STORE_PATH", "data/wizards"))
-    wizard_timeout_seconds = _parse_int_with_default(os.getenv("WIZARD_TIMEOUT_SECONDS"), 600)
-    feature_web_search = _parse_optional_bool(os.getenv("FEATURE_WEB_SEARCH"))
+    wizard_store_path = Path(env.get("WIZARD_STORE_PATH", "data/wizards"))
+    wizard_timeout_seconds = _parse_int_with_default(env.get("WIZARD_TIMEOUT_SECONDS"), 600)
+    feature_web_search = _parse_optional_bool(env.get("FEATURE_WEB_SEARCH"))
     if feature_web_search is None:
         feature_web_search = True
-    uploads_path = Path(os.getenv("UPLOADS_PATH", DEFAULT_UPLOADS_PATH))
-    document_texts_path = Path(os.getenv("DOCUMENT_TEXTS_PATH", DEFAULT_DOCUMENT_TEXTS_PATH))
+    uploads_path = Path(env.get("UPLOADS_PATH", DEFAULT_UPLOADS_PATH))
+    document_texts_path = Path(env.get("DOCUMENT_TEXTS_PATH", DEFAULT_DOCUMENT_TEXTS_PATH))
     document_sessions_path = Path(
-        os.getenv("DOCUMENT_SESSIONS_PATH", DEFAULT_DOCUMENT_SESSIONS_PATH)
+        env.get("DOCUMENT_SESSIONS_PATH", DEFAULT_DOCUMENT_SESSIONS_PATH)
     )
-    ocr_enabled = _parse_optional_bool(os.getenv("OCR_ENABLED"))
+    ocr_enabled = _parse_optional_bool(env.get("OCR_ENABLED"))
     if ocr_enabled is None:
         ocr_enabled = True
-    calendar_backend = os.getenv("CALENDAR_BACKEND", "local").strip().lower()
+    calendar_backend = env.get("CALENDAR_BACKEND", "local").strip().lower()
     if calendar_backend not in {"local", "caldav"}:
         calendar_backend = "local"
-    caldav_url = os.getenv("CALDAV_URL") or None
-    caldav_username = os.getenv("CALDAV_USERNAME") or None
-    caldav_password = os.getenv("CALDAV_PASSWORD") or None
-    caldav_calendar_name = os.getenv("CALDAV_CALENDAR_NAME") or None
-    obs_http_enabled = _parse_optional_bool(os.getenv("OBS_HTTP_ENABLED")) or False
-    obs_http_host = os.getenv("OBS_HTTP_HOST", "127.0.0.1").strip()
-    obs_http_port = _parse_int_with_default(os.getenv("OBS_HTTP_PORT"), 8080)
-    otel_enabled = _parse_optional_bool(os.getenv("OTEL_ENABLED")) or False
-    otel_exporter = os.getenv("OTEL_EXPORTER", "console").strip().lower()
-    otel_otlp_endpoint = os.getenv("OTEL_OTLP_ENDPOINT") or None
-    systemd_watchdog_enabled = _parse_optional_bool(os.getenv("SYSTEMD_WATCHDOG")) or False
-    actions_log_ttl_days = _parse_int_with_default(os.getenv("ACTIONS_LOG_TTL_DAYS"), 30)
+    caldav_url = env.get("CALDAV_URL") or None
+    caldav_username = env.get("CALDAV_USERNAME") or None
+    caldav_password = env.get("CALDAV_PASSWORD") or None
+    caldav_calendar_name = env.get("CALDAV_CALENDAR_NAME") or None
+
+    # Optional retention for user actions log (in days).
+    actions_log_ttl_days = _parse_int_with_default(env.get("ACTIONS_LOG_TTL_DAYS"), 60)
+
+    # Observability / telemetry flags. These are mostly wired through a dedicated
+    # ObservabilityConfig, but Settings keeps a shadow copy for tests and wiring.
+    obs_http_enabled = False
+    obs_http_host = "127.0.0.1"
+    obs_http_port = 8081
+    otel_enabled = False
+    otel_exporter = env.get("OTEL_EXPORTER", "console")
+    otel_otlp_endpoint = env.get("OTEL_OTLP_ENDPOINT") or None
+    systemd_watchdog_enabled = False
     return Settings(
         bot_token=token,
         orchestrator_config_path=config_path,
@@ -264,7 +279,6 @@ def load_settings() -> Settings:
         reminder_max_future_days=reminder_max_future_days,
         action_ttl_seconds=action_ttl_seconds,
         action_max_size=action_max_size,
-        actions_log_ttl_days=actions_log_ttl_days,
         enable_wizards=enable_wizards,
         enable_menu=enable_menu,
         strict_no_pseudo_sources=strict_no_pseudo_sources,
@@ -280,6 +294,7 @@ def load_settings() -> Settings:
         caldav_username=caldav_username,
         caldav_password=caldav_password,
         caldav_calendar_name=caldav_calendar_name,
+        actions_log_ttl_days=actions_log_ttl_days,
         obs_http_enabled=obs_http_enabled,
         obs_http_host=obs_http_host,
         obs_http_port=obs_http_port,
