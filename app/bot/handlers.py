@@ -20,7 +20,7 @@ from telegram.ext import ContextTypes
 
 from app.bot import menu, routing, wizard
 from app.bot.actions import ActionStore, StoredAction, build_inline_keyboard, parse_callback_token
-from app.core import calendar_store, snooze_presets, tools_calendar
+from app.core import calendar_store, tools_calendar
 from app.core.calendar_nlp_ru import (
     EventDraft,
     event_from_text_ru,
@@ -31,13 +31,13 @@ from app.core.calendar_nlp_ru import (
 )
 from app.core.calc import CalcError, parse_and_eval
 from app.core.dialog_memory import DialogMessage
-from app.core.document_qa import select_relevant_chunks, select_relevant_chunks_with_scores
+from app.core.document_qa import select_relevant_chunks
 from app.core.last_state_resolver import ResolutionResult, resolve_short_message
 from app.core.memory_layers import build_memory_layers_context
 from app.core.memory_manager import MemoryManager
 from app.core.orchestrator import Orchestrator
 from app.core.file_text_extractor import FileTextExtractor, OCRNotAvailableError
-from app.core.user_profile import UserProfile, DEFAULT_TIMEZONE
+from app.core.user_profile import UserProfile
 from app.core.result import (
     Action,
     OrchestratorResult,
@@ -78,9 +78,6 @@ from app.infra.trace_store import TraceEntry, TraceStore
 from app.infra.storage import TaskStorage
 
 LOGGER = logging.getLogger(__name__)
-
-# Короткий список TZ для /set_timezone; не хранить пользовательский ввод в callback.
-TIMEZONE_CHOICES = ("Europe/Vilnius", "Europe/Moscow", "Europe/Berlin", "UTC")
 
 
 def _get_orchestrator(context: ContextTypes.DEFAULT_TYPE) -> Orchestrator:
@@ -932,7 +929,7 @@ def _document_actions(doc_id: str) -> list[Action]:
         ),
         Action(
             id="document.close",
-            label="🧹 Закрыть документ",
+            label="🗑 Закрыть документ",
             payload={"op": "document.close", "doc_id": doc_id},
         ),
     ]
@@ -947,7 +944,7 @@ def _document_qa_actions(doc_id: str) -> list[Action]:
         ),
         Action(
             id="document.close",
-            label="🧹 Закрыть документ",
+            label="🗑 Закрыть документ",
             payload={"op": "document.close", "doc_id": doc_id},
         ),
     ]
@@ -994,22 +991,6 @@ def _trim_document_text(text: str, *, max_chars: int = 8000) -> str:
     return text[:max_chars].rsplit("\n", 1)[0].strip() or text[:max_chars]
 
 
-def _summary_fallback_no_llm(text: str, *, max_paragraphs: int = 5, max_len: int = 1500) -> str:
-    """Эвристическое резюме без LLM: первые абзацы + частотные слова (без PII)."""
-    from collections import Counter
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    head = "\n".join(lines[:max_paragraphs])
-    if len(head) > max_len:
-        head = head[:max_len].rsplit(" ", 1)[0].strip() + "…"
-    words = re.findall(r"[а-яёa-z]{4,}", text.lower())
-    stop = {"этот", "этого", "который", "которая", "которые", "также", "после", "перед", "только", "когда", "если", "что", "как", "для", "или", "при", "из", "на", "по", "за", "не", "но", "как", "that", "this", "with", "from", "have", "were", "been", "will", "would"}
-    freq = [w for w, _ in Counter(words).most_common(12) if w not in stop]
-    keywords = ", ".join(freq[:8]) if freq else ""
-    if keywords:
-        return f"Ключевые пункты (фрагмент):\n{head}\n\nЧастотные слова: {keywords}."
-    return f"Ключевые пункты (фрагмент):\n{head}"
-
-
 async def _handle_document_summary(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -1020,15 +1001,7 @@ async def _handle_document_summary(
     document_store = _get_document_store(context)
     if document_store is None:
         return error("Хранилище документов недоступно.", intent="document.summary", mode="local")
-    session, status = document_store.get_session_with_status(doc_id)
-    if session is None and status == "expired":
-        return refused(
-            "Сессия документа истекла. Пришлите документ заново.",
-            intent="document.summary",
-            mode="local",
-        )
-    if session is None:
-        session = document_store.get_active(user_id=user_id, chat_id=chat_id)
+    session = document_store.get_session(doc_id) or document_store.get_active(user_id=user_id, chat_id=chat_id)
     if session is None:
         return refused("Сначала пришлите файл.", intent="document.summary", mode="local")
     text = _load_document_text(session.text_path)
@@ -1037,13 +1010,7 @@ async def _handle_document_summary(
     llm_client = _get_llm_client(context)
     model = _resolve_llm_model(context)
     if llm_client is None or model is None:
-        response = _summary_fallback_no_llm(text)
-        return ok(
-            response,
-            intent="document.summary",
-            mode="local",
-            actions=_document_actions(session.doc_id),
-        )
+        return error("LLM не настроен.", intent="document.summary", mode="local")
     orchestrator = _get_orchestrator(context)
     facts_only = orchestrator.is_facts_only(user_id)
     system_prompt = (
@@ -1052,7 +1019,9 @@ async def _handle_document_summary(
     )
     if facts_only:
         system_prompt += " Не добавляй домыслы. Если данных нет, так и скажи."
-    trimmed_text = _trim_document_text(text, max_chars=8000)
+    settings = _get_settings(context)
+    max_chars = settings.doc_max_chars if settings else 200_000
+    trimmed_text = _trim_document_text(text, max_chars=max_chars)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"Текст документа:\n{trimmed_text}\n\nСделай резюме."},
@@ -1082,57 +1051,28 @@ async def _handle_document_question(
     document_store = _get_document_store(context)
     if document_store is None:
         return error("Хранилище документов недоступно.", intent="document.qa", mode="local")
-    session, status = document_store.get_active_with_status(user_id=user_id, chat_id=chat_id)
-    if status == "expired":
-        return refused(
-            "Сессия документа истекла. Пришлите документ заново.",
-            intent="document.qa",
-            mode="local",
-        )
+    session = document_store.get_active(user_id=user_id, chat_id=chat_id)
     if session is None or session.state != "qa_mode":
         return refused("Сначала пришлите файл.", intent="document.qa", mode="local")
     text = _load_document_text(session.text_path)
     if not text.strip():
         return error("Текст документа не найден.", intent="document.qa", mode="local")
-    scored = select_relevant_chunks_with_scores(text, question, top_k=4)
-    relevant_chunks = [c.text for c in scored if c.score > 0]
-    log_event(
-        LOGGER,
-        get_request_context(context),
-        component="document",
-        event="qa_query",
-        status="ok",
-        matched_chunks_count=len(relevant_chunks),
-    )
-    if not relevant_chunks:
-        return refused(
-            "В документе не нашёл ответа на этот вопрос.",
-            intent="document.qa",
-            mode="local",
-            actions=_document_qa_actions(session.doc_id),
-        )
     llm_client = _get_llm_client(context)
     model = _resolve_llm_model(context)
     if llm_client is None or model is None:
-        def _quote(c: str, i: int) -> str:
-            snippet = c[:600] + ("…" if len(c) > 600 else "")
-            return f"Фрагмент документа ({i + 1}):\n{snippet}"
-        quotes = "\n\n".join(_quote(chunk, i) for i, chunk in enumerate(relevant_chunks[:3]))
-        return ok(
-            f"По документу найдено:\n\n{quotes}",
-            intent="document.qa",
-            mode="local",
-            actions=_document_qa_actions(session.doc_id),
-        )
+        return error("LLM не настроен.", intent="document.qa", mode="local")
     orchestrator = _get_orchestrator(context)
     facts_only = orchestrator.is_facts_only(user_id)
+    chunks = select_relevant_chunks(text, question, top_k=4)
+    if not chunks:
+        return refused("В документе нет ответа.", intent="document.qa", mode="local")
     system_prompt = (
         "Отвечай только на основе предоставленных фрагментов документа. "
-        "Если ответа нет во фрагментах, скажи: «В документе нет ответа»."
+        "Если ответа нет во фрагментах, скажи: \"В документе нет ответа\"."
     )
     if facts_only:
         system_prompt += " Никаких домыслов, только факты из текста."
-    context_text = "\n\n".join(f"Фрагмент {idx + 1}:\n{chunk}" for idx, chunk in enumerate(relevant_chunks))
+    context_text = "\n\n".join(f"Фрагмент {idx + 1}:\n{chunk}" for idx, chunk in enumerate(chunks))
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"Вопрос: {question}\n\n{context_text}"},
@@ -1200,11 +1140,36 @@ def _reminder_list_controls_actions(*, include_refresh: bool = True) -> list[Act
 
 
 def _reminder_snooze_menu_actions(reminder_id: str, base_trigger_at: str | None = None) -> list[Action]:
-    actions = snooze_presets.build_snooze_preset_actions(
-        reminder_id, base_trigger_at=base_trigger_at, include_tomorrow=True
-    )
-    actions.append(menu.menu_action())
-    return actions
+    base_payload: dict[str, object] = {"op": "reminder_snooze", "reminder_id": reminder_id}
+    if base_trigger_at:
+        base_payload["base_trigger_at"] = base_trigger_at
+    return [
+        Action(
+            id=f"reminder_snooze:{reminder_id}:10",
+            label="10 минут",
+            payload={**base_payload, "minutes": 10},
+        ),
+        Action(
+            id=f"reminder_snooze:{reminder_id}:30",
+            label="30 минут",
+            payload={**base_payload, "minutes": 30},
+        ),
+        Action(
+            id=f"reminder_snooze:{reminder_id}:60",
+            label="1 час",
+            payload={**base_payload, "minutes": 60},
+        ),
+        Action(
+            id=f"reminder_snooze:{reminder_id}:tomorrow",
+            label="Завтра утром",
+            payload={
+                "op": "reminder_snooze_tomorrow",
+                "reminder_id": reminder_id,
+                "base_trigger_at": base_trigger_at,
+            },
+        ),
+        menu.menu_action(),
+    ]
 
 
 def _reminder_delete_confirm_actions(reminder_id: str) -> list[Action]:
@@ -2449,98 +2414,6 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await send_result(update, context, result)
 
 
-def _build_set_timezone_actions() -> list[Action]:
-    return [
-        Action(id=f"tz:{tz}", label=tz, payload={"op": "set_timezone", "tz": tz})
-        for tz in TIMEZONE_CHOICES
-    ]
-
-
-def _handle_set_timezone_ui(context: ContextTypes.DEFAULT_TYPE, *, user_id: int) -> OrchestratorResult:
-    memory_manager = _get_memory_manager(context)
-    current_tz = DEFAULT_TIMEZONE
-    if memory_manager is not None and memory_manager.profile is not None:
-        profile = memory_manager.get_profile(user_id)
-        if profile is not None:
-            current_tz = profile.timezone or DEFAULT_TIMEZONE
-    text = f"Текущий часовой пояс: {current_tz}\nВыбери новый:"
-    return ok(
-        text,
-        intent="command.set_timezone",
-        mode="local",
-        actions=_build_set_timezone_actions(),
-    )
-
-
-@_with_error_handling
-async def set_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context):
-        return
-    user_id = update.effective_user.id if update.effective_user else 0
-    result = _handle_set_timezone_ui(context, user_id=user_id)
-    await send_result(update, context, result)
-
-
-set_timezone_command = set_timezone
-
-
-async def _handle_timezone_set(
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    user_id: int,
-    timezone_value: str,
-) -> OrchestratorResult:
-    """Сохранить выбранный TZ в профиль. Используется из тестов и callback."""
-    if timezone_value not in TIMEZONE_CHOICES:
-        return refused("Недопустимый часовой пояс.", intent="command.set_timezone", mode="local")
-    memory_manager = _get_memory_manager(context)
-    if memory_manager is None or memory_manager.profile is None:
-        return refused("Профиль не настроен.", intent="command.set_timezone", mode="local")
-    memory_manager.update_profile(user_id, {"timezone": timezone_value})
-    log_event(
-        LOGGER,
-        get_request_context(context),
-        component="handlers",
-        event="tz_changed",
-        status="ok",
-        timezone=timezone_value,
-    )
-    return ok(f"Часовой пояс установлен: {timezone_value}", intent="command.set_timezone", mode="local")
-
-
-@_with_error_handling
-async def search_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда /search_sources: list | enable <name> | disable <name>."""
-    if not await _guard_access(update, context):
-        return
-    orchestrator = _get_orchestrator(context)
-    args_str = " ".join(context.args).strip() if context.args else ""
-    payload = f"/search_sources {args_str}" if args_str else "/search_sources"
-    try:
-        result = await orchestrator.handle(payload, await _build_user_context(update, context))
-    except Exception as exc:
-        set_status(context, "error")
-        await _handle_exception(update, context, exc)
-        return
-    await send_result(update, context, result)
-
-
-@_with_error_handling
-async def digest_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context):
-        return
-    result = ok("Дайджест включён: раз в день в 09:00 по вашему часовому поясу.", intent="command.digest_on", mode="local")
-    await send_result(update, context, result)
-
-
-@_with_error_handling
-async def digest_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context):
-        return
-    result = ok("Дайджест выключен.", intent="command.digest_off", mode="local")
-    await send_result(update, context, result)
-
-
 @_with_error_handling
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
@@ -3172,7 +3045,7 @@ def _parse_static_callback(data: str) -> tuple[str, dict[str, object], str] | No
         op = wizard_ops.get(action)
         if op is None:
             return None
-        payload = {}
+        payload: dict[str, object] = {}
         if action in {"continue", "restart", "start"}:
             if not rest or not rest[0]:
                 return None
@@ -3180,28 +3053,6 @@ def _parse_static_callback(data: str) -> tuple[str, dict[str, object], str] | No
         elif rest and rest[0]:
             payload["wizard_id"] = rest[0]
         return op, payload, f"callback.wiz.{action}"
-    if domain.upper() == "REM":
-        act = action.upper()
-        if not rest or not rest[-1]:
-            return None
-        rid = rest[-1].strip()
-        if not rid:
-            return None
-        if act == "SNOOZE" and len(rest) >= 2:
-            try:
-                minutes = int(rest[0])
-            except (ValueError, TypeError):
-                return None
-            if minutes not in (5, 15, 30, 60):
-                return None
-            return "reminder_snooze", {"reminder_id": rid, "minutes": minutes}, "callback.rem.snooze"
-        if act == "SNOOZE" and len(rest) >= 2 and rest[0].upper() == "M":
-            return "reminder_snooze_menu", {"reminder_id": rest[1]}, "callback.rem.snooze_menu"
-        if act == "SHOW":
-            return "reminder_details", {"reminder_id": rid}, "callback.rem.show"
-        if act == "DEL":
-            return "reminder.delete_confirm", {"reminder_id": rid}, "callback.rem.del"
-        return None
     return None
 
 
@@ -3244,20 +3095,13 @@ async def static_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     op, payload, intent = parsed
     set_input_text(context, f"<callback:{intent}>")
-    ud = getattr(context, "user_data", None)
-    if ud is not None:
-        ud["_from_static_callback"] = True
-    try:
-        result = await _dispatch_action_payload(
-            update,
-            context,
-            op=op,
-            payload=payload,
-            intent=intent,
-        )
-    finally:
-        if ud is not None:
-            ud.pop("_from_static_callback", None)
+    result = await _dispatch_action_payload(
+        update,
+        context,
+        op=op,
+        payload=payload,
+        intent=intent,
+    )
     await send_result(update, context, result)
 
 
@@ -3372,8 +3216,6 @@ async def _dispatch_action_payload(
     payload: dict[str, object],
     intent: str,
 ) -> OrchestratorResult:
-    ud = getattr(context, "user_data", None)
-    from_static_callback = (ud.pop("_from_static_callback", False) if ud is not None else False)
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else None
     if chat_id is None:
@@ -3574,15 +3416,6 @@ async def _dispatch_action_payload(
         document_store = _get_document_store(context)
         if document_store is None:
             return error("Хранилище документов недоступно.", intent="document.qa", mode="local")
-        session, status = document_store.get_session_with_status(doc_id)
-        if status == "expired":
-            return refused(
-                "Сессия документа истекла. Пришлите документ заново.",
-                intent="document.qa",
-                mode="local",
-            )
-        if session is None:
-            return refused("Сначала пришлите файл.", intent="document.qa", mode="local")
         session = document_store.set_state(doc_id=doc_id, state="qa_mode")
         if session is None:
             return refused("Сначала пришлите файл.", intent="document.qa", mode="local")
@@ -4017,49 +3850,6 @@ async def _dispatch_action_payload(
             limit=max(1, limit_value),
             intent=intent,
         )
-    if op_value == "set_timezone":
-        tz_value = payload.get("tz")
-        if not isinstance(tz_value, str) or tz_value not in TIMEZONE_CHOICES:
-            return refused(
-                "Недопустимый часовой пояс.",
-                intent="command.set_timezone",
-                mode="local",
-                debug={"reason": "invalid_tz"},
-            )
-        memory_manager = _get_memory_manager(context)
-        if memory_manager is None or memory_manager.profile is None:
-            return refused("Профиль не настроен.", intent="command.set_timezone", mode="local")
-        memory_manager.update_profile(user_id, {"timezone": tz_value})
-        log_event(
-            LOGGER,
-            get_request_context(context),
-            component="handlers",
-            event="tz_changed",
-            status="ok",
-            timezone=tz_value,
-        )
-        app_scheduler = context.application.bot_data.get("app_scheduler")
-        if app_scheduler is not None and hasattr(app_scheduler, "add_digest_job"):
-            app_scheduler.add_digest_job(user_id, chat_id, tz_value)
-        return ok(
-            f"Часовой пояс установлен: {tz_value}",
-            intent="command.set_timezone",
-            mode="local",
-        )
-    if op_value == "reminder_details":
-        reminder_id = payload.get("reminder_id") or payload.get("id")
-        if not isinstance(reminder_id, str) or not reminder_id:
-            return refused(
-                "Некорректные данные действия.",
-                intent="utility_reminders.details",
-                mode="local",
-                debug={"reason": "invalid_reminder_id"},
-            )
-        return await _handle_reminder_details(
-            user_id=user_id,
-            chat_id=chat_id,
-            reminder_id=reminder_id,
-        )
     if op_value == "reminder_snooze_menu":
         reminder_id = payload.get("reminder_id") or payload.get("id")
         base_trigger_at = payload.get("base_trigger_at")
@@ -4078,28 +3868,23 @@ async def _dispatch_action_payload(
         )
     if op_value == "reminder_snooze":
         reminder_id = payload.get("reminder_id") or payload.get("id")
-        minutes = payload.get("minutes")
+        minutes = payload.get("minutes", 10)
+        base_trigger_at = payload.get("base_trigger_at")
         if not isinstance(reminder_id, str) or not reminder_id:
-            return refused(
+            return error(
                 "Некорректные данные действия.",
-                intent="utility_reminders.snooze",
+                intent="ui.action",
                 mode="local",
                 debug={"reason": "invalid_reminder_id"},
             )
-        if minutes not in snooze_presets.SNOOZE_PRESET_MINUTES:
-            return refused(
-                "Недопустимый пресет отложить.",
-                intent="utility_reminders.snooze",
-                mode="local",
-                debug={"reason": "unknown_preset"},
-            )
+        minutes_value = minutes if isinstance(minutes, int) else 10
+        base_value = base_trigger_at if isinstance(base_trigger_at, str) else None
         return await _handle_reminder_snooze(
             context,
             user_id=user_id,
             reminder_id=reminder_id,
-            minutes=minutes,
-            base_trigger_at=None,
-            use_now=not from_static_callback,
+            minutes=minutes_value,
+            base_trigger_at=base_value,
         )
     if op_value == "reminder_snooze_tomorrow":
         reminder_id = payload.get("reminder_id") or payload.get("id")
@@ -4301,9 +4086,6 @@ async def _dispatch_command_payload(
         await memory_manager.set_dialog_enabled(user_id, enabled)
         text = "Контекст включён." if enabled else "Контекст выключён."
         return ok(text, intent="menu.context", mode="local")
-    if normalized == "/set_timezone":
-        user_id = update.effective_user.id if update.effective_user else 0
-        return _handle_set_timezone_ui(context, user_id=user_id)
     return refused(
         "Неизвестная команда. Открой меню.",
         intent="ui.action",
@@ -4337,7 +4119,6 @@ async def _handle_reminder_snooze(
     reminder_id: str,
     minutes: int,
     base_trigger_at: str | None = None,
-    use_now: bool = False,
 ) -> OrchestratorResult:
     reminder = await calendar_store.get_reminder(reminder_id)
     if reminder is None:
@@ -4347,19 +4128,8 @@ async def _handle_reminder_snooze(
             mode="local",
         )
     offset = max(1, minutes)
-    tz = reminder.trigger_at.tzinfo if reminder.trigger_at.tzinfo else calendar_store.BOT_TZ
-    now = datetime.now(tz=tz)
-    if use_now:
-        updated = await calendar_store.apply_snooze(
-            reminder_id, minutes=offset, now=now, base_trigger_at=None, use_now=True
-        )
-    else:
-        base_dt = _parse_base_trigger_at(base_trigger_at) if base_trigger_at else reminder.trigger_at
-        if base_dt.tzinfo is None:
-            base_dt = base_dt.replace(tzinfo=calendar_store.BOT_TZ)
-        updated = await calendar_store.apply_snooze(
-            reminder_id, minutes=offset, now=now, base_trigger_at=base_dt, use_now=False
-        )
+    base_dt = _parse_base_trigger_at(base_trigger_at)
+    updated = await calendar_store.apply_snooze(reminder_id, minutes=offset, now=datetime.now(tz=calendar_store.BOT_TZ), base_trigger_at=base_dt)
     if updated is None:
         return error(
             "Не удалось отложить напоминание (возможно, уже отключено).",
@@ -4379,10 +4149,10 @@ async def _handle_reminder_snooze(
                 mode="local",
             )
     LOGGER.info(
-        "snooze_preset_used reminder_id=%s user_id=%s minutes=%s new_trigger_at=%s",
+        "Reminder snoozed: reminder_id=%s user_id=%s old_trigger_at=%s new_trigger_at=%s",
         reminder_id,
         user_id,
-        offset,
+        reminder.trigger_at.isoformat(),
         updated.trigger_at.isoformat(),
     )
     when_label = updated.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
@@ -4393,56 +4163,6 @@ async def _handle_reminder_snooze(
         actions=_reminder_post_action_actions(),
         debug={"refs": {"reminder_id": reminder_id}},
     )
-
-
-async def _handle_reminder_snooze_now(
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    user_id: int,
-    chat_id: int,
-    reminder_id: str,
-    minutes: int = 5,
-) -> OrchestratorResult:
-    """Snooze from 'now' (used from notification keyboard); moves trigger to now + minutes."""
-    reminder = await calendar_store.get_reminder(reminder_id)
-    if reminder is None or reminder.user_id != user_id or reminder.chat_id != chat_id:
-        return refused("Напоминание не найдено.", intent="utility_reminders.snooze", mode="local")
-    now = datetime.now(tz=calendar_store.BOT_TZ)
-    updated = await calendar_store.apply_snooze(
-        reminder_id, minutes=max(1, minutes), now=now, base_trigger_at=None, use_now=True
-    )
-    if updated is None:
-        return error("Не удалось отложить.", intent="utility_reminders.snooze", mode="local")
-    scheduler = _get_reminder_scheduler(context)
-    settings = _get_settings(context)
-    if scheduler and settings is not None and settings.reminders_enabled:
-        try:
-            await scheduler.schedule_reminder(updated)
-        except Exception:
-            LOGGER.exception("Failed to reschedule reminder: reminder_id=%s", reminder_id)
-    return ok(
-        f"Отложено на {minutes} мин.",
-        intent="utility_reminders.snooze",
-        mode="local",
-    )
-
-
-async def _handle_reminder_details(
-    *,
-    user_id: int,
-    chat_id: int,
-    reminder_id: str,
-) -> OrchestratorResult:
-    reminder = await calendar_store.get_reminder(reminder_id)
-    if reminder is None or reminder.user_id != user_id or reminder.chat_id != chat_id:
-        return refused("Напоминание не найдено.", intent="utility_reminders.details", mode="local")
-    when_label = reminder.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-    lines = [f"📌 {reminder.text}", f"Когда: {when_label}", f"ID: {reminder.id}"]
-    event = await calendar_store.get_event(reminder.event_id)
-    if event:
-        event_label = event.dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-        lines.append(f"Событие: {event.title} — {event_label}")
-    return ok("\n".join(lines), intent="utility_reminders.details", mode="local")
 
 
 async def _handle_reminder_snooze_menu(
@@ -5542,7 +5262,6 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     file_id = ""
     file_type = ""
     extension = ""
-    file_size: int | None = None
     if message.document is not None:
         detected = _detect_document_type(message.document)
         if detected is None:
@@ -5567,81 +5286,70 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         file_size = getattr(photo, "file_size", None)
     else:
         return
-    max_bytes = (
-        settings.file_max_bytes_img
-        if file_type == "image"
-        else settings.file_max_bytes_pdf_docx
-    )
-    if file_size is not None and file_size > max_bytes:
-        log_event(
-            LOGGER,
-            get_request_context(context),
-            component="document",
-            event="file_rejected",
-            status="refused",
-            file_type=file_type,
-            file_size=file_size,
-            max_bytes=max_bytes,
-        )
+    if file_size is not None:
+        if file_type in ("pdf", "docx") and file_size > settings.file_max_bytes_pdf_docx:
+            await send_result(
+                update,
+                context,
+                refused(
+                    f"Файл слишком большой (макс. {settings.file_max_bytes_pdf_docx // 1_000_000} МБ).",
+                    intent="document.upload",
+                    mode="local",
+                ),
+            )
+            return
+        if file_type == "image" and file_size > settings.file_max_bytes_img:
+            await send_result(
+                update,
+                context,
+                refused(
+                    f"Изображение слишком большое (макс. {settings.file_max_bytes_img // 1_000_000} МБ).",
+                    intent="document.upload",
+                    mode="local",
+                ),
+            )
+            return
+    user_dir = settings.uploads_path / str(user_id)
+    file_path = user_dir / f"{file_id}{extension}"
+    try:
+        user_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
         await send_result(
             update,
             context,
             refused(
-                f"Файл слишком большой (лимит {max_bytes // 1_000_000} МБ).",
+                "Не удалось создать каталог для файлов. Проверьте доступ к хранилищу.",
                 intent="document.upload",
                 mode="local",
             ),
         )
         return
-    log_event(
-        LOGGER,
-        get_request_context(context),
-        component="document",
-        event="file_received",
-        status="ok",
-        file_type=file_type,
-        file_size=file_size,
-    )
-    user_dir = (settings.uploads_path / str(user_id)).resolve()
-    base_dir = settings.uploads_path.resolve()
-    if not str(user_dir).startswith(str(base_dir)):
+    try:
+        file_obj = await context.bot.get_file(file_id)
+        await file_obj.download_to_drive(custom_path=str(file_path))
+    except OSError:
         await send_result(
             update,
             context,
-            error("Некорректный путь.", intent="document.upload", mode="local"),
+            refused(
+                "Не удалось сохранить файл на диск. Проверьте место и права.",
+                intent="document.upload",
+                mode="local",
+            ),
         )
         return
-    user_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = "".join(c for c in f"{file_id}{extension}" if c.isalnum() or c in "._-") or "file"
-    file_path = (user_dir / safe_name).resolve()
-    if not str(file_path).startswith(str(user_dir)):
-        await send_result(
-            update,
-            context,
-            error("Некорректный путь.", intent="document.upload", mode="local"),
-        )
-        return
-    file_obj = await context.bot.get_file(file_id)
-    await file_obj.download_to_drive(custom_path=str(file_path))
     extractor = FileTextExtractor(
         ocr_enabled=settings.ocr_enabled,
         tesseract_lang=settings.tesseract_lang,
-        max_chars=settings.doc_max_chars,
-        max_pages=settings.doc_max_pages,
     )
     try:
-        extracted = extractor.extract(
-            path=Path(file_path),
-            file_type=file_type,
-            max_chars=settings.doc_max_chars,
-            max_pages=settings.doc_max_pages,
-        )
+        extracted = extractor.extract(path=file_path, file_type=file_type)
     except OCRNotAvailableError:
         await send_result(
             update,
             context,
-            error(
-                "OCR недоступен. Установите tesseract или отключите OCR.",
+            refused(
+                "OCR недоступен (tesseract не установлен). PDF и DOCX работают без OCR.",
                 intent="document.ocr_missing",
                 mode="local",
             ),
@@ -5661,19 +5369,22 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             refused("Не удалось извлечь текст.", intent="document.extract.empty", mode="local"),
         )
         return
-    log_event(
-        LOGGER,
-        get_request_context(context),
-        component="document",
-        event="text_extracted",
-        status="ok",
-        chars=extracted.metadata.get("characters", 0),
-        pages=extracted.metadata.get("pages", 0),
-    )
-    text_dir = (settings.document_texts_path / str(user_id)).resolve()
-    text_dir.mkdir(parents=True, exist_ok=True)
+    text_dir = settings.document_texts_path / str(user_id)
     text_path = text_dir / f"{file_id}.txt"
-    text_path.write_text(extracted.text, encoding="utf-8")
+    try:
+        text_dir.mkdir(parents=True, exist_ok=True)
+        text_path.write_text(extracted.text, encoding="utf-8")
+    except OSError:
+        await send_result(
+            update,
+            context,
+            refused(
+                "Не удалось сохранить текст документа. Проверьте доступ к хранилищу.",
+                intent="document.upload",
+                mode="local",
+            ),
+        )
+        return
     session = document_store.create_session(
         user_id=user_id,
         chat_id=chat_id,
@@ -5682,78 +5393,12 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         text_path=str(text_path),
     )
     result = ok(
-        "Документ принят. Что сделать?",
+        "Документ обработан. Что сделать?",
         intent="document.processed",
         mode="local",
         actions=_document_actions(session.doc_id),
     )
     await send_result(update, context, result)
-
-
-@_with_error_handling
-async def doc_close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context):
-        return
-    user_id = update.effective_user.id if update.effective_user else 0
-    chat_id = update.effective_chat.id if update.effective_chat else 0
-    document_store = _get_document_store(context)
-    if document_store is None:
-        await send_result(
-            update,
-            context,
-            error("Хранилище документов недоступно.", intent="document.close", mode="local"),
-        )
-        return
-    closed = document_store.close_active(user_id=user_id, chat_id=chat_id)
-    if closed is None:
-        await send_result(
-            update,
-            context,
-            ok("Нет активного документа.", intent="document.close", mode="local"),
-        )
-        return
-    await send_result(
-        update,
-        context,
-        ok("Документ закрыт.", intent="document.close", mode="local"),
-    )
-
-
-@_with_error_handling
-async def doc_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context):
-        return
-    user_id = update.effective_user.id if update.effective_user else 0
-    chat_id = update.effective_chat.id if update.effective_chat else 0
-    document_store = _get_document_store(context)
-    if document_store is None:
-        await send_result(
-            update,
-            context,
-            error("Хранилище документов недоступно.", intent="document.status", mode="local"),
-        )
-        return
-    session, status = document_store.get_active_with_status(user_id=user_id, chat_id=chat_id)
-    if status == "expired" or session is None:
-        await send_result(
-            update,
-            context,
-            ok("Активного документа нет. Пришлите PDF, DOCX или фото с текстом.", intent="document.status", mode="local"),
-        )
-        return
-    now = datetime.now(timezone.utc)
-    remaining = (session.expires_at - now).total_seconds()
-    mins = max(0, int(remaining // 60))
-    mode_label = "вопросы по документу" if session.state == "qa_mode" else "выбор действия"
-    await send_result(
-        update,
-        context,
-        ok(
-            f"Документ активен. Режим: {mode_label}. Осталось до истечения: {mins} мин.",
-            intent="document.status",
-            mode="local",
-        ),
-    )
 
 
 @_with_error_handling
@@ -5777,17 +5422,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     document_store = _get_document_store(context)
     if document_store is not None:
-        active_session, doc_status = document_store.get_active_with_status(
-            user_id=user_id, chat_id=chat_id
-        )
-        if doc_status == "expired":
-            result = refused(
-                "Сессия документа истекла. Пришлите документ заново.",
-                intent="document.expired",
-                mode="local",
-            )
-            await send_result(update, context, result)
-            return
+        active_session = document_store.get_active(user_id=user_id, chat_id=chat_id)
         if active_session and active_session.state == "qa_mode":
             result = await _handle_document_question(
                 context,

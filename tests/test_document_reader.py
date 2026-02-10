@@ -96,6 +96,17 @@ def test_extract_image_text(tmp_path: Path) -> None:
     assert "Hello" in extracted.text
 
 
+def test_extract_image_ocr_disabled_raises(tmp_path: Path) -> None:
+    """When OCR is disabled, image extraction raises OCRNotAvailableError (no tesseract needed)."""
+    image_path = tmp_path / "sample.png"
+    image = Image.new("RGB", (100, 100), color="white")
+    image.save(image_path)
+    extractor = FileTextExtractor(ocr_enabled=False)
+
+    with pytest.raises(OCRNotAvailableError):
+        extractor.extract(path=image_path, file_type="image")
+
+
 class DummyLLM:
     def __init__(self, responses: list[str]) -> None:
         self._responses = responses

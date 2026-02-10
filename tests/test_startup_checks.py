@@ -75,6 +75,18 @@ def _build_settings(tmp_path: Path) -> Settings:
     )
 
 
+def test_settings_backwards_compat_stage65(tmp_path: Path) -> None:
+    """Settings must be constructible without Stage 6.5 fields; defaults apply."""
+    settings = _build_settings(tmp_path)
+    assert settings.doc_session_ttl_seconds == 7200
+    assert settings.file_max_bytes_pdf_docx == 10_000_000
+    assert settings.file_max_bytes_img == 5_000_000
+    assert settings.doc_max_chars == 200_000
+    assert settings.doc_max_pages == 50
+    assert settings.tesseract_lang == "rus+eng"
+    assert str(settings.file_storage_dir) == "data/uploads" or settings.file_storage_dir.name == "uploads"
+
+
 def test_validate_startup_env_missing_critical(tmp_path) -> None:
     settings = _build_settings(tmp_path)
     broken = replace(settings, bot_token="")
