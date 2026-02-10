@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import signal
+import os
 import sys
 import time
 import warnings
@@ -15,7 +15,6 @@ from telegram.warnings import PTBUserWarning
 from app.bot import actions, handlers, wizard
 from app.core import calendar_store
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
-from app.core.reminder_scheduler import post_shutdown as reminder_post_shutdown
 from app.core.reminders import ReminderScheduler
 from app.core.dialog_memory import DialogMemory
 from app.core.memory_manager import MemoryManager, UserActionsLog, UserProfileMemory
@@ -123,6 +122,7 @@ def main() -> None:
 
 
     env_label = resolve_env_label()
+    dry_run = os.getenv("DRY_RUN") in {"1", "true", "True", "yes", "on"}
     try:
         settings = load_settings()
     except RuntimeError as exc:
@@ -297,17 +297,20 @@ def main() -> None:
         await reminder_scheduler.restore_all()
 
     application.post_init = _restore_reminders
-    application.post_shutdown = reminder_post_shutdown
 
     _register_handlers(application)
     application.add_error_handler(handlers.error_handler)
 
-    logging.getLogger(__name__).info("Bot started")
+    logging.getLogger(__name__).info(
+        "Bot started%s",
+        " (DRY_RUN enabled: skipping Telegram polling)" if dry_run else "",
+    )
 
-    def _sigterm_handler(signum: int, frame: object) -> None:
-        raise KeyboardInterrupt()
-
-    signal.signal(signal.SIGTERM, _sigterm_handler)
+    if dry_run:
+        # Smoke mode for Docker/CI: all dependencies and schedulers are initialised,
+        # startup.check is logged, but we do not connect to Telegram.
+        time.sleep(2)
+        return
 
     try:
         asyncio.get_event_loop()
