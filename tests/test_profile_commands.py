@@ -145,3 +145,44 @@ def test_history_after_action(monkeypatch, tmp_path) -> None:
     asyncio.run(handlers.history_command(update, context))
     assert "Последние действия" in sent[-1]
     assert "reminder.create" in sent[-1]
+
+
+def test_set_timezone_command_shows_current_and_list(monkeypatch, tmp_path) -> None:
+    sent: list[str] = []
+
+    async def fake_send_text(update, context, text, reply_markup=None):
+        sent.append(text)
+        return len(text or "")
+
+    async def fake_guard_access(update, context, bucket="default"):
+        return True
+
+    monkeypatch.setattr(handlers, "safe_send_text", fake_send_text)
+    monkeypatch.setattr(handlers, "safe_edit_text", fake_send_text)
+    monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
+
+    profile_store = UserProfileStore(tmp_path / "profiles.db")
+    actions_store = ActionsLogStore(tmp_path / "actions.db")
+    context = DummyContext(profile_store, actions_store)
+    update = DummyUpdate(text="/set_timezone")
+
+    asyncio.run(handlers.set_timezone_command(update, context))
+    assert len(sent) >= 1
+    assert "часовой пояс" in sent[-1].lower() or "timezone" in sent[-1].lower() or "Выбери" in sent[-1]
+
+
+def test_timezone_saved_in_profile(tmp_path) -> None:
+    """Timezone set via handler is persisted in user_profile."""
+    profile_store = UserProfileStore(tmp_path / "profiles.db")
+    actions_store = ActionsLogStore(tmp_path / "actions.db")
+    context = DummyContext(profile_store, actions_store)
+    result = asyncio.run(
+        handlers._handle_timezone_set(
+            context,
+            user_id=1,
+            timezone_value="Europe/Berlin",
+        )
+    )
+    assert result.status == "ok"
+    profile = profile_store.get(1)
+    assert profile.timezone == "Europe/Berlin"

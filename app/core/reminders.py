@@ -156,6 +156,20 @@ class ReminderScheduler:
         await self.schedule_reminder(reminder)
         return reminder
 
+    def _user_zone(self, user_id: int) -> ZoneInfo:
+        """Resolve user timezone from profile if available."""
+        store = getattr(self._application.bot_data or {}, "get", lambda _: None)("profile_store")
+        if store is None or not hasattr(store, "get"):
+            return self._timezone
+        try:
+            profile = store.get(user_id)
+            tz_str = getattr(profile, "timezone", None) if profile else None
+            if isinstance(tz_str, str) and tz_str.strip():
+                return ZoneInfo(tz_str.strip())
+        except Exception:
+            LOGGER.debug("User timezone fallback to default: user_id=%s", user_id)
+        return self._timezone
+
     async def _job_callback(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         reminder_id = None
         if context.job and isinstance(context.job.data, dict):
@@ -172,8 +186,9 @@ class ReminderScheduler:
             return
         event = await self._store.get_event(reminder.event_id)
         event_dt = event.dt if event else reminder.trigger_at
-        event_label = event_dt.astimezone(self._timezone).strftime("%Y-%m-%d %H:%M")
-        text = f"⏰ Напоминание: {reminder.text}\nКогда: {event_label} (МСК)"
+        user_tz = self._user_zone(reminder.user_id)
+        event_label = event_dt.astimezone(user_tz).strftime("%Y-%m-%d %H:%M")
+        text = f"⏰ Напоминание: {reminder.text}\nКогда: {event_label}"
         actions = _build_reminder_actions(reminder)
         action_store = self._application.bot_data.get("action_store")
         reply_markup = None
@@ -219,33 +234,24 @@ class ReminderScheduler:
 
 
 def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Action]:
+    """Build up to 3 contextual follow-up actions for a sent reminder."""
+    base_trigger = reminder.trigger_at.isoformat()
     return [
         Action(
-            id=f"reminder_snooze_now:{reminder.id}:5",
-            label="⏸ +5 мин",
-            payload={"op": "reminder_snooze_now", "reminder_id": reminder.id, "minutes": 5},
+            id=f"reminder_show_details:{reminder.id}",
+            label="📌 Показать детали",
+            payload={"op": "reminder_show_details", "reminder_id": reminder.id},
         ),
         Action(
-            id=f"reminder_snooze_now:{reminder.id}:15",
-            label="⏸ +15 мин",
-            payload={"op": "reminder_snooze_now", "reminder_id": reminder.id, "minutes": 15},
+            id=f"reminder_repeat_menu:{reminder.id}",
+            label="🔁 Повторить через…",
+            payload={"op": "reminder_repeat_menu", "reminder_id": reminder.id, "base_trigger_at": base_trigger},
         ),
         Action(
-            id=f"reminder_snooze_now:{reminder.id}:60",
-            label="⏸ +1 час",
-            payload={"op": "reminder_snooze_now", "reminder_id": reminder.id, "minutes": 60},
+            id=f"reminder_snooze_menu:{reminder.id}",
+            label="🕒 Отложить на…",
+            payload={"op": "reminder_snooze_menu", "reminder_id": reminder.id, "base_trigger_at": base_trigger},
         ),
-        Action(
-            id=f"reminder_reschedule:{reminder.id}",
-            label="✏ Перенести",
-            payload={"op": "reminder_reschedule", "reminder_id": reminder.id},
-        ),
-        Action(
-            id="utility_reminders.delete",
-            label="🗑 Удалить",
-            payload={"op": "reminder.delete_confirm", "reminder_id": reminder.id},
-        ),
-        Action(id="menu.open", label="🏠 Меню", payload={"op": "menu_open"}),
     ]
 
 

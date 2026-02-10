@@ -1,9 +1,3 @@
-"""ActionStore and inline keyboard building for Telegram.
-
-Stores Action payloads under short tokens (callback_data limit 64 bytes);
-build_inline_keyboard() turns OrchestratorResult.actions into InlineKeyboardMarkup.
-"""
-
 from __future__ import annotations
 
 import json
@@ -16,6 +10,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.core.result import Action
+from app.bot.timezone_ui import TIMEZONE_OPTIONS
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,8 +21,6 @@ DEFAULT_TTL_SECONDS = 900
 
 @dataclass
 class StoredAction:
-    """One stored action: user/chat, intent, payload, TTL."""
-
     user_id: int
     chat_id: int
     intent: str
@@ -38,8 +31,6 @@ class StoredAction:
 
 @dataclass
 class ActionLookup:
-    """Result of looking up a callback token: action (if found), status, age/ttl."""
-
     action: StoredAction | None
     status: str
     age_seconds: float | None
@@ -47,8 +38,6 @@ class ActionLookup:
 
 
 class ActionStore:
-    """In-memory store for action payloads keyed by short tokens for callback_data."""
-
     def __init__(
         self,
         *,
@@ -62,7 +51,6 @@ class ActionStore:
         self._items: dict[str, StoredAction] = {}
 
     def store_action(self, *, action: Action, user_id: int, chat_id: int) -> str:
-        """Store action for user/chat; returns short token for callback_data."""
         self._cleanup()
         payload = action.payload or {}
         self._validate_payload(payload)
@@ -128,7 +116,6 @@ class ActionStore:
 
 
 def parse_callback_token(data: str | None) -> str | None:
-    """Extract stored-action token from callback_data if it starts with CALLBACK_PREFIX."""
     if not data:
         return None
     if not data.startswith(CALLBACK_PREFIX):
@@ -169,45 +156,23 @@ def build_static_callback_data(action: Action) -> str | None:
         if isinstance(wizard_id, str) and wizard_id:
             return f"{callback}:{wizard_id}"
         return callback
-    # Reminder callbacks must be static, predictable and contain no user text.
-    # Format: cb:rem:<action>:... where all parts are strict tokens/ids.
-    if op == "reminder_snooze":
-        reminder_id = payload.get("reminder_id") or payload.get("id")
+    reminder_id = payload.get("reminder_id")
+    if isinstance(reminder_id, str) and reminder_id.strip():
+        rid = reminder_id.strip()
+        if op == "reminder_show_details":
+            return f"{STATIC_CALLBACK_PREFIX}REM:SHOW:{rid}"
+        if op == "reminder_repeat_menu":
+            return f"{STATIC_CALLBACK_PREFIX}REM:REPEAT:{rid}"
+        if op == "reminder_snooze_menu":
+            return f"{STATIC_CALLBACK_PREFIX}REM:SNOOZE:M:{rid}"
         minutes = payload.get("minutes")
-        if not isinstance(reminder_id, str) or not reminder_id:
-            return None
-        if not isinstance(minutes, int) or minutes < 1:
-            return None
-        return f"{STATIC_CALLBACK_PREFIX}rem:s:{minutes}:{reminder_id}"
-    if op == "reminder_snooze_now":
-        reminder_id = payload.get("reminder_id") or payload.get("id")
-        minutes = payload.get("minutes")
-        if not isinstance(reminder_id, str) or not reminder_id:
-            return None
-        if not isinstance(minutes, int) or minutes < 1:
-            return None
-        return f"{STATIC_CALLBACK_PREFIX}rem:sn:{minutes}:{reminder_id}"
-    if op == "reminder_reschedule":
-        reminder_id = payload.get("reminder_id") or payload.get("id")
-        if not isinstance(reminder_id, str) or not reminder_id:
-            return None
-        return f"{STATIC_CALLBACK_PREFIX}rem:r:{reminder_id}"
-    if op == "reminder.delete_confirm":
-        reminder_id = payload.get("reminder_id") or payload.get("id")
-        if not isinstance(reminder_id, str) or not reminder_id:
-            return None
-        return f"{STATIC_CALLBACK_PREFIX}rem:dc:{reminder_id}"
-    if op == "reminder.delete_confirmed":
-        reminder_id = payload.get("reminder_id") or payload.get("id")
-        if not isinstance(reminder_id, str) or not reminder_id:
-            return None
-        return f"{STATIC_CALLBACK_PREFIX}rem:dd:{reminder_id}"
-    # Daily digest toggle (per-user), stored in profile.
-    if op == "digest_toggle":
-        enabled = payload.get("enabled")
-        if not isinstance(enabled, bool):
-            return None
-        return f"{STATIC_CALLBACK_PREFIX}digest:{'on' if enabled else 'off'}"
+        if op == "reminder_snooze" and minutes in (5, 15, 30, 60):
+            return f"{STATIC_CALLBACK_PREFIX}REM:SNOOZE:{minutes}:{rid}"
+    if op == "timezone_set":
+        tz = payload.get("timezone")
+        if isinstance(tz, str) and tz in TIMEZONE_OPTIONS:
+            idx = TIMEZONE_OPTIONS.index(tz)
+            return f"{STATIC_CALLBACK_PREFIX}TZ:{idx}"
     return None
 
 
@@ -219,7 +184,6 @@ def build_inline_keyboard(
     chat_id: int,
     columns: int = 2,
 ) -> InlineKeyboardMarkup | None:
-    """Build Telegram InlineKeyboardMarkup from actions; dynamic ones go through store."""
     if not actions:
         return None
     buttons: list[list[InlineKeyboardButton]] = []

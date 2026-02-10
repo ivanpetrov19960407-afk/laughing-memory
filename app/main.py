@@ -72,6 +72,7 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("memory", handlers.memory_command))
     application.add_handler(CommandHandler("profile", handlers.profile_command))
     application.add_handler(CommandHandler("profile_set", handlers.profile_set_command))
+    application.add_handler(CommandHandler("set_timezone", handlers.set_timezone_command))
     application.add_handler(CommandHandler("remember", handlers.remember_command))
     application.add_handler(CommandHandler("forget", handlers.forget_command))
     application.add_handler(CommandHandler("history", handlers.history_command))

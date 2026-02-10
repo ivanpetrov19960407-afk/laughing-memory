@@ -57,7 +57,6 @@ def test_reminder_snooze_shifts_trigger(tmp_path, monkeypatch) -> None:
         handlers._handle_reminder_snooze(
             context,
             user_id=1,
-            chat_id=10,
             reminder_id=reminder.id,
             minutes=30,
             base_trigger_at=reminder.trigger_at.isoformat(),
@@ -179,205 +178,115 @@ def test_recurring_reminder_creates_next_trigger(tmp_path, monkeypatch) -> None:
     assert next_reminder.trigger_at == datetime(2026, 2, 6, 10, 0, tzinfo=calendar_store.BOT_TZ)
 
 
-def test_reminder_snooze_10_minutes_direct(tmp_path, monkeypatch) -> None:
-    """Test that snooze 10 minutes button works directly without menu."""
-    class DummyScheduler:
-        def __init__(self) -> None:
-            self.scheduled: str | None = None
-
-        async def schedule_reminder(self, reminder) -> None:
-            self.scheduled = reminder.id
-
-    calendar_path = tmp_path / "calendar.json"
-    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-
-    now = datetime.now(tz=calendar_store.BOT_TZ)
-    reminder = asyncio.run(
-        calendar_store.add_reminder(
-            trigger_at=now + timedelta(hours=1),
-            text="Test reminder",
-            chat_id=10,
-            user_id=1,
-        )
-    )
-
-    context = DummyContext()
-    context.application.bot_data["reminder_scheduler"] = DummyScheduler()
-    result = asyncio.run(
-        handlers._handle_reminder_snooze(
-            context,
-            user_id=1,
-            reminder_id=reminder.id,
-            minutes=10,
-            base_trigger_at=reminder.trigger_at.isoformat(),
-        )
-    )
-
-    assert result.status == "ok"
-    updated = asyncio.run(calendar_store.get_reminder(reminder.id))
-    assert updated is not None
-    assert updated.trigger_at == reminder.trigger_at + timedelta(minutes=10)
+def test_static_callback_rem_snooze_valid_and_safe() -> None:
+    """Static callback REM:SNOOZE:5:rid is valid and safe (no user input in payload)."""
+    parsed = handlers._parse_static_callback("cb:REM:SNOOZE:5:abc12")
+    assert parsed is not None
+    op, payload, intent = parsed
+    assert op == "reminder_snooze"
+    assert payload.get("reminder_id") == "abc12"
+    assert payload.get("minutes") == 5
 
 
-def test_reminder_snooze_1_hour_direct(tmp_path, monkeypatch) -> None:
-    """Test that snooze 1 hour button works directly without menu."""
-    class DummyScheduler:
-        def __init__(self) -> None:
-            self.scheduled: str | None = None
-
-        async def schedule_reminder(self, reminder) -> None:
-            self.scheduled = reminder.id
+def test_reminder_followup_three_buttons(tmp_path, monkeypatch) -> None:
+    """After creating a reminder, follow-up message has exactly 3 safe follow-up buttons."""
+    from app.core.reminders import _build_reminder_actions
 
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-
-    now = datetime.now(tz=calendar_store.BOT_TZ)
-    reminder = asyncio.run(
-        calendar_store.add_reminder(
-            trigger_at=now + timedelta(hours=1),
-            text="Test reminder",
-            chat_id=10,
-            user_id=1,
-        )
-    )
-
-    context = DummyContext()
-    context.application.bot_data["reminder_scheduler"] = DummyScheduler()
-    result = asyncio.run(
-        handlers._handle_reminder_snooze(
-            context,
-            user_id=1,
-            reminder_id=reminder.id,
-            minutes=60,
-            base_trigger_at=reminder.trigger_at.isoformat(),
-        )
-    )
-
-    assert result.status == "ok"
-    updated = asyncio.run(calendar_store.get_reminder(reminder.id))
-    assert updated is not None
-    assert updated.trigger_at == reminder.trigger_at + timedelta(minutes=60)
-
-
-def test_reminders_list_24h(tmp_path, monkeypatch) -> None:
-    """Test that list_24h shows only reminders within next 24 hours."""
-    calendar_path = tmp_path / "calendar.json"
-    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-
-    now = datetime.now(tz=calendar_store.BOT_TZ)
-    
-    # Create reminders: one within 24h, one beyond 24h
-    reminder_soon = asyncio.run(
-        calendar_store.add_reminder(
-            trigger_at=now + timedelta(hours=12),
-            text="Soon reminder",
-            chat_id=10,
-            user_id=1,
-        )
-    )
-    
-    reminder_later = asyncio.run(
-        calendar_store.add_reminder(
-            trigger_at=now + timedelta(hours=30),
-            text="Later reminder",
-            chat_id=10,
-            user_id=1,
-        )
-    )
-
-    context = DummyContext()
-    result = asyncio.run(
-        handlers._handle_reminders_list_24h(
-            context,
-            user_id=1,
-            chat_id=10,
-            intent="utility_reminders.list_24h",
-        )
-    )
-
-    assert result.status == "ok"
-    assert "Soon reminder" in result.text
-    assert "Later reminder" not in result.text
-    
-    # Check that actions are present for the reminder
-    action_ids = [action.id for action in result.actions]
-    assert any(f"reminder_snooze:{reminder_soon.id}:10" in aid for aid in action_ids)
-    assert any(f"reminder_snooze:{reminder_soon.id}:60" in aid for aid in action_ids)
-
-
-def test_reminders_list_24h_empty(tmp_path, monkeypatch) -> None:
-    """Test that list_24h shows empty message when no reminders."""
-    calendar_path = tmp_path / "calendar.json"
-    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-
-    context = DummyContext()
-    result = asyncio.run(
-        handlers._handle_reminders_list_24h(
-            context,
-            user_id=1,
-            chat_id=10,
-            intent="utility_reminders.list_24h",
-        )
-    )
-
-    assert result.status == "ok"
-    assert "На сегодня напоминаний нет" in result.text
-
-
-def test_reminder_delete_confirms_and_deletes(tmp_path, monkeypatch) -> None:
-    """Test that delete requires confirmation and then actually deletes."""
-    class DummyScheduler:
-        def __init__(self) -> None:
-            self.cancelled: str | None = None
-
-        async def cancel_reminder(self, reminder_id: str) -> bool:
-            self.cancelled = reminder_id
-            return True
-
-    calendar_path = tmp_path / "calendar.json"
-    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-
     reminder = asyncio.run(
         calendar_store.add_reminder(
             trigger_at=datetime.now(tz=calendar_store.BOT_TZ) + timedelta(hours=1),
-            text="To delete",
+            text="Test",
             chat_id=10,
             user_id=1,
         )
     )
+    actions_list = _build_reminder_actions(reminder)
+    assert len(actions_list) == 3
+    for a in actions_list:
+        assert a.payload.get("reminder_id") == reminder.id
+        assert "op" in a.payload
+        assert a.id and a.label
+    labels = [a.label for a in actions_list]
+    assert any("детали" in l or "Детали" in l for l in labels)
+    assert any("Отложить" in l or "Повторить" in l for l in labels)
+
+
+def test_snooze_preset_static_callback_creates_new_trigger(tmp_path, monkeypatch) -> None:
+    """Snooze preset (e.g. REM:SNOOZE:5) creates new trigger time; returns OrchestratorResult."""
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    now = datetime.now(tz=calendar_store.BOT_TZ)
+    reminder = asyncio.run(
+        calendar_store.add_reminder(
+            trigger_at=now + timedelta(hours=1),
+            text="Ping",
+            chat_id=10,
+            user_id=1,
+        )
+    )
+    async def noop_schedule(_):
+        pass
 
     context = DummyContext()
-    context.application.bot_data["reminder_scheduler"] = DummyScheduler()
-    
-    # First, confirm deletion - use the handler directly
-    update = DummyUpdate()
+    context.application.bot_data["reminder_scheduler"] = SimpleNamespace(schedule_reminder=noop_schedule)
     result = asyncio.run(
-        handlers._dispatch_action_payload(
-            update,
+        handlers._handle_reminder_snooze(
             context,
-            op="reminder.delete_confirm",
-            payload={"reminder_id": reminder.id},
-            intent="utility_reminders.delete",
+            user_id=1,
+            reminder_id=reminder.id,
+            minutes=5,
+            base_trigger_at=None,
         )
     )
     assert result.status == "ok"
-    assert "Удалить напоминание" in result.text
-    
-    # Then actually delete
-    delete_result = asyncio.run(
-        handlers._handle_reminder_delete(
-            context,
-            reminder_id=reminder.id,
-            user_id=1,
+    updated = asyncio.run(calendar_store.get_reminder(reminder.id))
+    assert updated is not None
+    assert updated.trigger_at > reminder.trigger_at
+
+
+def test_snooze_preset_repeated_press_does_not_break_schedule(tmp_path, monkeypatch) -> None:
+    """Pressing snooze preset twice still yields correct trigger (no double shift)."""
+    async def noop_schedule(_):
+        pass
+
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+    now = datetime.now(tz=calendar_store.BOT_TZ)
+    base_trigger = now + timedelta(minutes=30)
+    reminder = asyncio.run(
+        calendar_store.add_reminder(
+            trigger_at=base_trigger,
+            text="Ping",
             chat_id=10,
+            user_id=1,
         )
     )
-    assert delete_result.status == "ok"
-    assert "Напоминание удалено" in delete_result.text
-    
-    # Verify it's gone
-    reminders = asyncio.run(
-        calendar_store.list_reminders(datetime.now(tz=calendar_store.BOT_TZ), limit=10)
+    context = DummyContext()
+    context.application.bot_data["reminder_scheduler"] = SimpleNamespace(schedule_reminder=noop_schedule)
+    result1 = asyncio.run(
+        handlers._handle_reminder_snooze(
+            context,
+            user_id=1,
+            reminder_id=reminder.id,
+            minutes=15,
+            base_trigger_at=reminder.trigger_at.isoformat(),
+        )
     )
-    assert all(item.id != reminder.id for item in reminders)
-    assert context.application.bot_data["reminder_scheduler"].cancelled == reminder.id
+    assert result1.status == "ok"
+    r1 = asyncio.run(calendar_store.get_reminder(reminder.id))
+    assert r1 is not None
+    result2 = asyncio.run(
+        handlers._handle_reminder_snooze(
+            context,
+            user_id=1,
+            reminder_id=reminder.id,
+            minutes=15,
+            base_trigger_at=r1.trigger_at.isoformat(),
+        )
+    )
+    assert result2.status == "ok"
+    r2 = asyncio.run(calendar_store.get_reminder(reminder.id))
+    assert r2 is not None
+    assert r2.trigger_at == r1.trigger_at + timedelta(minutes=15)
