@@ -52,6 +52,7 @@ from app.core.result import (
 )
 from app.core.tools_calendar import create_event, delete_event, list_calendar_items, list_reminders, update_event
 from app.core.recurrence_scope import RecurrenceScope, normalize_scope, parse_recurrence_scope
+from app.core.search_sources import parse_sources_from_config
 from app.core.tools_llm import llm_check, llm_explain, llm_rewrite
 from app.infra.allowlist import AllowlistStore
 from app.infra.last_state_store import LastStateStore
@@ -2145,6 +2146,70 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @_with_error_handling
+async def search_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context, bucket="ui"):
+        return
+    store = (context.application.bot_data or {}).get("search_sources_store")
+    if store is None:
+        result = refused(
+            "Источники поиска не настроены.",
+            intent="command.search_sources",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    orchestrator = _get_orchestrator(context)
+    sources = parse_sources_from_config(orchestrator.config)
+    user_id = update.effective_user.id if update.effective_user else 0
+    args = list(context.args) if context.args else []
+    if not args:
+        result = ok(
+            "Использование: /search_sources list | enable <id> | disable <id>",
+            intent="command.search_sources",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    sub = (args[0] or "").strip().lower()
+    if sub == "list":
+        disabled = await store.get_disabled(user_id)
+        lines = [f"• {s.id} ({s.name}): {'выкл' if s.id in disabled else 'вкл'}" for s in sources]
+        result = ok(
+            "\n".join(lines) if lines else "Нет источников.",
+            intent="command.search_sources",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    if sub == "enable" and len(args) >= 2:
+        name = args[1].strip()
+        changed = await store.set_enabled(user_id, name)
+        result = ok(
+            f"Источник «{name}» включён." if changed else f"Источник «{name}» уже был включён.",
+            intent="command.search_sources",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    if sub == "disable" and len(args) >= 2:
+        name = args[1].strip()
+        changed = await store.set_disabled(user_id, name)
+        result = ok(
+            f"Источник «{name}» выключен." if changed else f"Источник «{name}» уже был выключен.",
+            intent="command.search_sources",
+            mode="local",
+        )
+        await send_result(update, context, result)
+        return
+    result = refused(
+        "Использование: /search_sources list | enable <id> | disable <id>",
+        intent="command.search_sources",
+        mode="local",
+    )
+    await send_result(update, context, result)
+
+
+@_with_error_handling
 async def facts_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     orchestrator = _get_orchestrator(context)
     if not await _guard_access(update, context):
@@ -3986,6 +4051,24 @@ async def _dispatch_action_payload(
             minutes=minutes_value,
             base_trigger_at=base_value,
         )
+    if op_value == "reminder_snooze_now":
+        reminder_id = payload.get("reminder_id") or payload.get("id")
+        minutes = payload.get("minutes", 5)
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="ui.action",
+                mode="local",
+                debug={"reason": "invalid_reminder_id"},
+            )
+        minutes_value = minutes if isinstance(minutes, int) else 5
+        return await _handle_reminder_snooze_now(
+            context,
+            user_id=user_id,
+            chat_id=chat_id,
+            reminder_id=reminder_id,
+            minutes=minutes_value,
+        )
     if op_value == "reminder_snooze_tomorrow":
         reminder_id = payload.get("reminder_id") or payload.get("id")
         base_trigger_at = payload.get("base_trigger_at")
@@ -4272,6 +4355,32 @@ async def _handle_reminder_snooze(
         mode="local",
         actions=_reminder_post_action_actions(),
         debug={"refs": {"reminder_id": reminder_id}},
+    )
+
+
+async def _handle_reminder_snooze_now(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    reminder_id: str,
+    minutes: int,
+) -> OrchestratorResult:
+    """Snooze reminder from 'now' (base = current time). Thin wrapper over _handle_reminder_snooze."""
+    reminder = await calendar_store.get_reminder(reminder_id)
+    if reminder is None or reminder.user_id != user_id or reminder.chat_id != chat_id:
+        return refused(
+            "Напоминание не найдено.",
+            intent="utility_reminders.snooze",
+            mode="local",
+        )
+    now_iso = datetime.now(tz=calendar_store.BOT_TZ).isoformat()
+    return await _handle_reminder_snooze(
+        context,
+        user_id=user_id,
+        reminder_id=reminder_id,
+        minutes=max(1, minutes),
+        base_trigger_at=now_iso,
     )
 
 
