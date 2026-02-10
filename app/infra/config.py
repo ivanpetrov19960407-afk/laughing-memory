@@ -61,6 +61,16 @@ class Settings:
     caldav_username: str | None
     caldav_password: str | None
     caldav_calendar_name: str | None
+    # Actions log retention (days)
+    actions_log_ttl_days: int
+    # Observability / telemetry flags (mirrors ObservabilityConfig)
+    obs_http_enabled: bool
+    obs_http_host: str
+    obs_http_port: int
+    otel_enabled: bool
+    otel_exporter: str
+    otel_otlp_endpoint: str | None
+    systemd_watchdog_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -227,6 +237,19 @@ def load_settings() -> Settings:
     caldav_username = env.get("CALDAV_USERNAME") or None
     caldav_password = env.get("CALDAV_PASSWORD") or None
     caldav_calendar_name = env.get("CALDAV_CALENDAR_NAME") or None
+
+    # Optional retention for user actions log (in days).
+    actions_log_ttl_days = _parse_int_with_default(env.get("ACTIONS_LOG_TTL_DAYS"), 60)
+
+    # Observability / telemetry flags. These are mostly wired through a dedicated
+    # ObservabilityConfig, but Settings keeps a shadow copy for tests and wiring.
+    obs_http_enabled = False
+    obs_http_host = "127.0.0.1"
+    obs_http_port = 8081
+    otel_enabled = False
+    otel_exporter = env.get("OTEL_EXPORTER", "console")
+    otel_otlp_endpoint = env.get("OTEL_OTLP_ENDPOINT") or None
+    systemd_watchdog_enabled = False
     return Settings(
         bot_token=token,
         orchestrator_config_path=config_path,
@@ -271,6 +294,14 @@ def load_settings() -> Settings:
         caldav_username=caldav_username,
         caldav_password=caldav_password,
         caldav_calendar_name=caldav_calendar_name,
+        actions_log_ttl_days=actions_log_ttl_days,
+        obs_http_enabled=obs_http_enabled,
+        obs_http_host=obs_http_host,
+        obs_http_port=obs_http_port,
+        otel_enabled=otel_enabled,
+        otel_exporter=otel_exporter,
+        otel_otlp_endpoint=otel_otlp_endpoint,
+        systemd_watchdog_enabled=systemd_watchdog_enabled,
     )
 
 

@@ -209,7 +209,7 @@ def main() -> None:
     document_store = DocumentSessionStore(settings.document_sessions_path)
     document_store.load()
     profile_store = UserProfileStore(settings.db_path)
-    actions_log_store = ActionsLogStore(settings.db_path)
+    actions_log_store = ActionsLogStore(settings.db_path, ttl_days=settings.actions_log_ttl_days)
     memory_manager = MemoryManager(
         dialog=dialog_memory,
         profile=UserProfileMemory(profile_store),
