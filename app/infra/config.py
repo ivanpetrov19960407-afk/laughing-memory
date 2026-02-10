@@ -78,6 +78,28 @@ def resolve_env_label(raw_env: dict[str, str] | None = None) -> str:
     return "dev" if env in _DEV_ENVS else "prod"
 
 
+def get_log_level(raw_env: dict[str, str] | None = None) -> int:
+    """Resolve application log level from environment.
+
+    Public helper used by tests and startup code.
+    Falls back to INFO for missing or invalid values.
+    """
+    source = raw_env if raw_env is not None else os.environ
+    raw = source.get("LOG_LEVEL")
+    if not raw:
+        return logging.INFO
+
+    value = raw.strip().upper()
+    mapping = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+    return mapping.get(value, logging.INFO)
+
+
 def validate_startup_env(
     settings: Settings,
     *,
