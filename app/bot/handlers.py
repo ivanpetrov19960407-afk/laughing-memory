@@ -3228,6 +3228,7 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         op=stored.payload.get("op"),
         payload=stored.payload,
         intent=normalized_intent,
+        snooze_from_now=True,
     )
     if (
         isinstance(result, OrchestratorResult)
@@ -3269,6 +3270,7 @@ async def _dispatch_action_payload(
     op: object,
     payload: dict[str, object],
     intent: str,
+    snooze_from_now: bool = False,
 ) -> OrchestratorResult:
     user_id = update.effective_user.id if update.effective_user else 0
     chat_id = update.effective_chat.id if update.effective_chat else None
@@ -3939,6 +3941,7 @@ async def _dispatch_action_payload(
             reminder_id=reminder_id,
             minutes=minutes_value,
             base_trigger_at=base_value,
+            from_now=snooze_from_now,
         )
     if op_value == "reminder_snooze_tomorrow":
         reminder_id = payload.get("reminder_id") or payload.get("id")
@@ -4216,6 +4219,7 @@ async def _handle_reminder_snooze(
     reminder_id: str,
     minutes: int,
     base_trigger_at: str | None = None,
+    from_now: bool = False,
 ) -> OrchestratorResult:
     reminder = await calendar_store.get_reminder(reminder_id)
     if reminder is None:
@@ -4226,11 +4230,16 @@ async def _handle_reminder_snooze(
         )
     offset = max(1, minutes)
     now = datetime.now(tz=calendar_store.BOT_TZ)
-    base_dt = _parse_base_trigger_at(base_trigger_at)
-    if base_dt is None:
-        base_dt = max(now, reminder.trigger_at.astimezone(calendar_store.BOT_TZ))
+    if from_now:
+        base_dt = None
+        use_now = True
+    else:
+        base_dt = _parse_base_trigger_at(base_trigger_at)
+        if base_dt is None:
+            base_dt = max(now, reminder.trigger_at.astimezone(calendar_store.BOT_TZ))
+        use_now = False
     updated = await calendar_store.apply_snooze(
-        reminder_id, minutes=offset, now=now, base_trigger_at=base_dt, use_now=False
+        reminder_id, minutes=offset, now=now, base_trigger_at=base_dt, use_now=use_now
     )
     if updated is None:
         return error(
