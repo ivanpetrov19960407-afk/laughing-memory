@@ -153,3 +153,31 @@ def test_parse_full_date_with_year_and_time() -> None:
 def test_short_date_does_not_capture_year() -> None:
     parsed = calendar_store.parse_user_datetime("10.02.2026 13:30")
     assert (parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute) == (2026, 2, 10, 13, 30)
+
+
+def test_parse_user_datetime_single_digit_hour_in_9() -> None:
+    """«в 9» и «в 09:00» дают одно и то же время."""
+    base = calendar_store.parse_local_datetime("2026-02-05 00:00")
+    p9 = calendar_store.parse_user_datetime("сегодня в 9", now=base)
+    p0900 = calendar_store.parse_user_datetime("сегодня в 09:00", now=base)
+    assert p9.tzinfo == calendar_store.BOT_TZ
+    assert (p9.hour, p9.minute) == (9, 0)
+    assert (p0900.hour, p0900.minute) == (9, 0)
+    assert p9 == p0900
+
+
+def test_parse_user_datetime_timezone_consistent() -> None:
+    """Результат parse_user_datetime всегда в BOT_TZ (осознанный выбор для листинга/напоминаний)."""
+    base = calendar_store.parse_local_datetime("2026-02-05 12:00")
+    for value in ("завтра 14:00", "послезавтра 10:00", "через 1 час"):
+        parsed = calendar_store.parse_user_datetime(value, now=base)
+        assert parsed.tzinfo is not None
+        assert parsed.tzinfo == calendar_store.BOT_TZ
+
+
+def test_parse_event_datetime_after_tomorrow() -> None:
+    base = calendar_store.parse_local_datetime("2026-02-05 10:00")
+    parsed, title = calendar_store.parse_event_datetime("послезавтра 18:30 встреча", now=base)
+    assert parsed.tzinfo == calendar_store.BOT_TZ
+    assert (parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute) == (2026, 2, 7, 18, 30)
+    assert title == "встреча"

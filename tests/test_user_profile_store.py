@@ -53,3 +53,18 @@ def test_profile_store_migration_fills_defaults(tmp_path) -> None:
 
     profile = store.get(5)
     assert profile.timezone == DEFAULT_TIMEZONE
+
+
+def test_profile_store_corrupted_json_returns_safe_defaults(tmp_path) -> None:
+    """Повреждённый JSON в payload не ломает get(); применяются defaults и миграция."""
+    store = UserProfileStore(tmp_path / "profiles.db")
+    store._connection.execute(
+        "INSERT INTO user_profiles (user_id, schema_version, payload, updated_at) VALUES (?, ?, ?, ?)",
+        (99, 2, "{ invalid json ]", "2024-01-01T00:00:00+00:00"),
+    )
+    store._connection.commit()
+
+    profile = store.get(99)
+    assert profile.user_id == 99
+    assert profile.timezone == DEFAULT_TIMEZONE
+    assert profile.language in ("ru", "en")

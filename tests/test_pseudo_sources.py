@@ -120,3 +120,12 @@ def test_strict_guard_refuses_without_citations_in_facts_mode() -> None:
 
     assert guarded.status == "refused"
     assert guarded.text == STRICT_NO_SOURCES_TEXT
+
+
+def test_strict_guard_refuses_text_with_citation_but_no_sources() -> None:
+    """В strict facts ответ с [1] в тексте без реальных sources → refused с подсказкой /search."""
+    result = ok("Согласно [1] это верно.", intent="test.example", mode="llm", sources=[])
+    guarded = ensure_safe_text_strict(result, facts_enabled=True, allow_sources_in_text=False)
+    assert guarded.status == "refused"
+    assert guarded.text == STRICT_NO_SOURCES_TEXT
+    assert "Поиск" in guarded.text or "меню" in guarded.text.lower()
