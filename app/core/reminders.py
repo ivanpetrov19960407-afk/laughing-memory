@@ -41,11 +41,14 @@ class ReminderScheduler:
         calendar_store_module=calendar_store,
         timezone: ZoneInfo = calendar_store.BOT_TZ,
         max_future_days: int | None = None,
+        *,
+        app_scheduler: object | None = None,
     ) -> None:
         self._application = application
         self._store = calendar_store_module
         self._timezone = timezone
         self._max_future_days = max_future_days or _get_max_future_days()
+        self._app_scheduler = app_scheduler
 
     async def schedule_reminder(
         self,
@@ -53,6 +56,28 @@ class ReminderScheduler:
         *,
         now: datetime | None = None,
     ) -> str | None:
+        if self._app_scheduler is not None:
+            if not reminder.enabled:
+                return None
+            current = now or datetime.now(tz=self._timezone)
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=self._timezone)
+            else:
+                current = current.astimezone(self._timezone)
+            trigger_at = reminder.trigger_at
+            if trigger_at.tzinfo is None:
+                trigger_at = trigger_at.replace(tzinfo=self._timezone)
+            else:
+                trigger_at = trigger_at.astimezone(self._timezone)
+            if trigger_at <= current:
+                trigger_at = current
+            if trigger_at > current + timedelta(days=self._max_future_days):
+                return None
+            job_name = self._job_name(reminder.id)
+            add_job = getattr(self._app_scheduler, "add_reminder_job", None)
+            if callable(add_job) and add_job(reminder.id, trigger_at):
+                return job_name
+            return None
         if not self._application.job_queue:
             LOGGER.warning("Reminder scheduling skipped: job_queue unavailable (reminder_id=%s)", reminder.id)
             return None
@@ -104,7 +129,11 @@ class ReminderScheduler:
 
     async def cancel_reminder(self, reminder_id: str) -> bool:
         removed = False
-        if self._application.job_queue:
+        if self._app_scheduler is not None:
+            rm_job = getattr(self._app_scheduler, "remove_reminder_job", None)
+            if callable(rm_job):
+                removed = rm_job(reminder_id)
+        elif self._application.job_queue:
             for job in self._application.job_queue.get_jobs_by_name(self._job_name(reminder_id)):
                 job.schedule_removal()
                 removed = True
@@ -222,22 +251,21 @@ class ReminderScheduler:
 
 
 def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Action]:
-    base_trigger = reminder.trigger_at.isoformat()
     return [
         Action(
             id=f"reminder_snooze:{reminder.id}:10",
             label="⏸ +10 мин",
-            payload={"op": "reminder_snooze", "reminder_id": reminder.id, "base_trigger_at": base_trigger, "minutes": 10},
+            payload={"op": "reminder_snooze", "reminder_id": reminder.id, "minutes": 10},
         ),
         Action(
             id=f"reminder_snooze:{reminder.id}:30",
             label="⏸ +30 мин",
-            payload={"op": "reminder_snooze", "reminder_id": reminder.id, "base_trigger_at": base_trigger, "minutes": 30},
+            payload={"op": "reminder_snooze", "reminder_id": reminder.id, "minutes": 30},
         ),
         Action(
             id=f"reminder_reschedule:{reminder.id}",
             label="✏ Перенести",
-            payload={"op": "reminder_reschedule", "reminder_id": reminder.id, "base_trigger_at": base_trigger},
+            payload={"op": "reminder_reschedule", "reminder_id": reminder.id},
         ),
         Action(
             id="utility_reminders.delete",

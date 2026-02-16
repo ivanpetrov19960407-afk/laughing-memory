@@ -64,6 +64,7 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("memory", handlers.memory_command))
     application.add_handler(CommandHandler("profile", handlers.profile_command))
     application.add_handler(CommandHandler("profile_set", handlers.profile_set_command))
+    application.add_handler(CommandHandler("set_timezone", handlers.set_timezone_command))
     application.add_handler(CommandHandler("remember", handlers.remember_command))
     application.add_handler(CommandHandler("forget", handlers.forget_command))
     application.add_handler(CommandHandler("history", handlers.history_command))
@@ -316,11 +317,14 @@ def main() -> None:
     application.add_error_handler(handlers.error_handler)
 
     logging.getLogger(__name__).info("Bot started")
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-    application.run_polling()
+    if settings.dry_run:
+        logging.getLogger(__name__).info("DRY_RUN mode: skipping telegram polling")
+    else:
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+        application.run_polling()
 
 
 if __name__ == "__main__":

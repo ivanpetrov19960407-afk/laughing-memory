@@ -166,8 +166,10 @@ def build_static_callback_data(action: Action) -> str | None:
         if op == "reminder_snooze_menu":
             return f"{STATIC_CALLBACK_PREFIX}REM:SNOOZE:M:{rid}"
         minutes = payload.get("minutes")
-        if op == "reminder_snooze" and minutes in (5, 15, 30, 60):
+        if op == "reminder_snooze" and minutes in (5, 10, 15, 30, 60):
             return f"{STATIC_CALLBACK_PREFIX}REM:SNOOZE:{minutes}:{rid}"
+        if op == "reminder_reschedule":
+            return f"{STATIC_CALLBACK_PREFIX}REM:RESCHEDULE:{rid}"
         if op in ("reminder_delete_confirm", "reminder.delete_confirm"):
             return f"{STATIC_CALLBACK_PREFIX}REM:DEL:{rid}"
     if op == "timezone_set":

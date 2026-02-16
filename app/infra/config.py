@@ -78,6 +78,7 @@ class Settings:
     otel_exporter: str = "console"
     otel_otlp_endpoint: str | None = None
     systemd_watchdog_enabled: bool = False
+    dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -300,6 +301,7 @@ def load_settings() -> Settings:
         otel_exporter=os.getenv("OTEL_EXPORTER", "console").strip(),
         otel_otlp_endpoint=os.getenv("OTEL_OTLP_ENDPOINT") or None,
         systemd_watchdog_enabled=_parse_optional_bool(os.getenv("SYSTEMD_WATCHDOG_ENABLED")) or False,
+        dry_run=dry_run,
     )
 
 
