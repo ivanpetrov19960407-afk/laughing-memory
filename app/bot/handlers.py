@@ -19,7 +19,6 @@ from telegram import InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import ContextTypes
 
 from app.bot import menu, routing, wizard
-from app.bot.timezone_ui import TIMEZONE_OPTIONS
 from app.bot.actions import ActionStore, StoredAction, build_inline_keyboard, parse_callback_token
 from app.core import calendar_store, tools_calendar
 from app.core.calendar_nlp_ru import (
@@ -201,15 +200,6 @@ def _get_trace_store(context: ContextTypes.DEFAULT_TYPE) -> TraceStore | None:
 def _get_draft_store(context: ContextTypes.DEFAULT_TYPE) -> DraftStore | None:
     store = context.application.bot_data.get("draft_store")
     if isinstance(store, DraftStore):
-        return store
-    return None
-
-
-def _get_profile_store(context: ContextTypes.DEFAULT_TYPE):
-    from app.infra.user_profile_store import UserProfileStore
-
-    store = context.application.bot_data.get("profile_store")
-    if isinstance(store, UserProfileStore):
         return store
     return None
 
@@ -1251,8 +1241,11 @@ async def _build_reminders_list_result(
     lines: list[str] = []
     for item in limited:
         when_label = item.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-        rec = " 🔄" if item.recurrence else ""
-        lines.append(f"• {item.text}{rec}\n  Когда: {when_label} (МСК)")
+        recurrence_str = wizard._recurrence_label(item.recurrence) if item.recurrence else ""
+        if recurrence_str:
+            lines.append(f"• {item.text}\n  Когда: {when_label} (МСК)\n  Повтор: {recurrence_str}")
+        else:
+            lines.append(f"• {item.text}\n  Когда: {when_label} (МСК)")
         actions.append(
             Action(
                 id=f"reminder_snooze_menu:{item.id}",
@@ -2477,50 +2470,6 @@ async def profile_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 @_with_error_handling
-async def set_timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _guard_access(update, context, bucket="ui"):
-        return
-    memory_manager = _get_memory_manager(context)
-    user_id = update.effective_user.id if update.effective_user else 0
-    chat_id = update.effective_chat.id if update.effective_chat else 0
-    current_tz = "Europe/Vilnius"
-    if memory_manager and memory_manager.profile:
-        profile = memory_manager.get_profile(user_id)
-        if profile:
-            current_tz = profile.timezone
-    actions: list[Action] = []
-    for tz in TIMEZONE_OPTIONS:
-        actions.append(
-            Action(
-                id=f"timezone_set:{tz}",
-                label=tz,
-                payload={"op": "timezone_set", "timezone": tz},
-            )
-        )
-    text = f"Текущий часовой пояс: {current_tz}.\nВыбери новый:"
-    result = ok(text, intent="command.set_timezone", mode="local", actions=actions)
-    await send_result(update, context, result)
-
-
-async def _handle_timezone_set(
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    user_id: int,
-    timezone_value: str,
-) -> OrchestratorResult:
-    profile_store = _get_profile_store(context)
-    if profile_store is None:
-        return error("Профиль не настроен.", intent="timezone.set", mode="local")
-    profile_store.update(user_id, {"timezone": timezone_value})
-    return ok(
-        f"Часовой пояс установлен: {timezone_value}.",
-        intent="timezone.set",
-        mode="local",
-        actions=[menu.menu_action()],
-    )
-
-
-@_with_error_handling
 async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
@@ -2959,8 +2908,9 @@ async def _handle_menu_section(
             ],
         )
     if section == "reminders":
+        digest_label = "📬 Дайджест: вкл" if (profile and profile.digest_enabled) else "📬 Дайджест: выкл"
         return ok(
-            "Напоминания: отдельные напоминания (создать/список/управление).",
+            "Напоминания: отдельные напоминания (создать/список/управление). Ежедневный дайджест — раз в сутки сводка на сегодня.",
             intent="menu.reminders",
             mode="local",
             actions=[
@@ -2973,6 +2923,11 @@ async def _handle_menu_section(
                     id="utility_reminders.list",
                     label="📋 Список",
                     payload={"op": "reminder.list", "limit": 5},
+                ),
+                Action(
+                    id="utility_reminders.digest_toggle",
+                    label=digest_label,
+                    payload={"op": "digest_toggle"},
                 ),
                 menu.menu_action(),
             ],
@@ -3106,24 +3061,6 @@ def _parse_static_callback(data: str) -> tuple[str, dict[str, object], str] | No
         elif rest and rest[0]:
             payload["wizard_id"] = rest[0]
         return op, payload, f"callback.wiz.{action}"
-    if domain == "TZ" and action.isdigit():
-        idx = int(action)
-        if 0 <= idx < len(TIMEZONE_OPTIONS):
-            return "timezone_set", {"timezone": TIMEZONE_OPTIONS[idx]}, "callback.timezone_set"
-    if domain == "REM" and rest:
-        if action == "SNOOZE" and len(rest) >= 2 and rest[0].isdigit():
-            minutes_val = int(rest[0])
-            rid_val = rest[1]
-            if 1 <= minutes_val <= 60 and isinstance(rid_val, str) and len(rid_val) <= 16:
-                return "reminder_snooze_now", {"reminder_id": rid_val, "minutes": minutes_val}, "callback.reminder_snooze_now"
-        if action == "RESCHEDULE" and rest:
-            rid_val = rest[0]
-            if isinstance(rid_val, str) and len(rid_val) <= 16:
-                return "reminder_reschedule", {"reminder_id": rid_val}, "callback.reminder_reschedule"
-        if action == "DEL" and rest:
-            rid_val = rest[0]
-            if isinstance(rid_val, str) and len(rid_val) <= 16:
-                return "reminder.delete_confirm", {"reminder_id": rid_val}, "callback.reminder_delete"
     return None
 
 
@@ -3305,15 +3242,6 @@ async def _dispatch_action_payload(
     if op_value == "menu_cancel":
         await _send_reply_keyboard_remove(update, context, text="Ок")
         return ok("Ок", intent="menu.cancel", mode="local")
-    if op_value == "timezone_set":
-        tz = payload.get("timezone")
-        if isinstance(tz, str) and tz in TIMEZONE_OPTIONS:
-            return await _handle_timezone_set(
-                context,
-                user_id=user_id,
-                timezone_value=tz,
-            )
-        return refused("Некорректный часовой пояс.", intent="timezone.set", mode="local")
     if op_value == "trace_last":
         if _is_group_chat(update):
             return refused("Команда /trace недоступна в группах.", intent="command.trace", mode="local")
@@ -3920,6 +3848,8 @@ async def _dispatch_action_payload(
                 debug={"reason": "invalid_event_id"},
             )
         return await _handle_reminder_on(context, user_id=user_id, event_id=event_id)
+    if op_value == "digest_toggle":
+        return await _handle_digest_toggle(context, user_id=user_id, chat_id=chat_id)
     if op_value == "reminders_list":
         limit = payload.get("limit", 5)
         limit_value = limit if isinstance(limit, int) else 5
@@ -3945,24 +3875,6 @@ async def _dispatch_action_payload(
             chat_id=chat_id,
             reminder_id=reminder_id,
             base_trigger_at=base_trigger_at if isinstance(base_trigger_at, str) else None,
-        )
-    if op_value == "reminder_snooze_now":
-        reminder_id = payload.get("reminder_id") or payload.get("id")
-        minutes = payload.get("minutes", 10)
-        if not isinstance(reminder_id, str) or not reminder_id:
-            return error(
-                "Некорректные данные действия.",
-                intent="ui.action",
-                mode="local",
-                debug={"reason": "invalid_reminder_id"},
-            )
-        minutes_value = minutes if isinstance(minutes, int) else 10
-        return await _handle_reminder_snooze_now(
-            context,
-            user_id=user_id,
-            chat_id=chat_id,
-            reminder_id=reminder_id,
-            minutes=minutes_value,
         )
     if op_value == "reminder_snooze":
         reminder_id = payload.get("reminder_id") or payload.get("id")
@@ -4192,6 +4104,34 @@ async def _dispatch_command_payload(
     )
 
 
+async def _handle_digest_toggle(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+) -> OrchestratorResult:
+    profile_store = context.application.bot_data.get("profile_store")
+    if not profile_store:
+        return error(
+            "Настройки недоступны.",
+            intent="utility_reminders.digest",
+            mode="local",
+        )
+    profile = profile_store.get(user_id)
+    new_enabled = not profile.digest_enabled
+    patch: dict[str, object] = {"digest_enabled": new_enabled}
+    if new_enabled:
+        patch["digest_chat_id"] = chat_id
+    profile_store.update(user_id, patch)
+    msg = "Ежедневный дайджест включён. Раз в сутки (около 8:00 МСК) придёт сводка напоминаний на сегодня. Если напоминаний нет — сообщение не отправляется." if new_enabled else "Ежедневный дайджест выключен."
+    return ok(
+        msg,
+        intent="utility_reminders.digest",
+        mode="local",
+        actions=_reminder_list_controls_actions(),
+    )
+
+
 async def _handle_reminders_list(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -4260,24 +4200,6 @@ async def _handle_reminder_snooze(
         mode="local",
         actions=_reminder_post_action_actions(),
         debug={"refs": {"reminder_id": reminder_id}},
-    )
-
-
-async def _handle_reminder_snooze_now(
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    user_id: int,
-    chat_id: int,
-    reminder_id: str,
-    minutes: int,
-) -> OrchestratorResult:
-    """Snooze from now (current time), not from original trigger."""
-    return await _handle_reminder_snooze(
-        context,
-        user_id=user_id,
-        reminder_id=reminder_id,
-        minutes=minutes,
-        base_trigger_at=None,
     )
 
 

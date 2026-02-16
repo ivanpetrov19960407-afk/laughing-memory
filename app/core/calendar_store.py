@@ -673,6 +673,65 @@ async def list_reminders(
     return result[:limit]
 
 
+async def list_reminders_for_day(
+    user_id: int,
+    chat_id: int,
+    day: date,
+    *,
+    tz: ZoneInfo = BOT_TZ,
+) -> list[ReminderItem]:
+    """Return reminders for the given user/chat whose trigger_at falls on the given day (in tz)."""
+    start = datetime.combine(day, time.min, tzinfo=tz)
+    end = datetime.combine(day, time.max, tzinfo=tz)
+    async with _STORE_LOCK:
+        store = load_store()
+        reminders = list(store.get("reminders") or [])
+    result: list[ReminderItem] = []
+    for item in reminders:
+        if not isinstance(item, dict):
+            continue
+        if int(item.get("user_id", 0)) != user_id or int(item.get("chat_id", 0)) != chat_id:
+            continue
+        reminder_id = item.get("reminder_id")
+        event_id = item.get("event_id")
+        trigger_at = item.get("trigger_at")
+        text = item.get("text")
+        enabled = bool(item.get("enabled", True))
+        if (
+            not isinstance(reminder_id, str)
+            or not isinstance(event_id, str)
+            or not isinstance(trigger_at, str)
+            or not isinstance(text, str)
+        ):
+            continue
+        status = _normalize_status(item)
+        if not enabled or status != "active":
+            continue
+        trigger_dt = _parse_datetime(trigger_at, datetime.now(tz=tz))
+        trigger_dt = trigger_dt.astimezone(tz)
+        if not (start <= trigger_dt <= end):
+            continue
+        recurrence = _parse_recurrence(item.get("recurrence"))
+        last_triggered_at = _parse_triggered_at(item.get("last_triggered_at"))
+        result.append(
+            _build_reminder_item(
+                reminder_id=reminder_id,
+                event_id=event_id,
+                user_id=user_id,
+                chat_id=chat_id,
+                trigger_at=trigger_dt,
+                text=text,
+                enabled=enabled,
+                sent_at=item.get("sent_at") if isinstance(item.get("sent_at"), str) else None,
+                status=status,
+                recurrence=recurrence,
+                last_triggered_at=last_triggered_at,
+            )
+        )
+    result.sort(key=lambda r: r.trigger_at)
+    return result
+
+
 async def get_reminder(reminder_id: str) -> ReminderItem | None:
     async with _STORE_LOCK:
         store = load_store()

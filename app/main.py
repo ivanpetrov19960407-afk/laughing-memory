@@ -6,7 +6,7 @@ import sys
 import time
 import warnings
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from telegram.warnings import PTBUserWarning
@@ -14,7 +14,8 @@ from telegram.warnings import PTBUserWarning
 from app.bot import actions, handlers, wizard
 from app.core import calendar_store
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
-from app.core.reminders import ReminderScheduler, run_daily_digest, _get_digest_time
+from app.core.daily_digest import run_daily_digest
+from app.core.reminders import ReminderScheduler
 from app.core.dialog_memory import DialogMemory
 from app.core.memory_manager import MemoryManager, UserActionsLog, UserProfileMemory
 from app.infra.access import AccessController
@@ -64,7 +65,6 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("memory", handlers.memory_command))
     application.add_handler(CommandHandler("profile", handlers.profile_command))
     application.add_handler(CommandHandler("profile_set", handlers.profile_set_command))
-    application.add_handler(CommandHandler("set_timezone", handlers.set_timezone_command))
     application.add_handler(CommandHandler("remember", handlers.remember_command))
     application.add_handler(CommandHandler("forget", handlers.forget_command))
     application.add_handler(CommandHandler("history", handlers.history_command))
@@ -288,28 +288,19 @@ def main() -> None:
     )
     if not application.job_queue:
         logging.getLogger(__name__).warning("JobQueue not configured; reminders will run without it.")
+    else:
+        application.job_queue.run_daily(
+            run_daily_digest,
+            time=time(5, 0),
+            name="daily_digest",
+        )
+        logging.getLogger(__name__).info("Daily digest job scheduled (05:00 UTC = 08:00 Moscow)")
 
     async def _restore_reminders(app: Application) -> None:
         if not settings.reminders_enabled:
             logging.getLogger(__name__).info("Reminders disabled by config")
             return
         await reminder_scheduler.restore_all()
-        if app.job_queue:
-            from datetime import time as dt_time
-
-            async def _digest_job(ctx) -> None:
-                await run_daily_digest(ctx.application)
-
-            digest_time = _get_digest_time()
-            tz_time = dt_time(digest_time.hour, digest_time.minute, tzinfo=calendar_store.BOT_TZ)
-            app.job_queue.run_daily(
-                _digest_job,
-                time=tz_time,
-                name="daily_digest",
-            )
-            logging.getLogger(__name__).info(
-                "Daily digest job scheduled at %02d:%02d", digest_time.hour, digest_time.minute
-            )
 
     application.post_init = _restore_reminders
 
@@ -317,14 +308,11 @@ def main() -> None:
     application.add_error_handler(handlers.error_handler)
 
     logging.getLogger(__name__).info("Bot started")
-    if settings.dry_run:
-        logging.getLogger(__name__).info("DRY_RUN mode: skipping telegram polling")
-    else:
-        try:
-            asyncio.get_event_loop()
-        except RuntimeError:
-            asyncio.set_event_loop(asyncio.new_event_loop())
-        application.run_polling()
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+    application.run_polling()
 
 
 if __name__ == "__main__":
