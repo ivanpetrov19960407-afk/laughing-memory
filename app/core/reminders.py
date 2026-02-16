@@ -2,19 +2,20 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
+
+from telegram.ext import Application, ContextTypes
 
 from app.bot.actions import ActionStore, build_inline_keyboard
 from app.core.result import Action
 
 from app.core import calendar_store
 
-if TYPE_CHECKING:
-    from app.core.app_scheduler import AppScheduler
-
 LOGGER = logging.getLogger(__name__)
+
+DIGEST_HOUR = 9
+DIGEST_MINUTE = 0
 
 
 def _get_default_offset_minutes() -> int:
@@ -36,11 +37,12 @@ def _get_max_future_days() -> int:
 class ReminderScheduler:
     def __init__(
         self,
-        application: Any,
+        application: Application,
         calendar_store_module=calendar_store,
         timezone: ZoneInfo = calendar_store.BOT_TZ,
         max_future_days: int | None = None,
-        app_scheduler: AppScheduler | None = None,
+        *,
+        app_scheduler: object | None = None,
     ) -> None:
         self._application = application
         self._store = calendar_store_module
@@ -54,6 +56,31 @@ class ReminderScheduler:
         *,
         now: datetime | None = None,
     ) -> str | None:
+        if self._app_scheduler is not None:
+            if not reminder.enabled:
+                return None
+            current = now or datetime.now(tz=self._timezone)
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=self._timezone)
+            else:
+                current = current.astimezone(self._timezone)
+            trigger_at = reminder.trigger_at
+            if trigger_at.tzinfo is None:
+                trigger_at = trigger_at.replace(tzinfo=self._timezone)
+            else:
+                trigger_at = trigger_at.astimezone(self._timezone)
+            if trigger_at <= current:
+                trigger_at = current
+            if trigger_at > current + timedelta(days=self._max_future_days):
+                return None
+            job_name = self._job_name(reminder.id)
+            add_job = getattr(self._app_scheduler, "add_reminder_job", None)
+            if callable(add_job) and add_job(reminder.id, trigger_at):
+                return job_name
+            return None
+        if not self._application.job_queue:
+            LOGGER.warning("Reminder scheduling skipped: job_queue unavailable (reminder_id=%s)", reminder.id)
+            return None
         if not reminder.enabled:
             LOGGER.info("Reminder skipped (disabled): reminder_id=%s", reminder.id)
             return None
@@ -67,13 +94,14 @@ class ReminderScheduler:
             trigger_at = trigger_at.replace(tzinfo=self._timezone)
         else:
             trigger_at = trigger_at.astimezone(self._timezone)
+        when_value: datetime | int = reminder.trigger_at
         if trigger_at <= current:
             LOGGER.info(
                 "Reminder past trigger scheduled immediately: reminder_id=%s trigger_at=%s",
                 reminder.id,
                 trigger_at.isoformat(),
             )
-            trigger_at = current
+            when_value = 0
         if trigger_at > current + timedelta(days=self._max_future_days):
             LOGGER.info(
                 "Reminder skipped (too far): reminder_id=%s trigger_at=%s",
@@ -81,65 +109,34 @@ class ReminderScheduler:
                 trigger_at.isoformat(),
             )
             return None
-
-        if self._app_scheduler is not None:
-            if self._app_scheduler.add_reminder_job(reminder.id, trigger_at):
-                LOGGER.info(
-                    "Reminder scheduled: reminder_id=%s event_id=%s trigger_at=%s",
-                    reminder.id,
-                    reminder.event_id,
-                    reminder.trigger_at.isoformat(),
-                )
-                return self._job_name(reminder.id)
-            return None
-        job_queue = getattr(self._application, "job_queue", None)
-        if job_queue is not None:
-            job_name = self._job_name(reminder.id)
-            for job in job_queue.get_jobs_by_name(job_name):
-                job.schedule_removal()
-            when_value = 0 if trigger_at <= current else trigger_at
-            job_queue.run_once(
-                self._job_callback,
-                when=when_value,
-                name=job_name,
-                data={"reminder_id": reminder.id},
-            )
-            LOGGER.info(
-                "Reminder scheduled (job_queue): reminder_id=%s trigger_at=%s",
-                reminder.id,
-                reminder.trigger_at.isoformat(),
-            )
-            return job_name
-        LOGGER.warning("Reminder scheduling skipped: no app_scheduler and no job_queue (reminder_id=%s)", reminder.id)
-        return None
-
-    async def _job_callback(self, context: Any) -> None:
-        """Used when scheduling via job_queue fallback (e.g. in tests)."""
-        reminder_id = None
-        if context and getattr(context, "job", None) and isinstance(getattr(context.job, "data", None), dict):
-            reminder_id = context.job.data.get("reminder_id")
-        if not reminder_id or not isinstance(reminder_id, str):
-            LOGGER.warning("Reminder job missing reminder_id")
-            return
-        from app.core.app_scheduler import _run_reminder_job
-        application = getattr(context, "application", None) or self._application
-        await _run_reminder_job(
-            reminder_id=reminder_id,
-            application=application,
-            calendar_store_module=self._store,
-            profile_store=getattr(application, "bot_data", {}).get("profile_store"),
+        job_name = self._job_name(reminder.id)
+        for job in self._application.job_queue.get_jobs_by_name(job_name):
+            job.schedule_removal()
+        self._application.job_queue.run_once(
+            self._job_callback,
+            when=when_value,
+            name=job_name,
+            data={"reminder_id": reminder.id},
         )
+        LOGGER.info('Added job "%s" to reminder scheduler', job_name)
+        LOGGER.info(
+            "Reminder scheduled: reminder_id=%s event_id=%s trigger_at=%s",
+            reminder.id,
+            reminder.event_id,
+            reminder.trigger_at.isoformat(),
+        )
+        return job_name
 
     async def cancel_reminder(self, reminder_id: str) -> bool:
         removed = False
         if self._app_scheduler is not None:
-            removed = self._app_scheduler.remove_reminder_job(reminder_id)
-        else:
-            job_queue = getattr(self._application, "job_queue", None)
-            if job_queue is not None:
-                for job in job_queue.get_jobs_by_name(self._job_name(reminder_id)):
-                    job.schedule_removal()
-                    removed = True
+            rm_job = getattr(self._app_scheduler, "remove_reminder_job", None)
+            if callable(rm_job):
+                removed = rm_job(reminder_id)
+        elif self._application.job_queue:
+            for job in self._application.job_queue.get_jobs_by_name(self._job_name(reminder_id)):
+                job.schedule_removal()
+                removed = True
         store_updated = await self._store.disable_reminder(reminder_id)
         LOGGER.info(
             "Reminder canceled: reminder_id=%s job_removed=%s store_updated=%s",
@@ -191,24 +188,84 @@ class ReminderScheduler:
         await self.schedule_reminder(reminder)
         return reminder
 
+    async def _job_callback(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        reminder_id = None
+        if context.job and isinstance(context.job.data, dict):
+            reminder_id = context.job.data.get("reminder_id")
+        if not reminder_id or not isinstance(reminder_id, str):
+            LOGGER.warning("Reminder job missing reminder_id")
+            return
+        reminder = await self._store.get_reminder(reminder_id)
+        if reminder is None:
+            LOGGER.warning("Reminder not found: reminder_id=%s", reminder_id)
+            return
+        if not reminder.enabled:
+            LOGGER.info("Reminder disabled before send: reminder_id=%s", reminder_id)
+            return
+        event = await self._store.get_event(reminder.event_id)
+        event_dt = event.dt if event else reminder.trigger_at
+        event_label = event_dt.astimezone(self._timezone).strftime("%Y-%m-%d %H:%M")
+        text = f"⏰ Напоминание: {reminder.text}\nКогда: {event_label} (МСК)"
+        actions = _build_reminder_actions(reminder)
+        action_store = self._application.bot_data.get("action_store")
+        reply_markup = None
+        if isinstance(action_store, ActionStore):
+            reply_markup = build_inline_keyboard(
+                actions,
+                store=action_store,
+                user_id=reminder.user_id,
+                chat_id=reminder.chat_id,
+                columns=2,
+            )
+        try:
+            await self._application.bot.send_message(chat_id=reminder.chat_id, text=text, reply_markup=reply_markup)
+        except Exception:
+            LOGGER.exception(
+                "Reminder send failed: reminder_id=%s event_id=%s chat_id=%s trigger_at=%s",
+                reminder.id,
+                reminder.event_id,
+                reminder.chat_id,
+                reminder.trigger_at.isoformat(),
+            )
+            return
+        fired_at = datetime.now(tz=self._timezone)
+        next_reminder = await self._store.mark_reminder_sent(reminder.id, fired_at, missed=False)
+        if next_reminder is not None:
+            await self.schedule_reminder(next_reminder)
+            LOGGER.info(
+                "Reminder recurrence scheduled: reminder_id=%s next_trigger_at=%s",
+                reminder.id,
+                next_reminder.trigger_at.isoformat(),
+            )
+        LOGGER.info(
+            "Reminder sent: reminder_id=%s event_id=%s chat_id=%s trigger_at=%s",
+            reminder.id,
+            reminder.event_id,
+            reminder.chat_id,
+            reminder.trigger_at.isoformat(),
+        )
+
     @staticmethod
     def _job_name(reminder_id: str) -> str:
         return f"reminder:{reminder_id}"
 
 
-def build_reminder_followup_actions(reminder: calendar_store.ReminderItem) -> list[Action]:
-    """Follow-ups после отправки напоминания: макс. 3 кнопки — Детали, Отложить, Удалить."""
-    base_trigger = reminder.trigger_at.isoformat()
+def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Action]:
     return [
         Action(
-            id=f"reminder_details:{reminder.id}",
-            label="📌 Детали",
-            payload={"op": "reminder_details", "reminder_id": reminder.id},
+            id=f"reminder_snooze:{reminder.id}:10",
+            label="⏸ +10 мин",
+            payload={"op": "reminder_snooze", "reminder_id": reminder.id, "minutes": 10},
         ),
         Action(
-            id=f"reminder_snooze_menu:{reminder.id}",
-            label="⏸ Отложить",
-            payload={"op": "reminder_snooze_menu", "reminder_id": reminder.id, "base_trigger_at": base_trigger},
+            id=f"reminder_snooze:{reminder.id}:30",
+            label="⏸ +30 мин",
+            payload={"op": "reminder_snooze", "reminder_id": reminder.id, "minutes": 30},
+        ),
+        Action(
+            id=f"reminder_reschedule:{reminder.id}",
+            label="✏ Перенести",
+            payload={"op": "reminder_reschedule", "reminder_id": reminder.id},
         ),
         Action(
             id="utility_reminders.delete",
@@ -218,9 +275,52 @@ def build_reminder_followup_actions(reminder: calendar_store.ReminderItem) -> li
     ]
 
 
-def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Action]:
-    return build_reminder_followup_actions(reminder)
-
-
 def get_default_offset_minutes() -> int:
     return _get_default_offset_minutes()
+
+
+def _get_digest_time() -> time:
+    try:
+        hour = int(os.getenv("DIGEST_HOUR", str(DIGEST_HOUR)))
+        minute = int(os.getenv("DIGEST_MINUTE", str(DIGEST_MINUTE)))
+    except ValueError:
+        return time(DIGEST_HOUR, DIGEST_MINUTE)
+    return time(max(0, min(23, hour)), max(0, min(59, minute)))
+
+
+async def run_daily_digest(application: Application) -> None:
+    """Send daily digest to each user at most once per day."""
+    now = datetime.now(tz=calendar_store.BOT_TZ)
+    today_yyyymmdd = now.strftime("%Y%m%d")
+    start, end = calendar_store.day_bounds(now.date())
+    pairs = await calendar_store.list_user_chat_pairs()
+    for user_id, chat_id in pairs:
+        last_sent = await calendar_store.get_last_digest_sent(user_id)
+        if last_sent == today_yyyymmdd:
+            continue
+        reminders = await calendar_store.list_reminders_in_range(
+            start, end, user_id=user_id, chat_id=chat_id
+        )
+        events = await calendar_store.list_items(start=start, end=end)
+        events = [e for e in events if e.user_id == user_id and e.chat_id == chat_id]
+        lines: list[str] = ["📋 План на сегодня"]
+        if reminders:
+            lines.append("\n⏰ Напоминания:")
+            for r in reminders:
+                when = r.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%H:%M")
+                rec = " 🔄" if r.recurrence else ""
+                lines.append(f"  • {when} — {r.text}{rec}")
+        if events:
+            lines.append("\n📅 События:")
+            for e in events:
+                when = e.dt.astimezone(calendar_store.BOT_TZ).strftime("%H:%M")
+                lines.append(f"  • {when} — {e.title}")
+        if len(lines) <= 1:
+            lines.append("\nНет запланированных напоминаний и событий.")
+        text = "\n".join(lines)
+        try:
+            await application.bot.send_message(chat_id=chat_id, text=text)
+            await calendar_store.set_last_digest_sent(user_id, today_yyyymmdd)
+            LOGGER.info("Daily digest sent: user_id=%s chat_id=%s", user_id, chat_id)
+        except Exception:
+            LOGGER.exception("Daily digest send failed: user_id=%s chat_id=%s", user_id, chat_id)

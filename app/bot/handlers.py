@@ -19,6 +19,7 @@ from telegram import InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import ContextTypes
 
 from app.bot import menu, routing, wizard
+from app.bot.timezone_ui import TIMEZONE_OPTIONS
 from app.bot.actions import ActionStore, StoredAction, build_inline_keyboard, parse_callback_token
 from app.core import calendar_store, tools_calendar
 from app.core.calendar_nlp_ru import (
@@ -200,6 +201,15 @@ def _get_trace_store(context: ContextTypes.DEFAULT_TYPE) -> TraceStore | None:
 def _get_draft_store(context: ContextTypes.DEFAULT_TYPE) -> DraftStore | None:
     store = context.application.bot_data.get("draft_store")
     if isinstance(store, DraftStore):
+        return store
+    return None
+
+
+def _get_profile_store(context: ContextTypes.DEFAULT_TYPE):
+    from app.infra.user_profile_store import UserProfileStore
+
+    store = context.application.bot_data.get("profile_store")
+    if isinstance(store, UserProfileStore):
         return store
     return None
 
@@ -1019,9 +1029,7 @@ async def _handle_document_summary(
     )
     if facts_only:
         system_prompt += " Не добавляй домыслы. Если данных нет, так и скажи."
-    settings = _get_settings(context)
-    max_chars = getattr(settings, "doc_max_chars", 200_000) if settings else 200_000
-    trimmed_text = _trim_document_text(text, max_chars=max_chars)
+    trimmed_text = _trim_document_text(text)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"Текст документа:\n{trimmed_text}\n\nСделай резюме."},
@@ -1243,7 +1251,8 @@ async def _build_reminders_list_result(
     lines: list[str] = []
     for item in limited:
         when_label = item.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-        lines.append(f"• {item.text}\n  Когда: {when_label} (МСК)")
+        rec = " 🔄" if item.recurrence else ""
+        lines.append(f"• {item.text}{rec}\n  Когда: {when_label} (МСК)")
         actions.append(
             Action(
                 id=f"reminder_snooze_menu:{item.id}",
@@ -2415,42 +2424,6 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 @_with_error_handling
-async def set_timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Backwards compat: /set_timezone shows current timezone and list to pick."""
-    if not await _guard_access(update, context):
-        return
-    memory_manager = _get_memory_manager(context)
-    user_id = update.effective_user.id if update.effective_user else 0
-    timezone_label = "Europe/Vilnius"
-    if memory_manager is not None and memory_manager.profile is not None:
-        profile = memory_manager.get_profile(user_id)
-        if profile is not None and profile.timezone:
-            timezone_label = profile.timezone
-    text = f"Текущий часовой пояс: {timezone_label}. Выбери новый:"
-    result = ok(
-        text,
-        intent="settings.timezone",
-        mode="local",
-        actions=_settings_timezone_actions(),
-    )
-    await send_result(update, context, result)
-
-
-async def _handle_timezone_set(
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    user_id: int,
-    timezone_value: str,
-) -> OrchestratorResult:
-    """Backwards compat: set timezone in profile from tests/legacy callers."""
-    memory_manager = _get_memory_manager(context)
-    if memory_manager is None or memory_manager.profile is None:
-        return refused("Профиль не настроен.", intent="settings.timezone", mode="local")
-    memory_manager.update_profile(user_id, {"timezone": timezone_value})
-    return ok("Часовой пояс обновлён.", intent="settings.timezone", mode="local")
-
-
-@_with_error_handling
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_access(update, context):
         return
@@ -2501,6 +2474,50 @@ async def profile_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = update.effective_chat.id if update.effective_chat else 0
     result = manager.start_profile_set(user_id=user_id, chat_id=chat_id)
     await send_result(update, context, result)
+
+
+@_with_error_handling
+async def set_timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard_access(update, context, bucket="ui"):
+        return
+    memory_manager = _get_memory_manager(context)
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    current_tz = "Europe/Vilnius"
+    if memory_manager and memory_manager.profile:
+        profile = memory_manager.get_profile(user_id)
+        if profile:
+            current_tz = profile.timezone
+    actions: list[Action] = []
+    for tz in TIMEZONE_OPTIONS:
+        actions.append(
+            Action(
+                id=f"timezone_set:{tz}",
+                label=tz,
+                payload={"op": "timezone_set", "timezone": tz},
+            )
+        )
+    text = f"Текущий часовой пояс: {current_tz}.\nВыбери новый:"
+    result = ok(text, intent="command.set_timezone", mode="local", actions=actions)
+    await send_result(update, context, result)
+
+
+async def _handle_timezone_set(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    timezone_value: str,
+) -> OrchestratorResult:
+    profile_store = _get_profile_store(context)
+    if profile_store is None:
+        return error("Профиль не настроен.", intent="timezone.set", mode="local")
+    profile_store.update(user_id, {"timezone": timezone_value})
+    return ok(
+        f"Часовой пояс установлен: {timezone_value}.",
+        intent="timezone.set",
+        mode="local",
+        actions=[menu.menu_action()],
+    )
 
 
 @_with_error_handling
@@ -3089,24 +3106,24 @@ def _parse_static_callback(data: str) -> tuple[str, dict[str, object], str] | No
         elif rest and rest[0]:
             payload["wizard_id"] = rest[0]
         return op, payload, f"callback.wiz.{action}"
-    if domain == "REM":
-        if action == "SNOOZE" and len(rest) >= 2:
-            try:
-                minutes = int(rest[0])
-            except ValueError:
-                return None
-            rid = rest[1]
-            if not rid:
-                return None
-            return "reminder_snooze", {"reminder_id": rid, "minutes": minutes}, "callback.reminder_snooze"
-        if action == "SNOOZE" and rest and rest[0] == "M" and len(rest) >= 2:
-            return "reminder_snooze_menu", {"reminder_id": rest[1]}, "callback.reminder_snooze_menu"
-        if action == "SHOW" and rest:
-            return "reminder_show_details", {"reminder_id": rest[0]}, "callback.reminder_show"
-        if action == "REPEAT" and rest:
-            return "reminder_repeat_menu", {"reminder_id": rest[0]}, "callback.reminder_repeat"
+    if domain == "TZ" and action.isdigit():
+        idx = int(action)
+        if 0 <= idx < len(TIMEZONE_OPTIONS):
+            return "timezone_set", {"timezone": TIMEZONE_OPTIONS[idx]}, "callback.timezone_set"
+    if domain == "REM" and rest:
+        if action == "SNOOZE" and len(rest) >= 2 and rest[0].isdigit():
+            minutes_val = int(rest[0])
+            rid_val = rest[1]
+            if 1 <= minutes_val <= 60 and isinstance(rid_val, str) and len(rid_val) <= 16:
+                return "reminder_snooze_now", {"reminder_id": rid_val, "minutes": minutes_val}, "callback.reminder_snooze_now"
+        if action == "RESCHEDULE" and rest:
+            rid_val = rest[0]
+            if isinstance(rid_val, str) and len(rid_val) <= 16:
+                return "reminder_reschedule", {"reminder_id": rid_val}, "callback.reminder_reschedule"
         if action == "DEL" and rest:
-            return "reminder_delete_confirm", {"reminder_id": rest[0]}, "callback.reminder_delete"
+            rid_val = rest[0]
+            if isinstance(rid_val, str) and len(rid_val) <= 16:
+                return "reminder.delete_confirm", {"reminder_id": rid_val}, "callback.reminder_delete"
     return None
 
 
@@ -3222,15 +3239,11 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     normalized_intent = _normalize_callback_intent(stored.intent)
     LOGGER.info("Callback dispatch: action_id=%s intent=%s", action_id, normalized_intent)
     set_input_text(context, f"<callback:{normalized_intent}>")
-    op_val = stored.payload.get("op")
-    payload_out = dict(stored.payload)
-    if op_val == "reminder_snooze":
-        payload_out["snooze_base"] = "now"
     result = await _dispatch_action_payload(
         update,
         context,
-        op=op_val,
-        payload=payload_out,
+        op=stored.payload.get("op"),
+        payload=stored.payload,
         intent=normalized_intent,
     )
     if (
@@ -3292,6 +3305,15 @@ async def _dispatch_action_payload(
     if op_value == "menu_cancel":
         await _send_reply_keyboard_remove(update, context, text="Ок")
         return ok("Ок", intent="menu.cancel", mode="local")
+    if op_value == "timezone_set":
+        tz = payload.get("timezone")
+        if isinstance(tz, str) and tz in TIMEZONE_OPTIONS:
+            return await _handle_timezone_set(
+                context,
+                user_id=user_id,
+                timezone_value=tz,
+            )
+        return refused("Некорректный часовой пояс.", intent="timezone.set", mode="local")
     if op_value == "trace_last":
         if _is_group_chat(update):
             return refused("Команда /trace недоступна в группах.", intent="command.trace", mode="local")
@@ -3924,6 +3946,24 @@ async def _dispatch_action_payload(
             reminder_id=reminder_id,
             base_trigger_at=base_trigger_at if isinstance(base_trigger_at, str) else None,
         )
+    if op_value == "reminder_snooze_now":
+        reminder_id = payload.get("reminder_id") or payload.get("id")
+        minutes = payload.get("minutes", 10)
+        if not isinstance(reminder_id, str) or not reminder_id:
+            return error(
+                "Некорректные данные действия.",
+                intent="ui.action",
+                mode="local",
+                debug={"reason": "invalid_reminder_id"},
+            )
+        minutes_value = minutes if isinstance(minutes, int) else 10
+        return await _handle_reminder_snooze_now(
+            context,
+            user_id=user_id,
+            chat_id=chat_id,
+            reminder_id=reminder_id,
+            minutes=minutes_value,
+        )
     if op_value == "reminder_snooze":
         reminder_id = payload.get("reminder_id") or payload.get("id")
         minutes = payload.get("minutes", 10)
@@ -3937,14 +3977,12 @@ async def _dispatch_action_payload(
             )
         minutes_value = minutes if isinstance(minutes, int) else 10
         base_value = base_trigger_at if isinstance(base_trigger_at, str) else None
-        snooze_from_now = payload.get("snooze_base") == "now"
         return await _handle_reminder_snooze(
             context,
             user_id=user_id,
             reminder_id=reminder_id,
             minutes=minutes_value,
             base_trigger_at=base_value,
-            from_now=snooze_from_now,
         )
     if op_value == "reminder_snooze_tomorrow":
         reminder_id = payload.get("reminder_id") or payload.get("id")
@@ -4172,49 +4210,6 @@ async def _handle_reminders_list(
     )
 
 
-async def _handle_reminder_snooze_now(
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    user_id: int,
-    chat_id: int,
-    reminder_id: str,
-    minutes: int,
-) -> OrchestratorResult:
-    """Backwards compat: snooze from 'now' (notification UI); new trigger = now + minutes."""
-    reminder = await calendar_store.get_reminder(reminder_id)
-    if reminder is None:
-        return refused(
-            f"Напоминание не найдено: {reminder_id}",
-            intent="utility_reminders.snooze",
-            mode="local",
-        )
-    offset = max(1, minutes)
-    now = datetime.now(tz=calendar_store.BOT_TZ)
-    updated = await calendar_store.apply_snooze(
-        reminder_id, minutes=offset, now=now, use_now=True
-    )
-    if updated is None:
-        return error(
-            "Не удалось отложить напоминание.",
-            intent="utility_reminders.snooze",
-            mode="local",
-        )
-    scheduler = _get_reminder_scheduler(context)
-    settings = _get_settings(context)
-    if scheduler and settings is not None and getattr(settings, "reminders_enabled", True):
-        try:
-            await scheduler.schedule_reminder(updated)
-        except Exception:
-            LOGGER.exception("Failed to reschedule reminder: reminder_id=%s", reminder_id)
-    when_label = updated.trigger_at.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
-    return ok(
-        f"Ok. Напоминание отложено на {when_label}.",
-        intent="utility_reminders.snooze",
-        mode="local",
-        actions=_reminder_post_action_actions(),
-    )
-
-
 async def _handle_reminder_snooze(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -4222,7 +4217,6 @@ async def _handle_reminder_snooze(
     reminder_id: str,
     minutes: int,
     base_trigger_at: str | None = None,
-    from_now: bool = False,
 ) -> OrchestratorResult:
     reminder = await calendar_store.get_reminder(reminder_id)
     if reminder is None:
@@ -4232,18 +4226,8 @@ async def _handle_reminder_snooze(
             mode="local",
         )
     offset = max(1, minutes)
-    now = datetime.now(tz=calendar_store.BOT_TZ)
-    if from_now:
-        base_dt = None
-        use_now = True
-    else:
-        base_dt = _parse_base_trigger_at(base_trigger_at)
-        if base_dt is None:
-            base_dt = max(now, reminder.trigger_at.astimezone(calendar_store.BOT_TZ))
-        use_now = False
-    updated = await calendar_store.apply_snooze(
-        reminder_id, minutes=offset, now=now, base_trigger_at=base_dt, use_now=use_now
-    )
+    base_dt = _parse_base_trigger_at(base_trigger_at)
+    updated = await calendar_store.apply_snooze(reminder_id, minutes=offset, now=datetime.now(tz=calendar_store.BOT_TZ), base_trigger_at=base_dt)
     if updated is None:
         return error(
             "Не удалось отложить напоминание (возможно, уже отключено).",
@@ -4276,6 +4260,24 @@ async def _handle_reminder_snooze(
         mode="local",
         actions=_reminder_post_action_actions(),
         debug={"refs": {"reminder_id": reminder_id}},
+    )
+
+
+async def _handle_reminder_snooze_now(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    chat_id: int,
+    reminder_id: str,
+    minutes: int,
+) -> OrchestratorResult:
+    """Snooze from now (current time), not from original trigger."""
+    return await _handle_reminder_snooze(
+        context,
+        user_id=user_id,
+        reminder_id=reminder_id,
+        minutes=minutes,
+        base_trigger_at=None,
     )
 
 
@@ -5391,79 +5393,27 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         file_type, extension = detected
         file_id = message.document.file_id
-        file_size = getattr(message.document, "file_size", None)
     elif message.photo:
         photo = message.photo[-1]
         file_id = photo.file_id
         file_type = "image"
         extension = ".jpg"
-        file_size = getattr(photo, "file_size", None)
     else:
         return
-    if file_size is not None:
-        if file_type in ("pdf", "docx") and file_size > settings.file_max_bytes_pdf_docx:
-            await send_result(
-                update,
-                context,
-                refused(
-                    f"Файл слишком большой (макс. {settings.file_max_bytes_pdf_docx // 1_000_000} МБ).",
-                    intent="document.upload",
-                    mode="local",
-                ),
-            )
-            return
-        if file_type == "image" and file_size > settings.file_max_bytes_img:
-            await send_result(
-                update,
-                context,
-                refused(
-                    f"Изображение слишком большое (макс. {settings.file_max_bytes_img // 1_000_000} МБ).",
-                    intent="document.upload",
-                    mode="local",
-                ),
-            )
-            return
     user_dir = settings.uploads_path / str(user_id)
+    user_dir.mkdir(parents=True, exist_ok=True)
     file_path = user_dir / f"{file_id}{extension}"
-    try:
-        user_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        await send_result(
-            update,
-            context,
-            refused(
-                "Не удалось создать каталог для файлов. Проверьте доступ к хранилищу.",
-                intent="document.upload",
-                mode="local",
-            ),
-        )
-        return
-    try:
-        file_obj = await context.bot.get_file(file_id)
-        await file_obj.download_to_drive(custom_path=str(file_path))
-    except OSError:
-        await send_result(
-            update,
-            context,
-            refused(
-                "Не удалось сохранить файл на диск. Проверьте место и права.",
-                intent="document.upload",
-                mode="local",
-            ),
-        )
-        return
-    extractor = FileTextExtractor(
-        ocr_enabled=settings.ocr_enabled,
-        tesseract_lang=settings.tesseract_lang,
-    )
+    file_obj = await context.bot.get_file(file_id)
+    await file_obj.download_to_drive(custom_path=str(file_path))
+    extractor = FileTextExtractor(ocr_enabled=settings.ocr_enabled)
     try:
         extracted = extractor.extract(path=file_path, file_type=file_type)
     except OCRNotAvailableError:
         await send_result(
             update,
             context,
-            refused(
-                "OCR недоступен (tesseract не установлен). PDF и DOCX работают без OCR.",
+            error(
+                "OCR недоступен. Установите tesseract или отключите OCR.",
                 intent="document.ocr_missing",
                 mode="local",
             ),
@@ -5484,21 +5434,9 @@ async def document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
     text_dir = settings.document_texts_path / str(user_id)
+    text_dir.mkdir(parents=True, exist_ok=True)
     text_path = text_dir / f"{file_id}.txt"
-    try:
-        text_dir.mkdir(parents=True, exist_ok=True)
-        text_path.write_text(extracted.text, encoding="utf-8")
-    except OSError:
-        await send_result(
-            update,
-            context,
-            refused(
-                "Не удалось сохранить текст документа. Проверьте доступ к хранилищу.",
-                intent="document.upload",
-                mode="local",
-            ),
-        )
-        return
+    text_path.write_text(extracted.text, encoding="utf-8")
     session = document_store.create_session(
         user_id=user_id,
         chat_id=chat_id,

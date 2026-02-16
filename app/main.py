@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import sys
 import time
 import warnings
@@ -15,7 +14,7 @@ from telegram.warnings import PTBUserWarning
 from app.bot import actions, handlers, wizard
 from app.core import calendar_store
 from app.core.orchestrator import Orchestrator, load_orchestrator_config
-from app.core.reminders import ReminderScheduler
+from app.core.reminders import ReminderScheduler, run_daily_digest, _get_digest_time
 from app.core.dialog_memory import DialogMemory
 from app.core.memory_manager import MemoryManager, UserActionsLog, UserProfileMemory
 from app.infra.access import AccessController
@@ -65,6 +64,7 @@ def _register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("memory", handlers.memory_command))
     application.add_handler(CommandHandler("profile", handlers.profile_command))
     application.add_handler(CommandHandler("profile_set", handlers.profile_set_command))
+    application.add_handler(CommandHandler("set_timezone", handlers.set_timezone_command))
     application.add_handler(CommandHandler("remember", handlers.remember_command))
     application.add_handler(CommandHandler("forget", handlers.forget_command))
     application.add_handler(CommandHandler("history", handlers.history_command))
@@ -203,23 +203,10 @@ def main() -> None:
         max_turns=settings.context_max_turns,
     )
     asyncio.run(dialog_memory.load())
-    _startup_log = logging.getLogger(__name__)
-    for name, path in (
-        ("uploads", settings.uploads_path),
-        ("document_texts", settings.document_texts_path),
-        ("document_sessions", settings.document_sessions_path.parent),
-    ):
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            _startup_log.warning("File storage mkdir skipped for %s (%s): %s", name, path, e)
+    settings.uploads_path.mkdir(parents=True, exist_ok=True)
+    settings.document_texts_path.mkdir(parents=True, exist_ok=True)
     document_store = DocumentSessionStore(settings.document_sessions_path)
     document_store.load()
-    document_store.cleanup_expired(
-        settings.doc_session_ttl_seconds,
-        delete_text_files=True,
-        delete_upload_files=True,
-    )
     profile_store = UserProfileStore(settings.db_path)
     actions_log_store = ActionsLogStore(settings.db_path)
     memory_manager = MemoryManager(
@@ -307,6 +294,22 @@ def main() -> None:
             logging.getLogger(__name__).info("Reminders disabled by config")
             return
         await reminder_scheduler.restore_all()
+        if app.job_queue:
+            from datetime import time as dt_time
+
+            async def _digest_job(ctx) -> None:
+                await run_daily_digest(ctx.application)
+
+            digest_time = _get_digest_time()
+            tz_time = dt_time(digest_time.hour, digest_time.minute, tzinfo=calendar_store.BOT_TZ)
+            app.job_queue.run_daily(
+                _digest_job,
+                time=tz_time,
+                name="daily_digest",
+            )
+            logging.getLogger(__name__).info(
+                "Daily digest job scheduled at %02d:%02d", digest_time.hour, digest_time.minute
+            )
 
     application.post_init = _restore_reminders
 
@@ -314,15 +317,14 @@ def main() -> None:
     application.add_error_handler(handlers.error_handler)
 
     logging.getLogger(__name__).info("Bot started")
-    dry_run = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on")
-    if dry_run:
-        logging.getLogger(__name__).info("DRY_RUN mode, skipping Telegram polling")
-        return
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-    application.run_polling()
+    if settings.dry_run:
+        logging.getLogger(__name__).info("DRY_RUN mode: skipping telegram polling")
+    else:
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+        application.run_polling()
 
 
 if __name__ == "__main__":

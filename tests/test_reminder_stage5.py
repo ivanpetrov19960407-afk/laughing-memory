@@ -1,13 +1,37 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from app.bot import actions, handlers, wizard
 from app.core import calendar_store
+from app.core.reminders import ReminderScheduler
 from app.core.result import Action
 from app.storage.wizard_store import WizardStore
+
+
+@dataclass
+class DummyJob:
+    name: str
+    removed: bool = False
+
+    def schedule_removal(self) -> None:
+        self.removed = True
+
+
+class DummyJobQueue:
+    def __init__(self) -> None:
+        self.jobs: dict[str, list[DummyJob]] = {}
+
+    def run_once(self, callback, when, name: str, data: dict) -> DummyJob:
+        job = DummyJob(name=name)
+        self.jobs.setdefault(name, []).append(job)
+        return job
+
+    def get_jobs_by_name(self, name: str) -> list[DummyJob]:
+        return [j for j in (self.jobs.get(name) or []) if not j.removed]
 
 
 class DummyContext:
@@ -66,7 +90,6 @@ def test_reminder_snooze_shifts_trigger(tmp_path, monkeypatch) -> None:
     assert result.status == "ok"
     updated = asyncio.run(calendar_store.get_reminder(reminder.id))
     assert updated is not None
-    # Snooze от trigger_at: новый trigger = reminder.trigger_at + 30 мин (exact delta)
     assert updated.trigger_at == reminder.trigger_at + timedelta(minutes=30)
 
 
@@ -179,45 +202,28 @@ def test_recurring_reminder_creates_next_trigger(tmp_path, monkeypatch) -> None:
     assert next_reminder.trigger_at == datetime(2026, 2, 6, 10, 0, tzinfo=calendar_store.BOT_TZ)
 
 
-def test_static_callback_rem_snooze_valid_and_safe() -> None:
-    """Static callback REM:SNOOZE:5:rid is valid and safe (no user input in payload)."""
-    parsed = handlers._parse_static_callback("cb:REM:SNOOZE:5:abc12")
-    assert parsed is not None
-    op, payload, intent = parsed
-    assert op == "reminder_snooze"
-    assert payload.get("reminder_id") == "abc12"
-    assert payload.get("minutes") == 5
+def test_callback_snooze_direct(tmp_path, monkeypatch) -> None:
+    """Inline button snooze +10 changes trigger and reschedules."""
+    captured: dict[str, object] = {}
+    scheduled: dict[str, object] = {}
 
+    class DummyScheduler:
+        async def schedule_reminder(self, reminder) -> None:
+            scheduled["reminder_id"] = reminder.id
+            scheduled["trigger_at"] = reminder.trigger_at
 
-def test_reminder_followup_three_buttons(tmp_path, monkeypatch) -> None:
-    """After creating a reminder, follow-up message has exactly 3 safe follow-up buttons."""
-    from app.core.reminders import _build_reminder_actions
+    async def fake_send_result(update, context, result, reply_markup=None):
+        captured["result"] = result
+
+    async def fake_guard_access(update, context, bucket="default"):
+        return True
+
+    async def fake_answer():
+        return None
 
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-    reminder = asyncio.run(
-        calendar_store.add_reminder(
-            trigger_at=datetime.now(tz=calendar_store.BOT_TZ) + timedelta(hours=1),
-            text="Test",
-            chat_id=10,
-            user_id=1,
-        )
-    )
-    actions_list = _build_reminder_actions(reminder)
-    assert len(actions_list) == 3
-    for a in actions_list:
-        assert a.payload.get("reminder_id") == reminder.id
-        assert "op" in a.payload
-        assert a.id and a.label
-    labels = [a.label for a in actions_list]
-    assert any("детали" in l or "Детали" in l for l in labels)
-    assert any("Отложить" in l or "Повторить" in l for l in labels)
 
-
-def test_snooze_preset_static_callback_creates_new_trigger(tmp_path, monkeypatch) -> None:
-    """Snooze preset (e.g. REM:SNOOZE:5) creates new trigger time; returns OrchestratorResult."""
-    calendar_path = tmp_path / "calendar.json"
-    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
     now = datetime.now(tz=calendar_store.BOT_TZ)
     reminder = asyncio.run(
         calendar_store.add_reminder(
@@ -227,67 +233,103 @@ def test_snooze_preset_static_callback_creates_new_trigger(tmp_path, monkeypatch
             user_id=1,
         )
     )
-    async def noop_schedule(_):
-        pass
 
+    update = DummyUpdate()
     context = DummyContext()
-    context.application.bot_data["reminder_scheduler"] = SimpleNamespace(schedule_reminder=noop_schedule)
-    result = asyncio.run(
-        handlers._handle_reminder_snooze(
-            context,
-            user_id=1,
-            reminder_id=reminder.id,
-            minutes=5,
-            base_trigger_at=None,
-        )
+    context.application.bot_data["reminder_scheduler"] = DummyScheduler()
+    context.application.bot_data["settings"] = SimpleNamespace(reminders_enabled=True)
+    store = context.application.bot_data["action_store"]
+    action = Action(
+        id="reminder_snooze:10",
+        label="+10",
+        payload={
+            "op": "reminder_snooze",
+            "reminder_id": reminder.id,
+            "minutes": 10,
+            "base_trigger_at": reminder.trigger_at.isoformat(),
+        },
     )
+    action_id = store.store_action(action=action, user_id=1, chat_id=10)
+    update.callback_query = SimpleNamespace(data=f"a:{action_id}", answer=fake_answer)
+
+    monkeypatch.setattr(handlers, "send_result", fake_send_result)
+    monkeypatch.setattr(handlers, "_guard_access", fake_guard_access)
+
+    asyncio.run(handlers.action_callback(update, context))
+
+    result = captured["result"]
     assert result.status == "ok"
     updated = asyncio.run(calendar_store.get_reminder(reminder.id))
     assert updated is not None
-    assert updated.trigger_at > reminder.trigger_at
+    assert updated.trigger_at == reminder.trigger_at + timedelta(minutes=10)
+    assert scheduled.get("reminder_id") == reminder.id
 
 
-def test_snooze_preset_repeated_press_does_not_break_schedule(tmp_path, monkeypatch) -> None:
-    """Pressing snooze preset twice still yields correct trigger (no double shift)."""
-    async def noop_schedule(_):
-        pass
+def test_digest_not_sent_twice_same_day(tmp_path, monkeypatch) -> None:
+    """Digest is formed and not sent again the same day."""
+    from app.core.reminders import run_daily_digest
 
     calendar_path = tmp_path / "calendar.json"
     monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
-    now = datetime.now(tz=calendar_store.BOT_TZ)
-    base_trigger = now + timedelta(minutes=30)
-    reminder = asyncio.run(
+
+    asyncio.run(
         calendar_store.add_reminder(
-            trigger_at=base_trigger,
+            trigger_at=datetime.now(tz=calendar_store.BOT_TZ) + timedelta(hours=1),
             text="Ping",
             chat_id=10,
             user_id=1,
         )
     )
-    context = DummyContext()
-    context.application.bot_data["reminder_scheduler"] = SimpleNamespace(schedule_reminder=noop_schedule)
-    result1 = asyncio.run(
-        handlers._handle_reminder_snooze(
-            context,
+
+    sent: list[int] = []
+
+    class DummyBot:
+        async def send_message(self, chat_id, text, **kwargs):
+            sent.append(chat_id)
+
+    app = SimpleNamespace(bot=DummyBot())
+
+    asyncio.run(run_daily_digest(app))
+    assert len(sent) == 1
+    today = datetime.now(tz=calendar_store.BOT_TZ).strftime("%Y%m%d")
+    last = asyncio.run(calendar_store.get_last_digest_sent(1))
+    assert last == today
+
+    asyncio.run(run_daily_digest(app))
+    assert len(sent) == 1, "Digest must not be sent twice same day"
+
+
+def test_restore_recurring_no_duplicates(tmp_path, monkeypatch) -> None:
+    """Restore after recurring fire does not create duplicate jobs."""
+    calendar_path = tmp_path / "calendar.json"
+    monkeypatch.setenv("CALENDAR_PATH", str(calendar_path))
+
+    reminder = asyncio.run(
+        calendar_store.add_reminder(
+            trigger_at=datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.BOT_TZ),
+            text="Daily",
+            chat_id=10,
             user_id=1,
-            reminder_id=reminder.id,
-            minutes=15,
-            base_trigger_at=reminder.trigger_at.isoformat(),
+            recurrence={"freq": "daily"},
         )
     )
-    assert result1.status == "ok"
-    r1 = asyncio.run(calendar_store.get_reminder(reminder.id))
-    assert r1 is not None
-    result2 = asyncio.run(
-        handlers._handle_reminder_snooze(
-            context,
-            user_id=1,
-            reminder_id=reminder.id,
-            minutes=15,
-            base_trigger_at=r1.trigger_at.isoformat(),
+    next_reminder = asyncio.run(
+        calendar_store.mark_reminder_sent(
+            reminder.id, datetime(2026, 2, 5, 10, 0, tzinfo=calendar_store.BOT_TZ)
         )
     )
-    assert result2.status == "ok"
-    r2 = asyncio.run(calendar_store.get_reminder(reminder.id))
-    assert r2 is not None
-    assert r2.trigger_at == r1.trigger_at + timedelta(minutes=15)
+    assert next_reminder is not None
+
+    job_queue = DummyJobQueue()
+    app = SimpleNamespace(job_queue=job_queue, bot=SimpleNamespace())
+    scheduler = ReminderScheduler(application=app)
+    now = datetime(2026, 2, 5, 11, 0, tzinfo=calendar_store.BOT_TZ)
+
+    asyncio.run(scheduler.restore_all(now=now))
+    job_name = scheduler._job_name(next_reminder.id)
+    count_after_first = len([j for j in job_queue.jobs.get(job_name, []) if not j.removed])
+    assert count_after_first == 1
+
+    asyncio.run(scheduler.restore_all(now=now))
+    count_after_second = len([j for j in job_queue.jobs.get(job_name, []) if not j.removed])
+    assert count_after_second == 1, "Restore must be idempotent, no duplicate jobs"
