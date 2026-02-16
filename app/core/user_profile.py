@@ -8,15 +8,12 @@ from typing import Any
 
 DEFAULT_LANGUAGE = "ru"
 DEFAULT_TIMEZONE = "Europe/Vilnius"
-DEFAULT_VERBOSITY = "normal"
+DEFAULT_VERBOSITY = "short"
 DEFAULT_FACTS_MODE = False
-DEFAULT_CONTEXT_DEFAULT = False
-DEFAULT_DATE_FORMAT = "dd.mm.yyyy"
-DEFAULT_ACTIONS_LOG_ENABLED = True
 DEFAULT_REMINDER_OFFSET_MINUTES: int | None = None
 DEFAULT_REMINDERS_ENABLED = False
 DEFAULT_NOTES_LIMIT = 20
-DEFAULT_DAILY_DIGEST_ENABLED = False
+DEFAULT_DIGEST_ENABLED = False
 
 
 @dataclass(frozen=True)
@@ -74,35 +71,33 @@ class UserProfile:
     timezone: str
     verbosity: str
     facts_mode_default: bool
-    context_default: bool
-    date_format: str
-    actions_log_enabled: bool
     default_reminders: ReminderDefaults
-    daily_digest_enabled: bool
-    daily_digest_last_sent_date: str | None
     style: str | None
     notes: tuple[UserNote, ...]
     created_at: str | None
     updated_at: str | None
+    digest_enabled: bool = False
+    digest_chat_id: int | None = None
+    last_digest_sent_date: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "user_id": self.user_id,
             "language": self.language,
             "timezone": self.timezone,
             "verbosity": self.verbosity,
             "facts_mode_default": self.facts_mode_default,
-            "context_default": self.context_default,
-            "date_format": self.date_format,
-            "actions_log_enabled": self.actions_log_enabled,
             "default_reminders": self.default_reminders.to_dict(),
-            "daily_digest_enabled": self.daily_digest_enabled,
-            "daily_digest_last_sent_date": self.daily_digest_last_sent_date,
             "style": self.style,
             "notes": [note.to_dict() for note in self.notes],
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+        if self.digest_enabled or self.digest_chat_id is not None or self.last_digest_sent_date is not None:
+            out["digest_enabled"] = self.digest_enabled
+            out["digest_chat_id"] = self.digest_chat_id
+            out["last_digest_sent_date"] = self.last_digest_sent_date
+        return out
 
     @staticmethod
     def from_dict(
@@ -119,12 +114,7 @@ class UserProfile:
         timezone_value = payload.get("timezone")
         verbosity = payload.get("verbosity")
         facts_mode_default = payload.get("facts_mode_default")
-        context_default = payload.get("context_default")
-        date_format = payload.get("date_format")
-        actions_log_enabled = payload.get("actions_log_enabled")
         style = payload.get("style")
-        digest_enabled = payload.get("daily_digest_enabled")
-        digest_last_sent = payload.get("daily_digest_last_sent_date")
         created_payload = payload.get("created_at")
         updated_payload = payload.get("updated_at")
         notes_payload = payload.get("notes")
@@ -144,24 +134,23 @@ class UserProfile:
             normalized_user_id = 0
         created_value = created_payload if isinstance(created_payload, str) and created_payload else created_at
         updated_value = updated_payload if isinstance(updated_payload, str) and updated_payload else updated_at
+        digest_enabled = payload.get("digest_enabled")
+        digest_chat_id = payload.get("digest_chat_id")
+        last_digest_sent_date = payload.get("last_digest_sent_date")
         return UserProfile(
             user_id=normalized_user_id,
             language=language if isinstance(language, str) and language else DEFAULT_LANGUAGE,
             timezone=timezone_value if isinstance(timezone_value, str) and timezone_value else DEFAULT_TIMEZONE,
             verbosity=verbosity if isinstance(verbosity, str) and verbosity else DEFAULT_VERBOSITY,
             facts_mode_default=bool(DEFAULT_FACTS_MODE if facts_mode_default is None else facts_mode_default),
-            context_default=bool(DEFAULT_CONTEXT_DEFAULT if context_default is None else context_default),
-            date_format=date_format if isinstance(date_format, str) and date_format else DEFAULT_DATE_FORMAT,
-            actions_log_enabled=bool(DEFAULT_ACTIONS_LOG_ENABLED if actions_log_enabled is None else actions_log_enabled),
             default_reminders=ReminderDefaults.from_dict(payload.get("default_reminders")),
-            daily_digest_enabled=bool(DEFAULT_DAILY_DIGEST_ENABLED if digest_enabled is None else digest_enabled),
-            daily_digest_last_sent_date=digest_last_sent
-            if isinstance(digest_last_sent, str) and digest_last_sent.strip()
-            else None,
             style=style if isinstance(style, str) and style else None,
             notes=tuple(notes),
             created_at=created_value,
             updated_at=updated_value,
+            digest_enabled=bool(DEFAULT_DIGEST_ENABLED if digest_enabled is None else digest_enabled),
+            digest_chat_id=_coerce_digest_chat_id(digest_chat_id, None),
+            last_digest_sent_date=last_digest_sent_date if isinstance(last_digest_sent_date, str) and last_digest_sent_date else None,
         )
 
 
@@ -179,16 +168,14 @@ def default_profile(
         timezone=DEFAULT_TIMEZONE,
         verbosity=DEFAULT_VERBOSITY,
         facts_mode_default=DEFAULT_FACTS_MODE,
-        context_default=DEFAULT_CONTEXT_DEFAULT,
-        date_format=DEFAULT_DATE_FORMAT,
-        actions_log_enabled=DEFAULT_ACTIONS_LOG_ENABLED,
         default_reminders=default_reminder_defaults(),
-        daily_digest_enabled=DEFAULT_DAILY_DIGEST_ENABLED,
-        daily_digest_last_sent_date=None,
         style=None,
         notes=tuple(),
         created_at=created_at or timestamp,
         updated_at=updated_at or timestamp,
+        digest_enabled=DEFAULT_DIGEST_ENABLED,
+        digest_chat_id=None,
+        last_digest_sent_date=None,
     )
 
 
@@ -203,13 +190,11 @@ def apply_profile_patch(profile: UserProfile, patch: dict[str, Any]) -> UserProf
     timezone_value = patch.get("timezone")
     verbosity = patch.get("verbosity")
     facts_mode_default = patch.get("facts_mode_default")
-    context_default = patch.get("context_default")
-    date_format = patch.get("date_format")
-    actions_log_enabled = patch.get("actions_log_enabled")
     style = patch.get("style")
-    digest_enabled = patch.get("daily_digest_enabled")
-    digest_last_sent = patch.get("daily_digest_last_sent_date")
     defaults_patch = patch.get("default_reminders")
+    digest_enabled = patch.get("digest_enabled")
+    digest_chat_id = patch.get("digest_chat_id")
+    last_digest_sent_date = patch.get("last_digest_sent_date")
     updated_defaults = profile.default_reminders
     if isinstance(defaults_patch, dict):
         enabled = defaults_patch.get("enabled")
@@ -230,15 +215,11 @@ def apply_profile_patch(profile: UserProfile, patch: dict[str, Any]) -> UserProf
         else profile.timezone,
         verbosity=verbosity.strip() if isinstance(verbosity, str) and verbosity.strip() else profile.verbosity,
         facts_mode_default=bool(profile.facts_mode_default if facts_mode_default is None else facts_mode_default),
-        context_default=bool(profile.context_default if context_default is None else context_default),
-        date_format=date_format.strip() if isinstance(date_format, str) and date_format.strip() else profile.date_format,
-        actions_log_enabled=bool(profile.actions_log_enabled if actions_log_enabled is None else actions_log_enabled),
         default_reminders=updated_defaults,
-        daily_digest_enabled=bool(profile.daily_digest_enabled if digest_enabled is None else digest_enabled),
-        daily_digest_last_sent_date=digest_last_sent.strip()
-        if isinstance(digest_last_sent, str) and digest_last_sent.strip()
-        else (None if digest_last_sent is None else profile.daily_digest_last_sent_date),
         style=style.strip() if isinstance(style, str) and style.strip() else profile.style,
+        digest_enabled=bool(profile.digest_enabled if digest_enabled is None else digest_enabled),
+        digest_chat_id=_coerce_digest_chat_id(digest_chat_id, profile.digest_chat_id),
+        last_digest_sent_date=last_digest_sent_date if isinstance(last_digest_sent_date, str) and last_digest_sent_date else (profile.last_digest_sent_date if last_digest_sent_date is None else None),
     )
     return updated
 
@@ -292,6 +273,16 @@ def _coerce_int(value: object, fallback: int, *, min_value: int | None = None) -
     if min_value is not None and parsed < min_value:
         return fallback
     return parsed
+
+
+def _coerce_digest_chat_id(value: object, fallback: int | None) -> int | None:
+    if value is None:
+        return fallback
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value)
+    return None
 
 
 def _coerce_optional_int(

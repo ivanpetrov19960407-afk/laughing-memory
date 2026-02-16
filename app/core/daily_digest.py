@@ -1,82 +1,47 @@
+"""Daily digest: once per day send a summary of today's reminders to users who have digest enabled."""
+
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from datetime import datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime
+
+from telegram.ext import ContextTypes
 
 from app.core import calendar_store
+from app.infra.messaging import safe_send_bot_text
 
 LOGGER = logging.getLogger(__name__)
 
-DIGEST_TZ = ZoneInfo("Europe/Vilnius")
 
-
-@dataclass(frozen=True)
-class DigestData:
-    date_key: str
-    events: list[calendar_store.CalendarItem]
-    reminders: list[calendar_store.ReminderItem]
-
-
-def _date_key(now: datetime, tz: ZoneInfo) -> str:
-    local = now.astimezone(tz)
-    return local.date().isoformat()
-
-
-def _day_bounds(now: datetime, tz: ZoneInfo) -> tuple[datetime, datetime]:
-    local = now.astimezone(tz)
-    start = datetime.combine(local.date(), time.min).replace(tzinfo=tz)
-    end = start + timedelta(days=1)
-    return start, end
-
-
-async def collect_daily_digest(
-    *,
-    user_id: int,
-    now: datetime | None = None,
-    tz: ZoneInfo = DIGEST_TZ,
-    max_events: int = 8,
-    max_reminders: int = 8,
-) -> DigestData:
-    current = now or datetime.now(tz=tz)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=tz)
-    start, end = _day_bounds(current, tz)
-    date_key = _date_key(current, tz)
-
-    events_all = await calendar_store.list_items(start=start, end=end)
-    events = [item for item in events_all if item.user_id == user_id]
-    events.sort(key=lambda item: item.dt)
-    if max_events:
-        events = events[: max_events]
-
-    reminders_all = await calendar_store.list_reminders(current, limit=None, include_disabled=False)
-    reminders = [
-        item
-        for item in reminders_all
-        if item.user_id == user_id and start <= item.trigger_at.astimezone(tz) < end
-    ]
-    reminders.sort(key=lambda item: item.trigger_at)
-    if max_reminders:
-        reminders = reminders[: max_reminders]
-
-    return DigestData(date_key=date_key, events=events, reminders=reminders)
-
-
-def render_daily_digest(data: DigestData, *, tz: ZoneInfo = DIGEST_TZ) -> str | None:
-    if not data.events and not data.reminders:
-        return None
-    lines: list[str] = ["🗞 Утренний дайджест", f"Сегодня ({data.date_key}):"]
-    if data.events:
-        lines.append("🗓 События:")
-        for item in data.events:
-            when = item.dt.astimezone(tz).strftime("%H:%M")
-            lines.append(f"- {when} — {item.title}")
-    if data.reminders:
-        lines.append("⏰ Напоминания:")
-        for item in data.reminders:
-            when = item.trigger_at.astimezone(tz).strftime("%H:%M")
-            lines.append(f"- {when} — {item.text}")
-    return "\n".join(lines).strip()
-
+async def run_daily_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run once per day: for each user with digest_enabled, send today's reminders (if any)."""
+    application = context.application
+    profile_store = application.bot_data.get("profile_store")
+    if not profile_store:
+        LOGGER.warning("Daily digest skipped: profile_store not in bot_data")
+        return
+    bot = application.bot
+    tz = calendar_store.BOT_TZ
+    today = datetime.now(tz=tz).date()
+    today_str = today.isoformat()
+    for user_id in profile_store.get_all_user_ids():
+        try:
+            profile = profile_store.get(user_id)
+            if not profile.digest_enabled or profile.digest_chat_id is None:
+                continue
+            if profile.last_digest_sent_date == today_str:
+                continue
+            chat_id = profile.digest_chat_id
+            items = await calendar_store.list_reminders_for_day(user_id, chat_id, today, tz=tz)
+            if not items:
+                continue
+            lines = ["📬 Дайджест на сегодня:"]
+            for item in items:
+                when_label = item.trigger_at.astimezone(tz).strftime("%H:%M")
+                lines.append(f"• {when_label} — {item.text}")
+            text = "\n".join(lines)
+            await safe_send_bot_text(bot, chat_id, text)
+            profile_store.update(user_id, {"last_digest_sent_date": today_str})
+            LOGGER.info("Daily digest sent: user_id=%s chat_id=%s count=%s", user_id, chat_id, len(items))
+        except Exception:
+            LOGGER.exception("Daily digest failed for user_id=%s", user_id)
