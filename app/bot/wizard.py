@@ -1376,6 +1376,8 @@ def _reminder_recurrence_actions() -> list[Action]:
         Action(id="wizard.recurrence.none", label="Без повтора", payload={"op": "wizard_set_recurrence", "value": "none"}),
         Action(id="wizard.recurrence.daily", label="Ежедневно", payload={"op": "wizard_set_recurrence", "value": "daily"}),
         Action(id="wizard.recurrence.weekdays", label="По будням", payload={"op": "wizard_set_recurrence", "value": "weekdays"}),
+        Action(id="wizard.recurrence.weekly", label="Еженедельно", payload={"op": "wizard_set_recurrence", "value": "weekly:1"}),
+        Action(id="wizard.recurrence.monthly", label="Ежемесячно", payload={"op": "wizard_set_recurrence", "value": "monthly:1"}),
         *_step_actions(),
     ]
 

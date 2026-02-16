@@ -7,8 +7,9 @@ from datetime import datetime, timedelta
 
 from telegram.ext import Application, ContextTypes
 
-from app.core import calendar_store, reminders as reminders_module
+from app.core import calendar_store
 from app.bot.actions import ActionStore, build_inline_keyboard
+from app.core.result import Action
 from app.infra.messaging import safe_send_bot_text
 
 LOGGER = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ async def _process_due_reminders(application: Application) -> None:
         event_dt = event.dt if event else item.trigger_at
         message_time = event_dt.astimezone(calendar_store.BOT_TZ).strftime("%Y-%m-%d %H:%M")
         text = f"⏰ Напоминание: {item.text}\nКогда: {message_time} (МСК)"
-        actions = reminders_module.build_reminder_followup_actions(item)
+        actions = _build_reminder_actions(item)
         action_store = application.bot_data.get("action_store")
         reply_markup = None
         if isinstance(action_store, ActionStore):
@@ -130,3 +131,27 @@ async def post_shutdown(application: Application) -> None:
         LOGGER.info("Reminder scheduler task shutdown complete")
 
 
+def _build_reminder_actions(reminder: calendar_store.ReminderItem) -> list[Action]:
+    base_trigger = reminder.trigger_at.isoformat()
+    return [
+        Action(
+            id=f"reminder_snooze:{reminder.id}:10",
+            label="⏸ +10 мин",
+            payload={"op": "reminder_snooze", "reminder_id": reminder.id, "base_trigger_at": base_trigger, "minutes": 10},
+        ),
+        Action(
+            id=f"reminder_snooze:{reminder.id}:30",
+            label="⏸ +30 мин",
+            payload={"op": "reminder_snooze", "reminder_id": reminder.id, "base_trigger_at": base_trigger, "minutes": 30},
+        ),
+        Action(
+            id=f"reminder_reschedule:{reminder.id}",
+            label="✏ Перенести",
+            payload={"op": "reminder_reschedule", "reminder_id": reminder.id, "base_trigger_at": base_trigger},
+        ),
+        Action(
+            id="utility_reminders.delete",
+            label="🗑 Удалить",
+            payload={"op": "reminder.delete_confirm", "reminder_id": reminder.id},
+        ),
+    ]
